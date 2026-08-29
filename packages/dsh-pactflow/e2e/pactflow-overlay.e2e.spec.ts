@@ -7,7 +7,7 @@ import {
   type WebScaffold,
 } from '../../../../deepseek-harness-pactflow-p0/apps/web/tests/scaffold.ts'
 import { newEnglishPage } from '../../../../deepseek-harness-pactflow-p0/apps/web/tests/support.ts'
-import { PACTFLOW_EVENT_TYPES } from '../src/domain.ts'
+import { PACTFLOW_EVENT_TYPES_V0_1 } from '../src/domain.ts'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SEED_ID = 'pactflow-overlay-e2e'
@@ -22,7 +22,7 @@ function seedLog(): string {
       type: 'session', version: 0, id: '{{sessionId}}', createdAt, cwd: '{{cwd}}', agentPreset: 'pactflow',
     }),
     event(0, 'session/external-event-producer', {
-      producer: 'dsh-pactflow', version: '0.1.0', eventTypes: PACTFLOW_EVENT_TYPES,
+      producer: 'dsh-pactflow', version: '0.1.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_1,
     }),
     event(1, 'pactflow/project-initialized', {
       v: 1,

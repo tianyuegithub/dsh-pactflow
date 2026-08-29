@@ -28,6 +28,10 @@ type PactFlowLocaleKey =
   | 'needs'
   | 'dag'
   | 'runs'
+  | 'gitRemote'
+  | 'gitBaseline'
+  | 'gitBranch'
+  | 'gitCommit'
   | 'empty'
 
 const zh: Record<PactFlowLocaleKey, string> = {
@@ -42,6 +46,10 @@ const zh: Record<PactFlowLocaleKey, string> = {
   needs: '需求与阶段',
   dag: 'DAG 节点',
   runs: 'Worker 运行',
+  gitRemote: 'Git 远端',
+  gitBaseline: '基线分支',
+  gitBranch: '任务分支',
+  gitCommit: '提交',
   empty: '暂无数据',
 }
 
@@ -57,6 +65,10 @@ const en: Record<PactFlowLocaleKey, string> = {
   needs: 'Needs and phases',
   dag: 'DAG nodes',
   runs: 'Worker runs',
+  gitRemote: 'Git remote',
+  gitBaseline: 'Baseline branch',
+  gitBranch: 'Task branch',
+  gitCommit: 'Commit',
   empty: 'No data',
 }
 
@@ -220,10 +232,25 @@ function PactFlowProjectionTables({
       <section style={cardStyle}>
         <h2 style={sectionTitleStyle}>{t('project')}</h2>
         <p>{snapshot.project.project?.name ?? t('empty')}</p>
+        {snapshot.project.project?.git !== undefined && (
+          <dl>
+            <dt>{t('gitRemote')}</dt>
+            <dd>{snapshot.project.project.git.remote} · {snapshot.project.project.git.remoteUrl}</dd>
+            <dt>{t('gitBaseline')}</dt>
+            <dd>{snapshot.project.project.git.defaultBranch}</dd>
+          </dl>
+        )}
       </section>
       <ProjectionTable title={t('needs')} rows={needs.map(need => [need.id, need.title, need.phase, `r${need.revision}`])} empty={t('empty')} />
       <ProjectionTable title={t('dag')} rows={nodes.map(node => [node.id, node.title, node.state, node.dependencies.join(', ') || '—'])} empty={t('empty')} />
-      <ProjectionTable title={t('runs')} rows={runs.map(run => [run.id, run.provider, run.state, `attempt ${run.attempt}`])} empty={t('empty')} />
+      <ProjectionTable title={t('runs')} rows={runs.map(run => [
+        run.id,
+        run.provider,
+        run.state,
+        `attempt ${run.attempt}`,
+        run.git === undefined ? '—' : `${t('gitBranch')}: ${run.git.branch}`,
+        run.gitResult === undefined ? '—' : `${t('gitCommit')}: ${run.gitResult.commit.slice(0, 12)}`,
+      ])} empty={t('empty')} />
     </div>
   )
 }

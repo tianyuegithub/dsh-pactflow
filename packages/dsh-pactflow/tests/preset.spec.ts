@@ -30,6 +30,10 @@ describe('PactFlow packaged Agent Preset', () => {
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(PactFlowService)
+    ctx.provide('shell', { sandboxMode: undefined } as never)
+    ctx.provide('shellEnv', { collect: () => ({}) } as never)
+    ctx.provide('fs', { sandboxMode: undefined } as never)
+    ctx.provide('subprocess', {} as never)
     await ctx.plugin(AgentPresets, {
       default: 'pactflow',
       roots: [{ path: resolve('packages/dsh-pactflow/presets'), trust: 'user' }],
@@ -43,12 +47,20 @@ describe('PactFlow packaged Agent Preset', () => {
     })
     const names = ctx.tools.schemas(handle.agent).map(schema => schema.name).sort()
     expect(names).toEqual([
+      'bash',
+      'edit',
+      'glob',
+      'grep',
+      'pactflow_bind_git',
       'pactflow_create_need',
       'pactflow_create_node',
+      'pactflow_dispatch_git',
       'pactflow_dispatch_local',
       'pactflow_initialize',
       'pactflow_transition_need',
       'pactflow_view',
+      'read',
+      'write',
     ])
     expect(ctx.tools.schemas()).toEqual([])
     await handle.dispose()

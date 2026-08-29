@@ -1,13 +1,35 @@
-# First installable PactFlow preset composition. The product domain remains in
-# the process-global dsh-pactflow Host service; this standing Agent-plane mount
-# owns only the session persona for the technical acceptance milestone.
+# PactFlow's Agent-plane composition. Registries, executors, persistence,
+# credentials, sandbox policy, and Worker providers remain Host-owned.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
-      你正在零脉模式中工作。把需求、设计、计划、执行、评审、验证和收口保持为可追溯的结构化过程；在用户确认之前不越过人工门禁。
+    text: |-
+      You are operating in PactFlow mode. Keep requirements, design, planning, execution, review, verification, and closeout as a traceable structured process. Never cross a human review gate before approval.
+
+      The current working directory is {{cwd}}. When you are delegated as a Worker, perform only the bounded task in that directory, run relevant verification, and commit the completed change to the current task branch. Do not merge or switch to the default branch.
     complete: true
     includeRuntimeContext: true
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
 
 - id: pactflow-tools
   name: ./plugin/index.js

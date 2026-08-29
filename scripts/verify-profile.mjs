@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { accessSync, constants, mkdtempSync, rmSync } from 'node:fs'
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const dshSource = resolve(process.env.DSH_SOURCE ?? resolve(root, '../deepseek-harness-pactflow-p0'))
 const dshEntry = resolve(dshSource, 'apps/cli/src/bin.ts')
-const tarball = resolve(root, 'dist/dsh-pactflow-0.1.0.tgz')
+const packageVersion = JSON.parse(readFileSync(resolve(root, 'packages/dsh-pactflow/package.json'), 'utf8')).version
+const tarball = resolve(root, `dist/dsh-pactflow-${packageVersion}.tgz`)
 const testHome = mkdtempSync(join(tmpdir(), 'dsh-pactflow-profile-'))
 const environment = { ...process.env, DSH_HOME: testHome }
 

@@ -79,6 +79,32 @@ export interface PactFlowProject {
   readonly revision: number
   readonly createdAt: number
   readonly updatedAt: number
+  readonly git?: PactFlowGitBinding
+}
+
+/** Credential-free Git identity bound to the root Session workspace. */
+export interface PactFlowGitBinding {
+  readonly remote: string
+  readonly remoteUrl: string
+  readonly defaultBranch: string
+  readonly revision: number
+  readonly boundAt: number
+}
+
+/** Immutable Git workspace selected by the Host for one Run. */
+export interface PactFlowGitRunSpec {
+  readonly remote: string
+  readonly remoteUrl: string
+  readonly defaultBranch: string
+  readonly baseCommit: string
+  readonly branch: string
+  readonly worktreePath: string
+}
+
+/** Commit evidence accepted from a successful Git-backed Worker. */
+export interface PactFlowGitResult {
+  readonly branch: string
+  readonly commit: string
 }
 
 export interface PactFlowNeed {
@@ -113,6 +139,8 @@ export interface PactFlowRun {
   readonly leaseDeadline: number
   readonly updatedAt: number
   readonly outcome?: string
+  readonly git?: PactFlowGitRunSpec
+  readonly gitResult?: PactFlowGitResult
 }
 
 export interface PactFlowReview {
@@ -143,6 +171,12 @@ export interface PactFlowRelease {
 
 export interface InitializePactFlowProjectRequest {
   readonly name: string
+}
+
+export interface BindPactFlowGitRequest {
+  readonly expectedRevision: number
+  readonly remote: string
+  readonly defaultBranch: string
 }
 
 export interface CreatePactFlowNeedRequest {
@@ -207,6 +241,8 @@ export interface DispatchPactFlowLocalNodeRequest extends ClaimPactFlowNodeReque
   readonly prompt: string
 }
 
+export type DispatchPactFlowGitNodeRequest = DispatchPactFlowLocalNodeRequest
+
 export interface PactFlowProjectRecord {
   readonly sessionId: string
   readonly live: boolean
@@ -241,6 +277,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     'pactflow/node-updated': { readonly v: 1; readonly node: PactFlowNode }
     'pactflow/phase-transitioned': { readonly v: 1; readonly need: PactFlowNeed; readonly from: PactFlowPhase }
     'pactflow/project-initialized': { readonly v: 1; readonly project: PactFlowProject }
+    'pactflow/project-configured': { readonly v: 1; readonly project: PactFlowProject }
     'pactflow/release-recorded': { readonly v: 1; readonly release: PactFlowRelease }
     'pactflow/review-recorded': { readonly v: 1; readonly review: PactFlowReview }
     'pactflow/run-claimed': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }

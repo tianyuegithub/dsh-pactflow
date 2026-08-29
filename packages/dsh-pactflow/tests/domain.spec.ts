@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -42,7 +43,7 @@ describe('PactFlow domain foundation', () => {
     ])
     expect(session.events[0]?.data).toMatchObject({
       producer: 'dsh-pactflow',
-      version: '0.1.0',
+      version: '0.2.0',
     })
     expect(ctx.pactflow.project(session.id)).toEqual({ project })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowProject).toEqual({ project })
@@ -327,7 +328,110 @@ describe('PactFlow domain foundation', () => {
     })
   })
 
-  it('registers the four PactFlow tools only in the PactFlow Agent scope', async () => {
+  it('binds a real Git checkout and accepts only a clean descendant Worker commit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-git-'))
+    const priorDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = join(root, '.dsh')
+    try {
+      const remote = join(root, 'remote.git')
+      const seed = join(root, 'seed')
+      const workspace = join(root, 'workspace')
+      execFileSync('git', ['init', '--bare', remote])
+      execFileSync('git', ['init', seed])
+      execFileSync('git', ['-C', seed, 'config', 'user.name', 'PactFlow Test'])
+      execFileSync('git', ['-C', seed, 'config', 'user.email', 'pactflow@example.invalid'])
+      execFileSync('git', ['-C', seed, 'switch', '-c', 'main'])
+      await writeFile(join(seed, 'README.md'), 'baseline\n')
+      execFileSync('git', ['-C', seed, 'add', 'README.md'])
+      execFileSync('git', ['-C', seed, 'commit', '-m', 'baseline'])
+      execFileSync('git', ['-C', seed, 'remote', 'add', 'origin', remote])
+      execFileSync('git', ['-C', seed, 'push', '-u', 'origin', 'main'])
+      execFileSync('git', ['--git-dir', remote, 'symbolic-ref', 'HEAD', 'refs/heads/main'])
+      execFileSync('git', ['clone', remote, workspace])
+      execFileSync('git', ['-C', workspace, 'config', 'user.name', 'PactFlow Worker'])
+      execFileSync('git', ['-C', workspace, 'config', 'user.email', 'worker@example.invalid'])
+
+      const ctx = await harness()
+      const session = ctx.sessions.create(SessionId('git-worker'), {
+        meta: { agentPreset: 'pactflow', cwd: workspace },
+      })
+      const initialized = ctx.pactflow.initialize(session.id, { name: 'Git worker' })
+      const project = await ctx.pactflow.bindGit(session.id, {
+        expectedRevision: initialized.revision,
+        remote: 'origin',
+        defaultBranch: 'main',
+      })
+      expect(project).toMatchObject({
+        revision: 2,
+        git: { remote: 'origin', remoteUrl: remote, defaultBranch: 'main', revision: 1 },
+      })
+      ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+      const node = ctx.pactflow.createNode(session.id, {
+        id: 'git-node', needId: 'need', title: 'Git node', dependencies: [],
+      })
+      const parent = { id: session.id, session }
+      let childCwd = ''
+      ctx.provide('agents', { get: () => parent } as never)
+      ctx.provide('subagents', {
+        getProvider: (name: string) => name === 'spawn'
+          ? { name, capabilities: { cwd: true } }
+          : name === 'no-cwd' ? { name, capabilities: { cwd: false } } : undefined,
+        start: (_name: string, request: { cwd?: string; prompt: readonly { type: string; text?: string }[] }) => {
+          childCwd = request.cwd ?? ''
+          if (request.prompt[0]?.text !== 'no commit') {
+            execFileSync('git', ['-C', childCwd, 'config', 'user.name', 'PactFlow Worker'])
+            execFileSync('git', ['-C', childCwd, 'config', 'user.email', 'worker@example.invalid'])
+            execFileSync('git', ['-C', childCwd, 'commit', '--allow-empty', '-m', 'worker commit'])
+          }
+          return Promise.resolve({
+            id: SessionId('git-child'), localAgent: undefined,
+            result: Promise.resolve({ output: [{ type: 'text', text: 'done' }], stopReason: 'completed' }),
+            dispose: () => Promise.resolve(),
+          })
+        },
+      } as never)
+
+      const settled = await ctx.pactflow.dispatchGitNode(session.id, {
+        nodeId: node.id, expectedRevision: node.revision, provider: 'spawn',
+        leaseDurationMs: 60_000, prompt: 'commit the task',
+      })
+      expect(childCwd).toBe(settled.run.git?.worktreePath)
+      expect(childCwd).toContain(join(root, '.dsh', 'pactflow', 'worktrees'))
+      expect(settled).toMatchObject({
+        node: { state: 'succeeded' },
+        run: {
+          state: 'succeeded',
+          git: { remote: 'origin', remoteUrl: remote, defaultBranch: 'main' },
+          gitResult: { branch: settled.run.git?.branch },
+        },
+      })
+      expect(settled.run.gitResult?.commit).toMatch(/^[0-9a-f]{40,64}$/)
+
+      const noCommit = ctx.pactflow.createNode(session.id, {
+        id: 'no-commit', needId: 'need', title: 'No commit', dependencies: [],
+      })
+      await expect(ctx.pactflow.dispatchGitNode(session.id, {
+        nodeId: noCommit.id, expectedRevision: noCommit.revision, provider: 'no-cwd',
+        leaseDurationMs: 60_000, prompt: 'must not claim',
+      })).rejects.toThrow(/cannot select a task worktree/)
+      expect(ctx.pactflow.dag(session.id).byId['no-commit']).toMatchObject({ state: 'ready', revision: 1 })
+
+      const missingCommit = await ctx.pactflow.dispatchGitNode(session.id, {
+        nodeId: noCommit.id, expectedRevision: noCommit.revision, provider: 'spawn',
+        leaseDurationMs: 60_000, prompt: 'no commit',
+      })
+      expect(missingCommit).toMatchObject({
+        node: { state: 'failed' },
+        run: { state: 'failed', outcome: 'PactFlow Worker produced no commit' },
+      })
+    } finally {
+      if (priorDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = priorDshHome
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('registers the PactFlow tools only in the PactFlow Agent scope', async () => {
     const ctx = await harness()
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
@@ -341,8 +445,10 @@ describe('PactFlow domain foundation', () => {
     await scoped.ctx.plugin(PactFlowAgentTools)
 
     expect(ctx.tools.schemas(agent).map(schema => schema.name).sort()).toEqual([
+      'pactflow_bind_git',
       'pactflow_create_need',
       'pactflow_create_node',
+      'pactflow_dispatch_git',
       'pactflow_dispatch_local',
       'pactflow_initialize',
       'pactflow_transition_need',

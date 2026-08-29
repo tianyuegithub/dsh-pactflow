@@ -23,6 +23,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/agent
         version: link:../deepseek-harness-pactflow-p0/packages/core/agent
+      '@deepseek-ai/dsh-agent-instructions':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/context/agent-instructions
+        version: link:../deepseek-harness-pactflow-p0/packages/context/agent-instructions
       '@deepseek-ai/dsh-agent-loop':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/agent-loop
         version: link:../deepseek-harness-pactflow-p0/packages/core/agent-loop
@@ -56,6 +59,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
+      '@deepseek-ai/dsh-home-paths':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/util/home-paths
+        version: link:../deepseek-harness-pactflow-p0/packages/util/home-paths
       '@deepseek-ai/dsh-llm':
         specifier: link:../deepseek-harness-pactflow-p0/packages/llm/llm
         version: link:../deepseek-harness-pactflow-p0/packages/llm/llm
@@ -86,6 +92,18 @@ importers:
       '@deepseek-ai/dsh-system-prompt':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/system-prompt
         version: link:../deepseek-harness-pactflow-p0/packages/core/system-prompt
+      '@deepseek-ai/dsh-tool-bash':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/shell/tool-bash
+        version: link:../deepseek-harness-pactflow-p0/packages/shell/tool-bash
+      '@deepseek-ai/dsh-tool-fs':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/fs/tool-fs
+        version: link:../deepseek-harness-pactflow-p0/packages/fs/tool-fs
+      '@deepseek-ai/dsh-tool-fs-search':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/fs/tool-fs-search
+        version: link:../deepseek-harness-pactflow-p0/packages/fs/tool-fs-search
+      '@deepseek-ai/dsh-tool-pwsh':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/shell/tool-pwsh
+        version: link:../deepseek-harness-pactflow-p0/packages/shell/tool-pwsh
       '@deepseek-ai/dsh-tools':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/tools
         version: link:../deepseek-harness-pactflow-p0/packages/core/tools

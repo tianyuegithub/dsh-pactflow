@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path'
 import { z } from 'zod'
 import type { ZodType } from 'zod'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
@@ -6,6 +7,9 @@ import type {
   PactFlowDagProjection,
   PactFlowDeliveryProjection,
   PactFlowDocument,
+  PactFlowGitBinding,
+  PactFlowGitResult,
+  PactFlowGitRunSpec,
   PactFlowNeed,
   PactFlowNeedsProjection,
   PactFlowNode,
@@ -17,7 +21,8 @@ import type {
   PactFlowRunsProjection,
 } from './types.ts'
 
-export const PACTFLOW_EVENT_TYPES = [
+/** Exact vocabulary written by dsh-pactflow 0.1.0. Never derive this historical tuple. */
+export const PACTFLOW_EVENT_TYPES_V0_1 = [
   'pactflow/document-linked',
   'pactflow/need-created',
   'pactflow/need-updated',
@@ -32,9 +37,41 @@ export const PACTFLOW_EVENT_TYPES = [
   'pactflow/run-settled',
 ] as const
 
+export const PACTFLOW_EVENT_TYPES = [
+  'pactflow/document-linked',
+  'pactflow/need-created',
+  'pactflow/need-updated',
+  'pactflow/node-created',
+  'pactflow/node-updated',
+  'pactflow/phase-transitioned',
+  'pactflow/project-configured',
+  'pactflow/project-initialized',
+  'pactflow/release-recorded',
+  'pactflow/review-recorded',
+  'pactflow/run-claimed',
+  'pactflow/run-renewed',
+  'pactflow/run-settled',
+] as const
+
+const gitBindingSchema = z.object({
+  remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
+  revision: z.number().int().positive(), boundAt: z.number().int().nonnegative(),
+}) as unknown as ZodType<PactFlowGitBinding>
+
+const gitRunSpecSchema = z.object({
+  remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
+  baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/), branch: z.string().min(1),
+  worktreePath: z.string().refine(isAbsolute),
+}) as unknown as ZodType<PactFlowGitRunSpec>
+
+const gitResultSchema = z.object({
+  branch: z.string().min(1), commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+}) as unknown as ZodType<PactFlowGitResult>
+
 const projectSchema = z.object({
   id: z.string().min(1), name: z.string().min(1), revision: z.number().int().positive(),
   createdAt: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(),
+  git: gitBindingSchema.optional(),
 }) as unknown as ZodType<PactFlowProject>
 
 const needSchema = z.object({
@@ -55,6 +92,7 @@ const runSchema = z.object({
   claimId: z.string().min(1),
   state: z.enum(['claimed', 'running', 'blocked', 'succeeded', 'failed', 'cancelled']),
   leaseDeadline: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(), outcome: z.string().optional(),
+  git: gitRunSpecSchema.optional(), gitResult: gitResultSchema.optional(),
 }) as unknown as ZodType<PactFlowRun>
 
 const reviewSchema = z.object({
@@ -93,9 +131,22 @@ export const pactflowProjectProjection: ProjectionDefinition<'pactflowProject'> 
   key: 'pactflowProject', stateVersion: 1, stateSchema: projectProjectionSchema,
   init: () => ({ project: null }),
   apply: (state, event) => {
-    if (event.type !== 'pactflow/project-initialized') return state
+    if (event.type !== 'pactflow/project-initialized' && event.type !== 'pactflow/project-configured') return state
     versioned(event)
-    if (state.project !== null) throw new Error('PactFlow project is already initialized')
+    if (event.type === 'pactflow/project-initialized' && state.project !== null) {
+      throw new Error('PactFlow project is already initialized')
+    }
+    if (event.type === 'pactflow/project-configured' && state.project === null) {
+      throw new Error('PactFlow project must be initialized before configuration')
+    }
+    if (event.type === 'pactflow/project-configured' && state.project !== null) {
+      if (event.data.project.id !== state.project.id
+        || event.data.project.createdAt !== state.project.createdAt
+        || event.data.project.revision !== state.project.revision + 1
+        || event.data.project.git === undefined) {
+        throw new Error('PactFlow project configuration does not advance the initialized project')
+      }
+    }
     return { project: event.data.project }
   },
   wire: { viewSchema: projectProjectionSchema, view: state => state },
@@ -131,6 +182,12 @@ export const pactflowRunsProjection: ProjectionDefinition<'pactflowRuns'> = {
   apply: (state, event) => {
     if (event.type !== 'pactflow/run-claimed' && event.type !== 'pactflow/run-renewed' && event.type !== 'pactflow/run-settled') return state
     versioned(event)
+    if (event.data.run.gitResult !== undefined
+      && (event.data.run.git === undefined
+        || event.data.run.state !== 'succeeded'
+        || event.data.run.gitResult.branch !== event.data.run.git.branch)) {
+      throw new Error('PactFlow Git result does not match its successful Run spec')
+    }
     return { byId: { ...state.byId, [event.data.run.id]: event.data.run } }
   },
   wire: { viewSchema: runsProjectionSchema, view: state => state },

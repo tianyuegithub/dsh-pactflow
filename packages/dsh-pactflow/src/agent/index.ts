@@ -22,6 +22,24 @@ const PHASES = [
 /** Register PactFlow-only tools into the preset's standing Agent scope. */
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
+    name: 'pactflow_bind_git',
+    description: 'Bind the current Session workspace to an existing credential-free Git remote and remote-tracking default branch.',
+    parameters: {
+      expected_revision: { type: 'integer', required: true, description: 'Current project revision from pactflow_view.' },
+      remote: { type: 'string', required: true, description: 'Existing Git remote name, usually origin.' },
+      default_branch: { type: 'string', required: true, description: 'Protected baseline branch, usually main.' },
+    },
+    output: OUTPUT,
+    execute(args, exec) {
+      return ctx.pactflow.bindGit(requireSessionId(exec.agent?.session.id), {
+        expectedRevision: args.expected_revision,
+        remote: args.remote,
+        defaultBranch: args.default_branch,
+      }).then(jsonObject)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_initialize',
     description: 'Initialize the one PactFlow project owned by the current PactFlow Session. Call once before other PactFlow mutations.',
     parameters: {
@@ -106,6 +124,29 @@ export function apply(ctx: Context): void {
           dependencies: args.dependencies,
         },
       )))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'pactflow_dispatch_git',
+    description: 'Create a Host-owned task branch/worktree, execute one DSH Subagent there, and succeed only when it leaves a clean descendant commit.',
+    parameters: {
+      node_id: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+      provider: { type: 'string', required: true, description: 'Installed Provider that advertises per-run cwd support.' },
+      prompt: { type: 'string', required: true, description: 'Complete Worker instruction that explicitly requires editing, testing, and committing in the supplied worktree.' },
+      lease_duration_ms: { type: 'integer', required: true, description: 'Lease duration from 1000 through 86400000.' },
+    },
+    output: OUTPUT,
+    timeoutMs: 86_400_000,
+    async execute(args, exec) {
+      return jsonObject(await ctx.pactflow.dispatchGitNode(requireSessionId(exec.agent?.session.id), {
+        nodeId: args.node_id,
+        expectedRevision: args.expected_revision,
+        provider: args.provider,
+        prompt: args.prompt,
+        leaseDurationMs: args.lease_duration_ms,
+      }))
     },
   }))
 

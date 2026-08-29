@@ -4,20 +4,25 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/dsh-session'
-import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { SubagentResult, SubagentRun, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
-import { PACTFLOW_EVENT_TYPES, PACTFLOW_PROJECTIONS } from './domain.ts'
+import { PACTFLOW_EVENT_TYPES, PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_PROJECTIONS } from './domain.ts'
+import { PactFlowGitWorkspace } from './git-workspace.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
+  BindPactFlowGitRequest,
   ClaimPactFlowNodeRequest,
   CreatePactFlowNeedRequest,
   CreatePactFlowNodeRequest,
+  DispatchPactFlowGitNodeRequest,
   DispatchPactFlowLocalNodeRequest,
   InitializePactFlowProjectRequest,
   PactFlowClaimResult,
   PactFlowDagProjection,
+  PactFlowGitResult,
+  PactFlowGitRunSpec,
   PactFlowHealth,
   PactFlowNeed,
   PactFlowNode,
@@ -37,7 +42,7 @@ import type {
 
 export type { PactFlowHealth } from './types.ts'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 const PRESET_ROOT = fileURLToPath(new URL('../presets', import.meta.url))
 const NEXT_PHASE: Readonly<Partial<Record<PactFlowPhase, PactFlowPhase>>> = {
   backlog: 'discussion',
@@ -69,9 +74,16 @@ export class PactFlowService extends TypertRemoteService {
   static inject = ['sessions', 'sessionProjections']
 
   private readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
+  private readonly git = new PactFlowGitWorkspace()
 
   constructor(ctx: Context) {
     super(ctx, 'pactflow')
+    ctx.sessions.externalEventProducers.register({
+      producer: 'dsh-pactflow',
+      version: '0.1.0',
+      eventTypes: PACTFLOW_EVENT_TYPES_V0_1,
+      mode: 'read-only',
+    })
     this.events = ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
       version: VERSION,
@@ -132,6 +144,26 @@ export class PactFlowService extends TypertRemoteService {
   project(sessionId: string): PactFlowProjectProjection {
     const session = this.liveSession(sessionId)
     return this.ctx.sessionProjections.stateOf(session, 'pactflowProject') ?? { project: null }
+  }
+
+  /** Validate the Session workspace and bind its credential-free Git identity. */
+  @Remote('bindGit')
+  async bindGit(sessionId: string, request: BindPactFlowGitRequest): Promise<PactFlowProject> {
+    const session = this.livePactFlowSession(sessionId)
+    const current = this.requireProject(session)
+    this.requireRevision('project', current.id, current.revision, request.expectedRevision)
+    const inspected = await this.git.inspectBinding(session.header.cwd, request)
+    const latest = this.requireProject(session)
+    this.requireRevision('project', latest.id, latest.revision, request.expectedRevision)
+    const now = Date.now()
+    const project: PactFlowProject = {
+      ...latest,
+      git: { ...inspected, revision: (latest.git?.revision ?? 0) + 1, boundAt: now },
+      revision: latest.revision + 1,
+      updatedAt: now,
+    }
+    this.events.append(session, 'pactflow/project-configured', { v: 1, project })
+    return project
   }
 
   /** Create one backlog need under an initialized project. */
@@ -263,6 +295,15 @@ export class PactFlowService extends TypertRemoteService {
   @Remote('claimNode')
   claimNode(sessionId: string, request: ClaimPactFlowNodeRequest): PactFlowClaimResult {
     const session = this.livePactFlowSession(sessionId)
+    return this.claimNodeInSession(session, request)
+  }
+
+  /** Claim after every provider-specific preflight has completed. */
+  private claimNodeInSession(
+    session: Session,
+    request: ClaimPactFlowNodeRequest,
+    options: { readonly runId?: PactFlowRun['id']; readonly git?: PactFlowGitRunSpec } = {},
+  ): PactFlowClaimResult {
     const current = this.node(session, request.nodeId)
     this.requireRevision('node', current.id, current.revision, request.expectedRevision)
     if (current.state !== 'ready') throw new Error(`PactFlow node "${current.id}" is not ready`)
@@ -278,7 +319,7 @@ export class PactFlowService extends TypertRemoteService {
     }
     const prior = Object.values(this.runState(session)).filter(run => run.nodeId === node.id)
     const run: PactFlowRun = {
-      id: PactFlowRunId(`run-${randomUUID()}`),
+      id: options.runId ?? PactFlowRunId(`run-${randomUUID()}`),
       nodeId: node.id,
       nodeRevision: node.revision,
       attempt: prior.reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1,
@@ -287,6 +328,7 @@ export class PactFlowService extends TypertRemoteService {
       state: 'claimed',
       leaseDeadline: now + duration,
       updatedAt: now,
+      ...options.git === undefined ? {} : { git: options.git },
     }
     this.events.append(session, 'pactflow/run-claimed', { v: 1, run, node })
     return { node, run }
@@ -326,6 +368,15 @@ export class PactFlowService extends TypertRemoteService {
   @Remote('settleRun')
   settleRun(sessionId: string, request: SettlePactFlowRunRequest): PactFlowClaimResult {
     const session = this.livePactFlowSession(sessionId)
+    return this.settleRunInSession(session, request)
+  }
+
+  /** Settle one Run with optional Host-validated Git evidence. */
+  private settleRunInSession(
+    session: Session,
+    request: SettlePactFlowRunRequest,
+    gitResult?: PactFlowGitResult,
+  ): PactFlowClaimResult {
     const currentRun = this.run(session, request.runId)
     this.requireClaim(currentRun, request.claimId)
     if (this.isTerminalRun(currentRun)) throw new Error(`PactFlow Run "${currentRun.id}" already has a terminal result`)
@@ -347,6 +398,7 @@ export class PactFlowService extends TypertRemoteService {
       state: request.state,
       updatedAt: now,
       outcome: request.outcome,
+      ...gitResult === undefined ? {} : { gitResult },
     }
     this.events.append(session, 'pactflow/run-settled', { v: 1, run, node })
     if (request.state === 'succeeded') this.readyDependents(session, node.needId)
@@ -432,29 +484,32 @@ export class PactFlowService extends TypertRemoteService {
     request: DispatchPactFlowLocalNodeRequest,
   ): Promise<PactFlowClaimResult> {
     const session = this.livePactFlowSession(sessionId)
-    const agents = this.ctx.get('agents') as AgentRegistry | undefined
-    const subagents = this.ctx.get('subagents') as SubagentRuntime | undefined
-    const parent = agents?.get(session.id)
-    if (parent === undefined) throw new Error(`session "${session.id}" has no live parent Agent`)
-    if (subagents === undefined) throw new Error('PactFlow local dispatch requires the Subagent runtime')
-    if (subagents.getProvider(request.provider) === undefined) {
-      throw new Error(`PactFlow Subagent provider "${request.provider}" is not registered`)
-    }
-    const prompt = request.prompt.trim()
-    if (prompt.length === 0) throw new Error('PactFlow local Worker prompt must be non-empty')
+    const execution = this.localExecution(session, request, false)
+    const owned = this.claimNodeInSession(session, request)
+    return await this.executeClaimed(session, request, execution, owned)
+  }
 
-    let owned = this.claimNode(sessionId, request)
-    const controller = new AbortController()
-    let child: SubagentRun
+  /** Create a Host-owned task worktree, run a child there, and require a clean descendant commit. */
+  @Remote('dispatchGitNode')
+  async dispatchGitNode(
+    sessionId: string,
+    request: DispatchPactFlowGitNodeRequest,
+  ): Promise<PactFlowClaimResult> {
+    const session = this.livePactFlowSession(sessionId)
+    const execution = this.localExecution(session, request, true)
+    const project = this.requireProject(session)
+    if (project.git === undefined) throw new Error('PactFlow project has no Git binding')
+    const node = this.node(session, request.nodeId)
+    this.requireRevision('node', node.id, node.revision, request.expectedRevision)
+    if (node.state !== 'ready') throw new Error(`PactFlow node "${node.id}" is not ready`)
+    const runId = PactFlowRunId(`run-${randomUUID()}`)
+    const git = await this.git.plan(session.header.cwd, session.id, runId, node, project.git)
+    this.requireRevision('project', project.id, this.requireProject(session).revision, project.revision)
+    const owned = this.claimNodeInSession(session, request, { runId, git })
     try {
-      child = await subagents.start(request.provider, {
-        label: owned.node.title,
-        prompt: [{ type: 'text', text: prompt }],
-        parent,
-        signal: controller.signal,
-      })
+      await this.git.materialize(session.header.cwd, git)
     } catch (error) {
-      return this.settleRun(sessionId, {
+      return this.settleRunInSession(session, {
         runId: owned.run.id,
         claimId: owned.run.claimId,
         expectedNodeRevision: owned.node.revision,
@@ -462,30 +517,84 @@ export class PactFlowService extends TypertRemoteService {
         outcome: this.boundedOutcome(error),
       })
     }
-    owned = this.renewRun(sessionId, {
-      runId: owned.run.id,
-      claimId: owned.run.claimId,
-      leaseDurationMs: request.leaseDurationMs,
-    })
-    const renewEvery = Math.max(1_000, Math.floor(request.leaseDurationMs / 2))
-    const timer = setInterval(() => {
-      try {
-        owned = this.renewRun(sessionId, {
-          runId: owned.run.id,
-          claimId: owned.run.claimId,
-          leaseDurationMs: request.leaseDurationMs,
-        })
-      } catch {
-        controller.abort('PactFlow lease renewal failed')
-      }
-    }, renewEvery)
+    return await this.executeClaimed(session, request, execution, owned, git)
+  }
+
+  /** Resolve the live parent and selected Provider before a node is claimed. */
+  private localExecution(
+    session: Session,
+    request: DispatchPactFlowLocalNodeRequest,
+    requiresCwd: boolean,
+  ): { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string } {
+    const agents = this.ctx.get('agents') as AgentRegistry | undefined
+    const subagents = this.ctx.get('subagents') as SubagentRuntime | undefined
+    const parent = agents?.get(session.id)
+    if (parent === undefined) throw new Error(`session "${session.id}" has no live parent Agent`)
+    if (subagents === undefined) throw new Error('PactFlow local dispatch requires the Subagent runtime')
+    const provider = subagents.getProvider(request.provider)
+    if (provider === undefined) {
+      throw new Error(`PactFlow Subagent provider "${request.provider}" is not registered`)
+    }
+    if (requiresCwd && !provider.capabilities.cwd) {
+      throw new Error(`PactFlow Subagent provider "${request.provider}" cannot select a task worktree`)
+    }
+    const prompt = request.prompt.trim()
+    if (prompt.length === 0) throw new Error('PactFlow local Worker prompt must be non-empty')
+    return { parent, subagents, prompt }
+  }
+
+  /** Execute one already claimed Run and converge its Subagent and Git outcomes. */
+  private async executeClaimed(
+    session: Session,
+    request: DispatchPactFlowLocalNodeRequest,
+    execution: { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string },
+    claimed: PactFlowClaimResult,
+    git?: PactFlowGitRunSpec,
+  ): Promise<PactFlowClaimResult> {
+    let owned = claimed
+    const controller = new AbortController()
+    let child: SubagentRun
     try {
+      child = await execution.subagents.start(request.provider, {
+        label: owned.node.title,
+        prompt: [{ type: 'text', text: execution.prompt }],
+        parent: execution.parent,
+        signal: controller.signal,
+        ...git === undefined ? {} : { cwd: git.worktreePath },
+      })
+    } catch (error) {
+      return this.settleRunInSession(session, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: 'failed',
+        outcome: this.boundedOutcome(error),
+      })
+    }
+    let timer: ReturnType<typeof setInterval> | undefined
+    try {
+      owned = this.renewRun(session.id, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        leaseDurationMs: request.leaseDurationMs,
+      })
+      const renewEvery = Math.max(1_000, Math.floor(request.leaseDurationMs / 2))
+      timer = setInterval(() => {
+        try {
+          owned = this.renewRun(session.id, {
+            runId: owned.run.id,
+            claimId: owned.run.claimId,
+            leaseDurationMs: request.leaseDurationMs,
+          })
+        } catch {
+          controller.abort('PactFlow lease renewal failed')
+        }
+      }, renewEvery)
       let result: SubagentResult
       try {
         result = await child.result
       } catch (error) {
-        clearInterval(timer)
-        return this.settleRun(sessionId, {
+        return this.settleRunInSession(session, {
           runId: owned.run.id,
           claimId: owned.run.claimId,
           expectedNodeRevision: owned.node.revision,
@@ -493,7 +602,21 @@ export class PactFlowService extends TypertRemoteService {
           outcome: this.boundedOutcome(error),
         })
       }
-      return this.settleRun(sessionId, {
+      let gitResult: PactFlowGitResult | undefined
+      if (result.stopReason === 'completed' && git !== undefined) {
+        try {
+          gitResult = await this.git.validateResult(git)
+        } catch (error) {
+          return this.settleRunInSession(session, {
+            runId: owned.run.id,
+            claimId: owned.run.claimId,
+            expectedNodeRevision: owned.node.revision,
+            state: 'failed',
+            outcome: this.boundedOutcome(error),
+          })
+        }
+      }
+      return this.settleRunInSession(session, {
         runId: owned.run.id,
         claimId: owned.run.claimId,
         expectedNodeRevision: owned.node.revision,
@@ -501,9 +624,9 @@ export class PactFlowService extends TypertRemoteService {
           ? 'succeeded'
           : result.stopReason === 'aborted' ? 'cancelled' : 'failed',
         outcome: this.subagentOutcome(result),
-      })
+      }, gitResult)
     } finally {
-      clearInterval(timer)
+      if (timer !== undefined) clearInterval(timer)
       await child.dispose()
     }
   }

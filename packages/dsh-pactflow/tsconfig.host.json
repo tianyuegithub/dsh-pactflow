@@ -9,6 +9,7 @@
     "src/index.ts",
     "src/agent/index.ts",
     "src/domain.ts",
+    "src/git-workspace.ts",
     "src/types.ts"
   ]
 }
