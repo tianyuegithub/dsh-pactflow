@@ -89,6 +89,15 @@ export interface PactFlowGitBinding {
   readonly defaultBranch: string
   readonly revision: number
   readonly boundAt: number
+  readonly auth?: PactFlowGitAuth
+  readonly validationCommands: readonly PactFlowValidationCommand[]
+}
+
+/** Non-secret reference to one HTTPS username/token credential. */
+export interface PactFlowGitAuth {
+  readonly kind: 'https-token'
+  readonly username: string
+  readonly credentialRef: string
 }
 
 /** Immutable Git workspace selected by the Host for one Run. */
@@ -99,12 +108,28 @@ export interface PactFlowGitRunSpec {
   readonly baseCommit: string
   readonly branch: string
   readonly worktreePath: string
+  readonly auth?: PactFlowGitAuth
+  readonly validationCommands: readonly PactFlowValidationCommand[]
+}
+
+export interface PactFlowValidationCommand {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly timeoutMs: number
+}
+
+export interface PactFlowValidationEvidence extends PactFlowValidationCommand {
+  readonly exitCode: 0
+  readonly durationMs: number
 }
 
 /** Commit evidence accepted from a successful Git-backed Worker. */
 export interface PactFlowGitResult {
   readonly branch: string
   readonly commit: string
+  readonly remoteRef: string
+  readonly syncedAt: number
+  readonly validations: readonly PactFlowValidationEvidence[]
 }
 
 export interface PactFlowNeed {
@@ -177,6 +202,9 @@ export interface BindPactFlowGitRequest {
   readonly expectedRevision: number
   readonly remote: string
   readonly defaultBranch: string
+  readonly username?: string
+  readonly credentialRef?: string
+  readonly validationCommands?: readonly PactFlowValidationCommand[]
 }
 
 export interface CreatePactFlowNeedRequest {

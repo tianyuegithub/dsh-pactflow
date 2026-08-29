@@ -1,6 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -13,6 +12,7 @@ import {
   newEnglishPage,
   writeComposerDraft,
 } from '../../../../deepseek-harness-pactflow-p0/apps/web/tests/support.ts'
+import { createGitFixture } from '../tests/git-fixture.ts'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const record = process.env.DSH_SNAPSHOT === 'record'
@@ -47,23 +47,7 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
         roots: [{ path: `${PACKAGE_ROOT}/presets`, trust: 'user' }],
       },
     })
-    const remote = join(scaffold.workspaceCwd, 'remote.git')
-    const seed = join(scaffold.workspaceCwd, 'seed')
-    const workspace = join(scaffold.workspaceCwd, 'workspace')
-    execFileSync('git', ['init', '--bare', remote], { stdio: 'ignore' })
-    execFileSync('git', ['init', seed], { stdio: 'ignore' })
-    execFileSync('git', ['-C', seed, 'config', 'user.name', 'PactFlow E2E'], { stdio: 'ignore' })
-    execFileSync('git', ['-C', seed, 'config', 'user.email', 'pactflow@example.invalid'], { stdio: 'ignore' })
-    execFileSync('git', ['-C', seed, 'switch', '-c', 'main'], { stdio: 'ignore' })
-    writeFileSync(join(seed, 'README.md'), 'PactFlow real Worker baseline\n')
-    execFileSync('git', ['-C', seed, 'add', 'README.md'], { stdio: 'ignore' })
-    execFileSync('git', ['-C', seed, 'commit', '-m', 'baseline'], { stdio: 'ignore' })
-    execFileSync('git', ['-C', seed, 'remote', 'add', 'origin', remote], { stdio: 'ignore' })
-    execFileSync('git', ['-C', seed, 'push', '-u', 'origin', 'main'], { stdio: 'ignore' })
-    execFileSync('git', ['--git-dir', remote, 'symbolic-ref', 'HEAD', 'refs/heads/main'], { stdio: 'ignore' })
-    execFileSync('git', ['clone', remote, workspace], { stdio: 'ignore' })
-    execFileSync('git', ['-C', workspace, 'config', 'user.name', 'PactFlow Worker'], { stdio: 'ignore' })
-    execFileSync('git', ['-C', workspace, 'config', 'user.email', 'worker@example.invalid'], { stdio: 'ignore' })
+    createGitFixture(scaffold.workspaceCwd)
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })

@@ -8,6 +8,7 @@ import type {
   PactFlowDeliveryProjection,
   PactFlowDocument,
   PactFlowGitBinding,
+  PactFlowGitAuth,
   PactFlowGitResult,
   PactFlowGitRunSpec,
   PactFlowNeed,
@@ -19,6 +20,8 @@ import type {
   PactFlowReview,
   PactFlowRun,
   PactFlowRunsProjection,
+  PactFlowValidationCommand,
+  PactFlowValidationEvidence,
 } from './types.ts'
 
 /** Exact vocabulary written by dsh-pactflow 0.1.0. Never derive this historical tuple. */
@@ -53,19 +56,36 @@ export const PACTFLOW_EVENT_TYPES = [
   'pactflow/run-settled',
 ] as const
 
+const gitAuthSchema = z.object({
+  kind: z.literal('https-token'), username: z.string().min(1), credentialRef: z.string().min(1),
+}) as unknown as ZodType<PactFlowGitAuth>
+
+const validationCommandSchema = z.object({
+  command: z.string().min(1), args: z.array(z.string()), timeoutMs: z.number().int().positive(),
+}) as unknown as ZodType<PactFlowValidationCommand>
+
+const validationEvidenceSchema = z.object({
+  command: z.string().min(1), args: z.array(z.string()), timeoutMs: z.number().int().positive(),
+  exitCode: z.literal(0), durationMs: z.number().int().nonnegative(),
+}) as unknown as ZodType<PactFlowValidationEvidence>
+
 const gitBindingSchema = z.object({
   remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
-  revision: z.number().int().positive(), boundAt: z.number().int().nonnegative(),
+  revision: z.number().int().positive(), boundAt: z.number().int().nonnegative(), auth: gitAuthSchema.optional(),
+  validationCommands: z.array(validationCommandSchema),
 }) as unknown as ZodType<PactFlowGitBinding>
 
 const gitRunSpecSchema = z.object({
   remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
   baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/), branch: z.string().min(1),
-  worktreePath: z.string().refine(isAbsolute),
+  worktreePath: z.string().refine(isAbsolute), auth: gitAuthSchema.optional(),
+  validationCommands: z.array(validationCommandSchema),
 }) as unknown as ZodType<PactFlowGitRunSpec>
 
 const gitResultSchema = z.object({
   branch: z.string().min(1), commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  remoteRef: z.string().min(1), syncedAt: z.number().int().nonnegative(),
+  validations: z.array(validationEvidenceSchema),
 }) as unknown as ZodType<PactFlowGitResult>
 
 const projectSchema = z.object({

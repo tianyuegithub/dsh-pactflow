@@ -32,6 +32,8 @@ type PactFlowLocaleKey =
   | 'gitBaseline'
   | 'gitBranch'
   | 'gitCommit'
+  | 'attempt'
+  | 'validations'
   | 'empty'
 
 const zh: Record<PactFlowLocaleKey, string> = {
@@ -50,6 +52,8 @@ const zh: Record<PactFlowLocaleKey, string> = {
   gitBaseline: '基线分支',
   gitBranch: '任务分支',
   gitCommit: '提交',
+  attempt: '尝试',
+  validations: '验证命令',
   empty: '暂无数据',
 }
 
@@ -69,6 +73,8 @@ const en: Record<PactFlowLocaleKey, string> = {
   gitBaseline: 'Baseline branch',
   gitBranch: 'Task branch',
   gitCommit: 'Commit',
+  attempt: 'Attempt',
+  validations: 'Validation commands',
   empty: 'No data',
 }
 
@@ -238,6 +244,8 @@ function PactFlowProjectionTables({
             <dd>{snapshot.project.project.git.remote} · {snapshot.project.project.git.remoteUrl}</dd>
             <dt>{t('gitBaseline')}</dt>
             <dd>{snapshot.project.project.git.defaultBranch}</dd>
+            <dt>{t('validations')}</dt>
+            <dd>{String(snapshot.project.project.git.validationCommands.length)}</dd>
           </dl>
         )}
       </section>
@@ -247,9 +255,10 @@ function PactFlowProjectionTables({
         run.id,
         run.provider,
         run.state,
-        `attempt ${run.attempt}`,
+        `${t('attempt')}: ${run.attempt}`,
         run.git === undefined ? '—' : `${t('gitBranch')}: ${run.git.branch}`,
         run.gitResult === undefined ? '—' : `${t('gitCommit')}: ${run.gitResult.commit.slice(0, 12)}`,
+        run.gitResult === undefined ? '—' : `${t('validations')}: ${run.gitResult.validations.length}`,
       ])} empty={t('empty')} />
     </div>
   )

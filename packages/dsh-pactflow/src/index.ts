@@ -8,8 +8,10 @@ import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { SubagentResult, SubagentRun, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_PROJECTIONS } from './domain.ts'
-import { PactFlowGitWorkspace } from './git-workspace.ts'
+import { PactFlowGitWorkspace, type PactFlowGitAuthSecret } from './git-workspace.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
   BindPactFlowGitRequest,
@@ -153,6 +155,12 @@ export class PactFlowService extends TypertRemoteService {
     const current = this.requireProject(session)
     this.requireRevision('project', current.id, current.revision, request.expectedRevision)
     const inspected = await this.git.inspectBinding(session.header.cwd, request)
+    if (inspected.auth !== undefined) {
+      const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
+      if (credentials === undefined) throw new Error('PactFlow Git authentication requires the Credentials service')
+      const info = await credentials.describe(credentialRef(inspected.auth.credentialRef))
+      if (!info.configured) throw new Error('PactFlow Git credential reference is not configured')
+    }
     const latest = this.requireProject(session)
     this.requireRevision('project', latest.id, latest.revision, request.expectedRevision)
     const now = Date.now()
@@ -605,7 +613,13 @@ export class PactFlowService extends TypertRemoteService {
       let gitResult: PactFlowGitResult | undefined
       if (result.stopReason === 'completed' && git !== undefined) {
         try {
-          gitResult = await this.git.validateResult(git)
+          const localResult = await this.git.validateResult(git)
+          gitResult = await this.git.syncResult(
+            session.header.cwd,
+            git,
+            localResult,
+            await this.resolveGitAuth(git),
+          )
         } catch (error) {
           return this.settleRunInSession(session, {
             runId: owned.run.id,
@@ -629,6 +643,16 @@ export class PactFlowService extends TypertRemoteService {
       if (timer !== undefined) clearInterval(timer)
       await child.dispose()
     }
+  }
+
+  /** Resolve the current Git token per operation without persisting or returning it. */
+  private async resolveGitAuth(spec: PactFlowGitRunSpec): Promise<PactFlowGitAuthSecret | undefined> {
+    if (spec.auth === undefined) return undefined
+    const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
+    if (credentials === undefined) throw new Error('PactFlow Git authentication requires the Credentials service')
+    const resolved = await credentials.resolve(credentialRef(spec.auth.credentialRef))
+    if (resolved === undefined) throw new Error('PactFlow Git credential reference is not configured')
+    return { username: spec.auth.username, token: resolved.value }
   }
 
   /** Resolve a live Session without exporting DSH object identity over the wire. */

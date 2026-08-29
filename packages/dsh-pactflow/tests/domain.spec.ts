@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -14,6 +14,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
 import PactFlowService from '../lib/index.js'
 import * as PactFlowAgentTools from '../presets/pactflow/plugin/index.js'
+import { createGitFixture, serveAuthenticatedGit, type AuthenticatedGitServer } from './git-fixture.ts'
 
 async function harness(): Promise<Context> {
   const ctx = new Context()
@@ -333,23 +334,7 @@ describe('PactFlow domain foundation', () => {
     const priorDshHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, '.dsh')
     try {
-      const remote = join(root, 'remote.git')
-      const seed = join(root, 'seed')
-      const workspace = join(root, 'workspace')
-      execFileSync('git', ['init', '--bare', remote])
-      execFileSync('git', ['init', seed])
-      execFileSync('git', ['-C', seed, 'config', 'user.name', 'PactFlow Test'])
-      execFileSync('git', ['-C', seed, 'config', 'user.email', 'pactflow@example.invalid'])
-      execFileSync('git', ['-C', seed, 'switch', '-c', 'main'])
-      await writeFile(join(seed, 'README.md'), 'baseline\n')
-      execFileSync('git', ['-C', seed, 'add', 'README.md'])
-      execFileSync('git', ['-C', seed, 'commit', '-m', 'baseline'])
-      execFileSync('git', ['-C', seed, 'remote', 'add', 'origin', remote])
-      execFileSync('git', ['-C', seed, 'push', '-u', 'origin', 'main'])
-      execFileSync('git', ['--git-dir', remote, 'symbolic-ref', 'HEAD', 'refs/heads/main'])
-      execFileSync('git', ['clone', remote, workspace])
-      execFileSync('git', ['-C', workspace, 'config', 'user.name', 'PactFlow Worker'])
-      execFileSync('git', ['-C', workspace, 'config', 'user.email', 'worker@example.invalid'])
+      const { remote, workspace } = createGitFixture(root)
 
       const ctx = await harness()
       const session = ctx.sessions.create(SessionId('git-worker'), {
@@ -360,10 +345,14 @@ describe('PactFlow domain foundation', () => {
         expectedRevision: initialized.revision,
         remote: 'origin',
         defaultBranch: 'main',
+        validationCommands: [{ command: 'git', args: ['status', '--short'], timeoutMs: 5_000 }],
       })
       expect(project).toMatchObject({
         revision: 2,
-        git: { remote: 'origin', remoteUrl: remote, defaultBranch: 'main', revision: 1 },
+        git: {
+          remote: 'origin', remoteUrl: remote, defaultBranch: 'main', revision: 1,
+          validationCommands: [{ command: 'git', args: ['status', '--short'], timeoutMs: 5_000 }],
+        },
       })
       ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
       const node = ctx.pactflow.createNode(session.id, {
@@ -406,6 +395,18 @@ describe('PactFlow domain foundation', () => {
         },
       })
       expect(settled.run.gitResult?.commit).toMatch(/^[0-9a-f]{40,64}$/)
+      expect(settled.run.gitResult).toMatchObject({
+        remoteRef: `refs/remotes/origin/${settled.run.git?.branch}`,
+      })
+      expect(settled.run.gitResult?.syncedAt).toEqual(expect.any(Number))
+      expect(settled.run.gitResult?.validations).toEqual([{
+        command: 'git', args: ['status', '--short'], timeoutMs: 5_000,
+        exitCode: 0, durationMs: expect.any(Number),
+      }])
+      const remoteCommit = execFileSync('git', [
+        '--git-dir', remote, 'rev-parse', `refs/heads/${settled.run.git?.branch}^{commit}`,
+      ], { encoding: 'utf8' }).trim()
+      expect(remoteCommit).toBe(settled.run.gitResult?.commit)
 
       const noCommit = ctx.pactflow.createNode(session.id, {
         id: 'no-commit', needId: 'need', title: 'No commit', dependencies: [],
@@ -424,7 +425,103 @@ describe('PactFlow domain foundation', () => {
         node: { state: 'failed' },
         run: { state: 'failed', outcome: 'PactFlow Worker produced no commit' },
       })
+
+      const currentProject = ctx.pactflow.project(session.id).project!
+      await ctx.pactflow.bindGit(session.id, {
+        expectedRevision: currentProject.revision,
+        remote: 'origin',
+        defaultBranch: 'main',
+        validationCommands: [{
+          command: process.execPath, args: ['-e', 'process.exit(7)'], timeoutMs: 5_000,
+        }],
+      })
+      const invalid = ctx.pactflow.createNode(session.id, {
+        id: 'invalid', needId: 'need', title: 'Invalid', dependencies: [],
+      })
+      const validationFailure = await ctx.pactflow.dispatchGitNode(session.id, {
+        nodeId: invalid.id, expectedRevision: invalid.revision, provider: 'spawn',
+        leaseDurationMs: 60_000, prompt: 'validation failure',
+      })
+      expect(validationFailure).toMatchObject({
+        node: { state: 'failed' },
+        run: { state: 'failed', outcome: expect.stringMatching(/validation command failed.*exit 7/) },
+      })
+      expect(() => execFileSync('git', [
+        '--git-dir', remote, 'show-ref', '--verify', `refs/heads/${validationFailure.run.git?.branch}`,
+      ], { stdio: 'ignore' })).toThrow()
     } finally {
+      if (priorDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = priorDshHome
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('stores only an HTTPS credential reference and requires configured Credentials', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-git-auth-'))
+    const priorDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = join(root, '.dsh')
+    let gitServer: AuthenticatedGitServer | undefined
+    try {
+      const { remote, workspace } = createGitFixture(root)
+      gitServer = await serveAuthenticatedGit(root, remote, 'pactflow-worker', 'secret-token-value')
+      execFileSync('git', [
+        '-C', workspace, 'remote', 'set-url', 'origin', gitServer.url,
+      ])
+      const ctx = await harness()
+      const session = ctx.sessions.create(SessionId('git-auth'), {
+        meta: { agentPreset: 'pactflow', cwd: workspace },
+      })
+      const project = ctx.pactflow.initialize(session.id, { name: 'Git auth' })
+      const request = {
+        expectedRevision: project.revision,
+        remote: 'origin',
+        defaultBranch: 'main',
+        username: 'pactflow-worker',
+        credentialRef: 'PACTFLOW_GITEA_TOKEN',
+      }
+      await expect(ctx.pactflow.bindGit(session.id, request))
+        .rejects.toThrow(/requires the Credentials service/)
+      expect(ctx.pactflow.project(session.id).project?.revision).toBe(1)
+
+      const resolveCredential = vi.fn(() => Promise.resolve({ value: 'secret-token-value', source: 'memory' }))
+      ctx.provide('credentials', {
+        describe: () => Promise.resolve({ configured: true, source: 'memory', writable: true }),
+        resolve: resolveCredential,
+      } as never)
+      const bound = await ctx.pactflow.bindGit(session.id, request)
+      expect(bound.git?.auth).toEqual({
+        kind: 'https-token', username: 'pactflow-worker', credentialRef: 'PACTFLOW_GITEA_TOKEN',
+      })
+      expect(resolveCredential).not.toHaveBeenCalled()
+
+      ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+      const node = ctx.pactflow.createNode(session.id, {
+        id: 'auth-node', needId: 'need', title: 'Auth node', dependencies: [],
+      })
+      const parent = { id: session.id, session }
+      ctx.provide('agents', { get: () => parent } as never)
+      ctx.provide('subagents', {
+        getProvider: () => ({ capabilities: { cwd: true } }),
+        start: (_name: string, worker: { cwd?: string }) => {
+          execFileSync('git', ['-C', worker.cwd!, 'config', 'user.name', 'PactFlow Worker'])
+          execFileSync('git', ['-C', worker.cwd!, 'config', 'user.email', 'worker@example.invalid'])
+          execFileSync('git', ['-C', worker.cwd!, 'commit', '--allow-empty', '-m', 'authenticated commit'])
+          return Promise.resolve({
+            id: SessionId('auth-child'), localAgent: undefined,
+            result: Promise.resolve({ output: [{ type: 'text', text: 'done' }], stopReason: 'completed' }),
+            dispose: () => Promise.resolve(),
+          })
+        },
+      } as never)
+      const settled = await ctx.pactflow.dispatchGitNode(session.id, {
+        nodeId: node.id, expectedRevision: node.revision, provider: 'spawn',
+        leaseDurationMs: 60_000, prompt: 'commit through authenticated HTTP',
+      })
+      expect(settled.run.state).toBe('succeeded')
+      expect(resolveCredential).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(session.events)).not.toContain('secret-token-value')
+    } finally {
+      await gitServer?.close()
       if (priorDshHome === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = priorDshHome
       await rm(root, { recursive: true, force: true })

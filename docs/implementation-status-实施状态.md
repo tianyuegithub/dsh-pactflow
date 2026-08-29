@@ -2,7 +2,7 @@
 
 - 当前里程碑：6 —— Git/Gitea、K3s/Harbor 与多 Harness Worker
 - 状态：进行中；里程碑 1—4 已完成，里程碑 5 的原生控制台基础链已完成
-- 最后已验证提交：DSH 通用能力分支 `a18ee41c60`；Bundle 仓库 `9110755`，本轮 Git worktree 增量待提交
+- 最后已验证提交：DSH 通用能力分支 `a18ee41c60`；Bundle 仓库 `8e40e18`，本轮 Git 凭证/同步/验证增量待提交
 
 ## 已完成合同
 
@@ -11,6 +11,7 @@
 - 当前模式权威：`SessionHeader.agentPreset` 只表示创建时模式；项目发现、授权和冷恢复以 `agentPreset` Projection 的当前值为准，裸 Host 嵌入才回退到 Header。Settings 不维护第二项目注册表。
 - 本地 Worker：零脉 Preset 暴露 8 个作用域编排工具，并组合 Bash、文件读写/搜索与工作区指令等编码能力；`dispatchLocalNode()` 使用 DSH 原生 Subagent Runtime，父 Provider/prompt 预检先于 claim，自动续租，失败和基础设施拒绝均持久终结。
 - Git worktree：DSH 通用 `SubagentStartRequest.cwd` capability 已在独立上游分支完成；零脉可绑定无密钥远端身份，从远端跟踪分支冻结 base commit，由 Host 生成任务分支与 DSH Home 下的 worktree，并只接受该分支上干净、可追溯的后代 commit。
+- Git 同步与验证：项目可保存 HTTPS 用户名和 DSH Credential Ref，不保存 token；Host 在清除凭证环境后执行结构化 `{command,args,timeoutMs}` 验证，复核 commit/clean tree，再用私有临时 AskPass push 任务分支并由根 checkout fetch/比对 commit。真实 Basic Auth Smart HTTP 集成测试通过，验证失败不会 push。
 - 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
 
 ## 最新真实验收
@@ -21,5 +22,5 @@
 
 ## 当前边界与下一安全动作
 
-- 尚未完成：Gitea 凭证引用、fetch/push 与结构化提交通知后的 Host 更新/验证/closing；K3s Run Spec、Secret、Job/Pod 对账；Harbor 模板与 Harness/协议兼容矩阵；远端真实 Worker。
-- 下一安全动作：在当前 Git Run Spec 上接入 DSH Credentials 的 Gitea 引用，完成任务分支 push、Host fetch/验证和冲突失败语义；随后复用同一规格实现 K3s Provider。
+- 尚未完成：真实 Gitea 项目/分支保护 API 对账与 closing 合并；K3s Run Spec、Secret、Job/Pod 对账；Harbor 模板与 Harness/协议兼容矩阵；远端真实 Worker。
+- 下一安全动作：实现 Gitea 只读仓库/分支保护检查和显式 closing 合并合同；真实 Gitea 写入验收需要精确外部写授权。并行安全范围转入 K3s Run Spec 与 Harness/协议模板。

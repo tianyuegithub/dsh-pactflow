@@ -28,6 +28,21 @@ export function apply(ctx: Context): void {
       expected_revision: { type: 'integer', required: true, description: 'Current project revision from pactflow_view.' },
       remote: { type: 'string', required: true, description: 'Existing Git remote name, usually origin.' },
       default_branch: { type: 'string', required: true, description: 'Protected baseline branch, usually main.' },
+      username: { type: 'string', description: 'HTTPS Git username; configure together with credential_ref.' },
+      credential_ref: { type: 'string', description: 'DSH Credentials reference containing the HTTPS token; never the token value.' },
+      validation_commands: {
+        type: 'array',
+        description: 'Host-side validation commands executed without a shell after the Worker commits and before push.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            command: { type: 'string', required: true },
+            args: { type: 'array', required: true, items: { type: 'string' } },
+            timeout_ms: { type: 'integer', required: true },
+          },
+        },
+      },
     },
     output: OUTPUT,
     execute(args, exec) {
@@ -35,6 +50,15 @@ export function apply(ctx: Context): void {
         expectedRevision: args.expected_revision,
         remote: args.remote,
         defaultBranch: args.default_branch,
+        ...args.username === undefined ? {} : { username: args.username },
+        ...args.credential_ref === undefined ? {} : { credentialRef: args.credential_ref },
+        ...args.validation_commands === undefined ? {} : {
+          validationCommands: args.validation_commands.map(command => ({
+            command: command.command,
+            args: command.args,
+            timeoutMs: command.timeout_ms,
+          })),
+        },
       }).then(jsonObject)
     },
   }))
