@@ -34,6 +34,21 @@ export function PactFlowNeedId(value: string): PactFlowNeedId {
   return normalized as PactFlowNeedId
 }
 
+/** Validate and brand one caller-owned DAG node id. */
+export function PactFlowNodeId(value: string): PactFlowNodeId {
+  const normalized = value.trim()
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(normalized)) {
+    throw new Error('PactFlow node id must be 1-64 lower-kebab-case characters')
+  }
+  return normalized as PactFlowNodeId
+}
+
+/** Validate and brand one Host-owned run id. */
+export function PactFlowRunId(value: string): PactFlowRunId {
+  if (!/^run-[0-9a-f-]{36}$/.test(value)) throw new Error('PactFlow run id is invalid')
+  return value as PactFlowRunId
+}
+
 export type PactFlowPhase =
   | 'backlog'
   | 'discussion'
@@ -92,6 +107,8 @@ export interface PactFlowRun {
   readonly nodeRevision: number
   readonly attempt: number
   readonly provider: string
+  /** Non-secret correlation identity; callback authorization lives in Credentials/Kubernetes Secret. */
+  readonly claimId: string
   readonly state: 'claimed' | 'running' | 'blocked' | 'succeeded' | 'failed' | 'cancelled'
   readonly leaseDeadline: number
   readonly updatedAt: number
@@ -147,6 +164,45 @@ export interface TransitionPactFlowNeedRequest {
   readonly to: PactFlowPhase
 }
 
+export interface CreatePactFlowNodeRequest {
+  readonly id: string
+  readonly needId: string
+  readonly title: string
+  readonly dependencies: readonly string[]
+}
+
+export interface UpdatePactFlowNodeDependenciesRequest {
+  readonly nodeId: string
+  readonly expectedRevision: number
+  readonly dependencies: readonly string[]
+}
+
+export interface ClaimPactFlowNodeRequest {
+  readonly nodeId: string
+  readonly expectedRevision: number
+  readonly provider: string
+  readonly leaseDurationMs: number
+}
+
+export interface RenewPactFlowRunRequest {
+  readonly runId: string
+  readonly claimId: string
+  readonly leaseDurationMs: number
+}
+
+export interface SettlePactFlowRunRequest {
+  readonly runId: string
+  readonly claimId: string
+  readonly expectedNodeRevision: number
+  readonly state: 'succeeded' | 'failed' | 'cancelled'
+  readonly outcome: string
+}
+
+export interface PactFlowClaimResult {
+  readonly node: PactFlowNode
+  readonly run: PactFlowRun
+}
+
 export interface PactFlowProjectProjection { readonly project: PactFlowProject | null }
 export interface PactFlowNeedsProjection { readonly byId: Readonly<Record<string, PactFlowNeed>> }
 export interface PactFlowDagProjection { readonly byId: Readonly<Record<string, PactFlowNode>> }
@@ -168,9 +224,9 @@ declare module '@deepseek-ai/dsh-session/types' {
     'pactflow/project-initialized': { readonly v: 1; readonly project: PactFlowProject }
     'pactflow/release-recorded': { readonly v: 1; readonly release: PactFlowRelease }
     'pactflow/review-recorded': { readonly v: 1; readonly review: PactFlowReview }
-    'pactflow/run-claimed': { readonly v: 1; readonly run: PactFlowRun }
-    'pactflow/run-renewed': { readonly v: 1; readonly run: PactFlowRun }
-    'pactflow/run-settled': { readonly v: 1; readonly run: PactFlowRun }
+    'pactflow/run-claimed': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }
+    'pactflow/run-renewed': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }
+    'pactflow/run-settled': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }
   }
 }
 

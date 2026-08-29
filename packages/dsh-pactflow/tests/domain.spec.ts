@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import PactFlowService from '../lib/index.js'
 
 async function harness(): Promise<Context> {
@@ -136,5 +136,89 @@ describe('PactFlow domain foundation', () => {
     expect(planning).toMatchObject({ phase: 'planning', revision: 5 })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowNeeds)
       .toMatchObject({ byId: { 'need-1': { phase: 'planning', revision: 5 } } })
+  })
+
+  it('enforces acyclic dependencies, atomic claim/settle, and first terminal result', async () => {
+    const ctx = await harness()
+    const session = ctx.sessions.create(SessionId('dag-project'), { meta: { agentPreset: 'pactflow' } })
+    ctx.pactflow.initialize(session.id, { name: 'DAG' })
+    ctx.pactflow.createNeed(session.id, { id: 'need-a', title: 'Need A', description: '' })
+    ctx.pactflow.createNeed(session.id, { id: 'need-b', title: 'Need B', description: '' })
+    const root = ctx.pactflow.createNode(session.id, {
+      id: 'root', needId: 'need-a', title: 'Root', dependencies: [],
+    })
+    const child = ctx.pactflow.createNode(session.id, {
+      id: 'child', needId: 'need-a', title: 'Child', dependencies: ['root'],
+    })
+    expect(root.state).toBe('ready')
+    expect(child.state).toBe('pending')
+    expect(() => ctx.pactflow.updateNodeDependencies(session.id, {
+      nodeId: 'root', expectedRevision: 1, dependencies: ['child'],
+    })).toThrow(/would create a cycle/)
+
+    const other = ctx.pactflow.createNode(session.id, {
+      id: 'other', needId: 'need-b', title: 'Other', dependencies: [],
+    })
+    expect(() => ctx.pactflow.updateNodeDependencies(session.id, {
+      nodeId: other.id, expectedRevision: other.revision, dependencies: ['root'],
+    })).toThrow(/belongs to another need/)
+
+    const claim = ctx.pactflow.claimNode(session.id, {
+      nodeId: root.id, expectedRevision: root.revision, provider: 'local', leaseDurationMs: 60_000,
+    })
+    expect(claim).toMatchObject({ node: { state: 'claimed', revision: 2 }, run: { attempt: 1, state: 'claimed' } })
+    expect(() => ctx.pactflow.claimNode(session.id, {
+      nodeId: root.id, expectedRevision: 1, provider: 'local', leaseDurationMs: 60_000,
+    })).toThrow(/revision conflict/)
+    expect(() => ctx.pactflow.renewRun(session.id, {
+      runId: claim.run.id, claimId: 'wrong', leaseDurationMs: 60_000,
+    })).toThrow(/claim identity mismatch/)
+    const running = ctx.pactflow.renewRun(session.id, {
+      runId: claim.run.id, claimId: claim.run.claimId, leaseDurationMs: 60_000,
+    })
+    const settled = ctx.pactflow.settleRun(session.id, {
+      runId: running.run.id,
+      claimId: running.run.claimId,
+      expectedNodeRevision: running.node.revision,
+      state: 'succeeded',
+      outcome: 'commit abc',
+    })
+    expect(settled.node.state).toBe('succeeded')
+    expect(ctx.pactflow.dag(session.id).byId.child).toMatchObject({ state: 'ready', revision: 2 })
+    expect(() => ctx.pactflow.settleRun(session.id, {
+      runId: running.run.id,
+      claimId: running.run.claimId,
+      expectedNodeRevision: settled.node.revision,
+      state: 'failed',
+      outcome: 'late duplicate',
+    })).toThrow(/already has a terminal result/)
+  })
+
+  it('rejects a result after its lease expires without changing node state', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T00:00:00Z'))
+    try {
+      const ctx = await harness()
+      const session = ctx.sessions.create(SessionId('expired-project'), { meta: { agentPreset: 'pactflow' } })
+      ctx.pactflow.initialize(session.id, { name: 'Expired' })
+      ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+      const node = ctx.pactflow.createNode(session.id, {
+        id: 'node', needId: 'need', title: 'Node', dependencies: [],
+      })
+      const claim = ctx.pactflow.claimNode(session.id, {
+        nodeId: node.id, expectedRevision: node.revision, provider: 'k3s', leaseDurationMs: 1_000,
+      })
+      vi.advanceTimersByTime(1_000)
+      expect(() => ctx.pactflow.settleRun(session.id, {
+        runId: claim.run.id,
+        claimId: claim.run.claimId,
+        expectedNodeRevision: claim.node.revision,
+        state: 'succeeded',
+        outcome: 'too late',
+      })).toThrow(/after lease expiry/)
+      expect(ctx.pactflow.dag(session.id).byId.node).toMatchObject({ state: 'claimed', revision: 2 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

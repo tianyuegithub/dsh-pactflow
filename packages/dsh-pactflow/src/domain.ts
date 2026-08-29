@@ -52,6 +52,7 @@ const nodeSchema = z.object({
 const runSchema = z.object({
   id: z.string().min(1), nodeId: z.string().min(1), nodeRevision: z.number().int().positive(),
   attempt: z.number().int().positive(), provider: z.string().min(1),
+  claimId: z.string().min(1),
   state: z.enum(['claimed', 'running', 'blocked', 'succeeded', 'failed', 'cancelled']),
   leaseDeadline: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(), outcome: z.string().optional(),
 }) as unknown as ZodType<PactFlowRun>
@@ -115,7 +116,9 @@ export const pactflowDagProjection: ProjectionDefinition<'pactflowDag'> = {
   key: 'pactflowDag', stateVersion: 1, stateSchema: dagProjectionSchema,
   init: () => ({ byId: {} }),
   apply: (state, event) => {
-    if (event.type !== 'pactflow/node-created' && event.type !== 'pactflow/node-updated') return state
+    if (event.type !== 'pactflow/node-created' && event.type !== 'pactflow/node-updated'
+      && event.type !== 'pactflow/run-claimed' && event.type !== 'pactflow/run-renewed'
+      && event.type !== 'pactflow/run-settled') return state
     versioned(event)
     return { byId: { ...state.byId, [event.data.node.id]: event.data.node } }
   },

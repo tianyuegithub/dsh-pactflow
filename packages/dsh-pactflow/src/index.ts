@@ -5,18 +5,27 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/dsh-session'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_PROJECTIONS } from './domain.ts'
-import { PactFlowNeedId, PactFlowProjectId } from './types.ts'
+import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
+  ClaimPactFlowNodeRequest,
   CreatePactFlowNeedRequest,
+  CreatePactFlowNodeRequest,
   InitializePactFlowProjectRequest,
+  PactFlowClaimResult,
+  PactFlowDagProjection,
   PactFlowHealth,
   PactFlowNeed,
+  PactFlowNode,
   PactFlowPhase,
   PactFlowProject,
   PactFlowProjectProjection,
   PactFlowReview,
+  PactFlowRun,
   RecordPactFlowReviewRequest,
+  RenewPactFlowRunRequest,
+  SettlePactFlowRunRequest,
   TransitionPactFlowNeedRequest,
+  UpdatePactFlowNodeDependenciesRequest,
 } from './types.ts'
 
 export type { PactFlowHealth } from './types.ts'
@@ -192,6 +201,161 @@ export class PactFlowService extends TypertRemoteService {
     return next
   }
 
+  /** Create one DAG node after validating same-need dependencies. */
+  @Remote('createNode')
+  createNode(sessionId: string, request: CreatePactFlowNodeRequest): PactFlowNode {
+    const session = this.livePactFlowSession(sessionId)
+    const need = this.need(session, request.needId)
+    const id = PactFlowNodeId(request.id)
+    const title = request.title.trim()
+    if (title.length === 0) throw new Error('PactFlow node title must be non-empty')
+    const dag = this.dagState(session)
+    if (dag[id] !== undefined) throw new Error(`PactFlow node "${id}" already exists`)
+    const dependencies = this.dependencies(dag, need.id, id, request.dependencies)
+    const node: PactFlowNode = {
+      id,
+      needId: need.id,
+      title,
+      state: this.dependenciesSucceeded(dag, dependencies) ? 'ready' : 'pending',
+      revision: 1,
+      dependencies,
+      updatedAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/node-created', { v: 1, node })
+    return node
+  }
+
+  /** Replace dependencies on an unclaimed node with cycle and revision checks. */
+  @Remote('updateNodeDependencies')
+  updateNodeDependencies(
+    sessionId: string,
+    request: UpdatePactFlowNodeDependenciesRequest,
+  ): PactFlowNode {
+    const session = this.livePactFlowSession(sessionId)
+    const current = this.node(session, request.nodeId)
+    this.requireRevision('node', current.id, current.revision, request.expectedRevision)
+    if (current.state !== 'pending' && current.state !== 'ready') {
+      throw new Error(`PactFlow node "${current.id}" dependencies cannot change from state ${current.state}`)
+    }
+    const dag = this.dagState(session)
+    const dependencies = this.dependencies(dag, current.needId, current.id, request.dependencies)
+    for (const dependency of dependencies) {
+      if (this.reaches(dag, dependency, current.id, new Set())) {
+        throw new Error(`PactFlow dependency ${dependency} -> ${current.id} would create a cycle`)
+      }
+    }
+    const node: PactFlowNode = {
+      ...current,
+      dependencies,
+      state: this.dependenciesSucceeded(dag, dependencies) ? 'ready' : 'pending',
+      revision: current.revision + 1,
+      updatedAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/node-updated', { v: 1, node })
+    return node
+  }
+
+  /** Claim one ready node and create its immutable-attempt Run in one event. */
+  @Remote('claimNode')
+  claimNode(sessionId: string, request: ClaimPactFlowNodeRequest): PactFlowClaimResult {
+    const session = this.livePactFlowSession(sessionId)
+    const current = this.node(session, request.nodeId)
+    this.requireRevision('node', current.id, current.revision, request.expectedRevision)
+    if (current.state !== 'ready') throw new Error(`PactFlow node "${current.id}" is not ready`)
+    const provider = request.provider.trim()
+    if (provider.length === 0) throw new Error('PactFlow Run provider must be non-empty')
+    const duration = this.leaseDuration(request.leaseDurationMs)
+    const now = Date.now()
+    const node: PactFlowNode = {
+      ...current,
+      state: 'claimed',
+      revision: current.revision + 1,
+      updatedAt: now,
+    }
+    const prior = Object.values(this.runState(session)).filter(run => run.nodeId === node.id)
+    const run: PactFlowRun = {
+      id: PactFlowRunId(`run-${randomUUID()}`),
+      nodeId: node.id,
+      nodeRevision: node.revision,
+      attempt: prior.reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1,
+      provider,
+      claimId: `claim-${randomUUID()}`,
+      state: 'claimed',
+      leaseDeadline: now + duration,
+      updatedAt: now,
+    }
+    this.events.append(session, 'pactflow/run-claimed', { v: 1, run, node })
+    return { node, run }
+  }
+
+  /** Renew a live Run lease; the first renewal also moves its node to running. */
+  @Remote('renewRun')
+  renewRun(sessionId: string, request: RenewPactFlowRunRequest): PactFlowClaimResult {
+    const session = this.livePactFlowSession(sessionId)
+    const currentRun = this.run(session, request.runId)
+    this.requireClaim(currentRun, request.claimId)
+    if (this.isTerminalRun(currentRun)) throw new Error(`PactFlow Run "${currentRun.id}" is already terminal`)
+    const now = Date.now()
+    if (now >= currentRun.leaseDeadline) throw new Error(`PactFlow Run "${currentRun.id}" lease has expired`)
+    const currentNode = this.node(session, currentRun.nodeId)
+    if (currentNode.revision !== currentRun.nodeRevision) {
+      throw new Error(`PactFlow Run "${currentRun.id}" owns stale node revision ${String(currentRun.nodeRevision)}`)
+    }
+    const node: PactFlowNode = currentNode.state === 'claimed'
+      ? { ...currentNode, state: 'running', revision: currentNode.revision + 1, updatedAt: now }
+      : currentNode
+    if (node.state !== 'running' && node.state !== 'blocked') {
+      throw new Error(`PactFlow Run "${currentRun.id}" cannot renew node state ${node.state}`)
+    }
+    const run: PactFlowRun = {
+      ...currentRun,
+      nodeRevision: node.revision,
+      state: node.state,
+      leaseDeadline: now + this.leaseDuration(request.leaseDurationMs),
+      updatedAt: now,
+    }
+    this.events.append(session, 'pactflow/run-renewed', { v: 1, run, node })
+    return { node, run }
+  }
+
+  /** Accept the first valid terminal result and ready newly unblocked dependents. */
+  @Remote('settleRun')
+  settleRun(sessionId: string, request: SettlePactFlowRunRequest): PactFlowClaimResult {
+    const session = this.livePactFlowSession(sessionId)
+    const currentRun = this.run(session, request.runId)
+    this.requireClaim(currentRun, request.claimId)
+    if (this.isTerminalRun(currentRun)) throw new Error(`PactFlow Run "${currentRun.id}" already has a terminal result`)
+    const now = Date.now()
+    if (now >= currentRun.leaseDeadline) throw new Error(`PactFlow Run "${currentRun.id}" result arrived after lease expiry`)
+    const currentNode = this.node(session, currentRun.nodeId)
+    this.requireRevision('node', currentNode.id, currentNode.revision, request.expectedNodeRevision)
+    if (currentNode.revision !== currentRun.nodeRevision) {
+      throw new Error(`PactFlow Run "${currentRun.id}" result targets stale node revision ${String(currentRun.nodeRevision)}`)
+    }
+    const node: PactFlowNode = {
+      ...currentNode,
+      state: request.state,
+      revision: currentNode.revision + 1,
+      updatedAt: now,
+    }
+    const run: PactFlowRun = {
+      ...currentRun,
+      state: request.state,
+      updatedAt: now,
+      outcome: request.outcome,
+    }
+    this.events.append(session, 'pactflow/run-settled', { v: 1, run, node })
+    if (request.state === 'succeeded') this.readyDependents(session, node.needId)
+    return { node, run }
+  }
+
+  /** Read the current DAG projection. */
+  @Remote('dag')
+  dag(sessionId: string): PactFlowDagProjection {
+    const session = this.livePactFlowSession(sessionId)
+    return this.ctx.sessionProjections.stateOf(session, 'pactflowDag') ?? { byId: {} }
+  }
+
   /** Resolve a live Session without exporting DSH object identity over the wire. */
   private liveSession(sessionId: string): Session {
     if (sessionId.length === 0) throw new Error('sessionId must be non-empty')
@@ -236,6 +400,102 @@ export class PactFlowService extends TypertRemoteService {
     ).filter(review => review.needId === needId && review.kind === kind)
       .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
     return reviews[0]?.decision === 'approved'
+  }
+
+  /** Resolve one node from the DAG projection. */
+  private node(session: Session, rawId: string): PactFlowNode {
+    const id = PactFlowNodeId(rawId)
+    const node = this.dagState(session)[id]
+    if (node === undefined) throw new Error(`PactFlow node "${id}" does not exist`)
+    return node
+  }
+
+  private dagState(session: Session): Readonly<Record<string, PactFlowNode>> {
+    return this.ctx.sessionProjections.stateOf(session, 'pactflowDag')?.byId ?? {}
+  }
+
+  private runState(session: Session): Readonly<Record<string, PactFlowRun>> {
+    return this.ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId ?? {}
+  }
+
+  private run(session: Session, rawId: string): PactFlowRun {
+    const id = PactFlowRunId(rawId)
+    const run = this.runState(session)[id]
+    if (run === undefined) throw new Error(`PactFlow Run "${id}" does not exist`)
+    return run
+  }
+
+  /** Canonicalize and validate one same-need dependency set. */
+  private dependencies(
+    dag: Readonly<Record<string, PactFlowNode>>,
+    needId: PactFlowNeed['id'],
+    nodeId: PactFlowNode['id'],
+    rawDependencies: readonly string[],
+  ): readonly PactFlowNode['id'][] {
+    const dependencies = rawDependencies.map(PactFlowNodeId).sort()
+    if (new Set(dependencies).size !== dependencies.length) throw new Error('PactFlow node dependencies must be unique')
+    if (dependencies.includes(nodeId)) throw new Error('PactFlow node cannot depend on itself')
+    for (const dependency of dependencies) {
+      const target = dag[dependency]
+      if (target === undefined) throw new Error(`PactFlow dependency node "${dependency}" does not exist`)
+      if (target.needId !== needId) throw new Error(`PactFlow dependency node "${dependency}" belongs to another need`)
+    }
+    return dependencies
+  }
+
+  private dependenciesSucceeded(
+    dag: Readonly<Record<string, PactFlowNode>>,
+    dependencies: readonly PactFlowNode['id'][],
+  ): boolean {
+    return dependencies.every(dependency => dag[dependency]?.state === 'succeeded')
+  }
+
+  /** Follow dependency edges to detect whether `from` already reaches `target`. */
+  private reaches(
+    dag: Readonly<Record<string, PactFlowNode>>,
+    from: PactFlowNode['id'],
+    target: PactFlowNode['id'],
+    seen: Set<string>,
+  ): boolean {
+    if (from === target) return true
+    if (seen.has(from)) return false
+    seen.add(from)
+    return dag[from]?.dependencies.some(dependency => this.reaches(dag, dependency, target, seen)) ?? false
+  }
+
+  private requireRevision(kind: string, id: string, current: number, expected: number): void {
+    if (!Number.isSafeInteger(expected) || expected < 1) throw new Error(`expected ${kind} revision must be a positive safe integer`)
+    if (current !== expected) throw new Error(`PactFlow ${kind} "${id}" revision conflict: expected ${String(expected)}, current ${String(current)}`)
+  }
+
+  private leaseDuration(value: number): number {
+    if (!Number.isSafeInteger(value) || value < 1_000 || value > 86_400_000) {
+      throw new Error('leaseDurationMs must be a safe integer between 1000 and 86400000')
+    }
+    return value
+  }
+
+  private requireClaim(run: PactFlowRun, claimId: string): void {
+    if (claimId !== run.claimId) throw new Error(`PactFlow Run "${run.id}" claim identity mismatch`)
+  }
+
+  private isTerminalRun(run: PactFlowRun): boolean {
+    return run.state === 'succeeded' || run.state === 'failed' || run.state === 'cancelled'
+  }
+
+  /** Emit explicit ready transitions for pending dependents whose prerequisites succeeded. */
+  private readyDependents(session: Session, needId: PactFlowNeed['id']): void {
+    for (const candidate of Object.values(this.dagState(session))) {
+      if (candidate.needId !== needId || candidate.state !== 'pending') continue
+      if (!this.dependenciesSucceeded(this.dagState(session), candidate.dependencies)) continue
+      const node: PactFlowNode = {
+        ...candidate,
+        state: 'ready',
+        revision: candidate.revision + 1,
+        updatedAt: Date.now(),
+      }
+      this.events.append(session, 'pactflow/node-updated', { v: 1, node })
+    }
   }
 }
 
