@@ -19,5 +19,6 @@
 - 验证边界：当前 8 项领域/冷恢复/本地调度测试通过，本地 Subagent 使用受控真实 Service 合同 fake 验证 Host 边界；尚未用真实 DSH Model Provider 完成开发任务，不声称本里程碑完成
 - Host 进度：已完成 `listProjects()` 和 `dispatchLocalNode()` 的项目发现、预检、claim、续租、Subagent 调用和终态收敛合同
 - Agent-plane 进度：Preset 现在通过嵌套、无 `dsh.client` manifest 的自带插件注册 `pactflow_view/create_need/transition_need/dispatch_local` 4 个窄工具；作用域测试证明普通 Session 看不到它们，打包检查和 Profile install/boot/remove 复验通过
-- 下一安全动作：在测试 Profile 中真实创建 `agentPreset=pactflow` Session，验证 Preset mount audit 与工具 roster；然后使用已配置 Model 运行 spawn/fork Worker 支线并回读 Session Log
+- Preset mount 证据：真实 DSH Loader/Include/AgentLoop/AgentPresets 公开路径已解析打包目录、导入相对 Agent 插件、创建 PactFlow Agent 并通过 mount audit；工具 roster 精确 4 项，根层 roster 为空
+- 下一安全动作：使用已配置 Model Provider 运行一条 spawn/fork Worker 支线并回读 Session Log；该验收需要可用凭证并会发生真实模型调用
 - 里程碑 5 独立进度：原生 `shell.overlay` 已改为读取 `snapshot()` Typert Remote 的真实项目/Need/DAG/Run 表格，Host 以同步 Projection 一致切面响应；没有 mock 数据、iframe 或第二 Web 壳，React 复核确认独立 Remote 使用 `Promise.all`、静态样式已提升、列表 key 稳定

@@ -11,9 +11,24 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../deepseek-harness-pactflow-p0/vendor/cordis
         version: link:../deepseek-harness-pactflow-p0/vendor/cordis
+      '@deepseek-ai/cordis-plugin-group':
+        specifier: link:../deepseek-harness-pactflow-p0/vendor/group
+        version: link:../deepseek-harness-pactflow-p0/vendor/group
+      '@deepseek-ai/cordis-plugin-include':
+        specifier: link:../deepseek-harness-pactflow-p0/vendor/include
+        version: link:../deepseek-harness-pactflow-p0/vendor/include
+      '@deepseek-ai/cordis-plugin-loader':
+        specifier: link:../deepseek-harness-pactflow-p0/vendor/loader
+        version: link:../deepseek-harness-pactflow-p0/vendor/loader
       '@deepseek-ai/dsh-agent':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/agent
         version: link:../deepseek-harness-pactflow-p0/packages/core/agent
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/core/agent-loop
+        version: link:../deepseek-harness-pactflow-p0/packages/core/agent-loop
+      '@deepseek-ai/dsh-agent-presets':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/preset/agent-presets
+        version: link:../deepseek-harness-pactflow-p0/packages/preset/agent-presets
       '@deepseek-ai/dsh-api-remotes':
         specifier: link:../deepseek-harness-pactflow-p0/packages/api/remotes
         version: link:../deepseek-harness-pactflow-p0/packages/api/remotes
@@ -44,6 +59,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: link:../deepseek-harness-pactflow-p0/packages/llm/llm
         version: link:../deepseek-harness-pactflow-p0/packages/llm/llm
+      '@deepseek-ai/dsh-persona':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/preset/persona
+        version: link:../deepseek-harness-pactflow-p0/packages/preset/persona
       '@deepseek-ai/dsh-scope':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/scope
         version: link:../deepseek-harness-pactflow-p0/packages/core/scope
