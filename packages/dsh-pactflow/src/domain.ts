@@ -108,6 +108,7 @@ const k3sRunSpecSchema = z.object({
   cpuRequest: z.string().min(1), memoryRequest: z.string().min(1),
   cpuLimit: z.string().min(1), memoryLimit: z.string().min(1),
   activeDeadlineSeconds: z.number().int().positive(),
+  finishedJobTtlSeconds: z.number().int().positive(),
 }) as unknown as ZodType<PactFlowK3sRunSpec>
 
 const k3sResultSchema = z.object({

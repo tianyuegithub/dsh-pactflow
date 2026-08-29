@@ -20,6 +20,8 @@ interface PullRequestResponse {
   readonly html_url?: unknown
   readonly merge_commit_sha?: unknown
   readonly merged?: unknown
+  readonly head?: { readonly ref?: unknown; readonly sha?: unknown }
+  readonly base?: { readonly ref?: unknown }
 }
 
 export interface PactFlowGiteaPullRequest {
@@ -74,6 +76,17 @@ export class PactFlowGiteaClient {
       method: 'POST', body: input, expectedStatus: 201,
     })
     return this.pullRequest(response)
+  }
+
+  async findPullRequest(
+    binding: PactFlowGiteaBinding,
+    token: string,
+    head: string,
+    base: string,
+  ): Promise<PactFlowGiteaPullRequest | undefined> {
+    const responses = await this.request<PullRequestResponse[]>(binding, token, '/pulls?state=all&limit=50')
+    const match = responses.find(candidate => candidate.head?.ref === head && candidate.base?.ref === base)
+    return match === undefined ? undefined : this.pullRequest(match)
   }
 
   async mergePullRequest(

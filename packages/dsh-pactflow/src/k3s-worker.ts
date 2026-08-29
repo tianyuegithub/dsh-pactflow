@@ -138,6 +138,7 @@ export class PactFlowK3sWorker {
       cpuLimit: template.cpuLimit,
       memoryLimit: template.memoryLimit,
       activeDeadlineSeconds,
+      finishedJobTtlSeconds: this.config.finishedJobTtlSeconds ?? 86_400,
     }
   }
 
@@ -149,16 +150,38 @@ export class PactFlowK3sWorker {
     signal: AbortSignal,
   ): Promise<PactFlowK3sResult> {
     const configMap = this.configMap(spec, git, prompt)
+    let createdConfigMap: V1ConfigMap
     try {
-      await this.core.createNamespacedConfigMap({ namespace: spec.namespace, body: configMap })
+      createdConfigMap = await this.core.createNamespacedConfigMap({ namespace: spec.namespace, body: configMap })
     } catch {
       throw new Error(`PactFlow failed to create K3s ConfigMap "${spec.configMapName}"`)
     }
+    let createdJob: V1Job
     try {
-      await this.batch.createNamespacedJob({ namespace: spec.namespace, body: this.job(spec) })
+      createdJob = await this.batch.createNamespacedJob({ namespace: spec.namespace, body: this.job(spec) })
     } catch {
       await this.deleteConfigMap(spec)
       throw new Error(`PactFlow failed to create K3s Job "${spec.jobName}"`)
+    }
+    const jobUid = createdJob.metadata?.uid
+    if (jobUid === undefined) {
+      await this.cancel(spec)
+      throw new Error(`PactFlow K3s Job "${spec.jobName}" has no UID`)
+    }
+    try {
+      createdConfigMap.metadata = {
+        ...createdConfigMap.metadata,
+        ownerReferences: [{
+          apiVersion: 'batch/v1', kind: 'Job', name: spec.jobName, uid: jobUid,
+          controller: true, blockOwnerDeletion: true,
+        }],
+      }
+      await this.core.replaceNamespacedConfigMap({
+        name: spec.configMapName, namespace: spec.namespace, body: createdConfigMap,
+      })
+    } catch {
+      await this.cancel(spec)
+      throw new Error(`PactFlow failed to bind ConfigMap "${spec.configMapName}" to its Job`)
     }
     return await this.waitForResult(spec, signal)
   }
@@ -358,6 +381,7 @@ export class PactFlowK3sWorker {
       spec: {
         activeDeadlineSeconds: spec.activeDeadlineSeconds,
         backoffLimit: 0,
+        ttlSecondsAfterFinished: spec.finishedJobTtlSeconds,
         template: {
           metadata: { labels: this.labels(spec) },
           spec: {

@@ -43,6 +43,10 @@ describe('PactFlow Gitea closing', () => {
         }))
         return
       }
+      if (request.method === 'GET' && request.url?.includes('/pulls?') === true) {
+        response.end('[]')
+        return
+      }
       if (request.method === 'POST' && request.url?.endsWith('/pulls/1/merge') === true) {
         await readBody(request)
         git(['-C', merger, 'fetch', 'origin'])

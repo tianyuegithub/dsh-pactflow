@@ -5,6 +5,9 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
+  "bin": {
+    "dsh-pactflow-service": "./bin/generate-service.mjs"
+  },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
@@ -59,7 +62,8 @@
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "presets/**/*",
-    "README.md"
+    "README.md",
+    "bin/generate-service.mjs"
   ],
   "dependencies": {
     "@kubernetes/client-node": "2.0.0",

@@ -1,6 +1,6 @@
 /** Host-owned Git checkout, task branch, and worktree operations. */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -198,6 +198,7 @@ export class PactFlowGitWorkspace {
     workspace: string | undefined,
     sessionId: string,
     needId: string,
+    needRevision: number,
     binding: PactFlowGitBinding,
     remoteRefs: readonly string[],
     secret?: PactFlowGitAuthSecret,
@@ -227,11 +228,33 @@ export class PactFlowGitWorkspace {
     const baseCommit = await this.git(root, [
       'rev-parse', '--verify', `refs/remotes/${binding.remote}/${binding.defaultBranch}^{commit}`,
     ])
-    const suffix = randomUUID().slice(0, 12)
+    const suffix = `r${String(needRevision)}`
     const branch = `pactflow/closing/${needId}/${suffix}`
     await this.git(root, ['check-ref-format', '--branch', branch])
     const projectKey = createHash('sha256').update(sessionId).digest('hex').slice(0, 20)
     const worktreePath = join(this.worktreeRoot, 'closing', projectKey, suffix)
+    const remoteClosingRef = `refs/remotes/${binding.remote}/${branch}`
+    const existingRemote = await this.withAuthentication(secret, async environment =>
+      this.git(root, ['ls-remote', '--heads', binding.remote, branch], environment))
+    if (existingRemote.length > 0) {
+      await this.withAuthentication(secret, async (environment) => {
+        await this.git(root, [
+          'fetch', '--no-tags', binding.remote, `refs/heads/${branch}:${remoteClosingRef}`,
+        ], environment)
+      })
+      const commit = await this.git(root, ['rev-parse', '--verify', `${remoteClosingRef}^{commit}`])
+      if (!await this.exists(worktreePath)) {
+        const localBranch = await this.git(root, ['branch', '--list', branch])
+        await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
+        await this.git(root, localBranch.length > 0
+          ? ['worktree', 'add', worktreePath, branch]
+          : ['worktree', 'add', '-b', branch, worktreePath, commit])
+      }
+      return { branch, commit, worktreePath }
+    }
+    if (await this.exists(worktreePath) || (await this.git(root, ['branch', '--list', branch])).length > 0) {
+      throw new Error('PactFlow found an unpushed local closing attempt; clean it before retry')
+    }
     await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
     await this.git(root, ['worktree', 'add', '-b', branch, worktreePath, baseCommit])
     for (const taskBranch of branches) {

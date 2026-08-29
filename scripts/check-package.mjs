@@ -17,6 +17,7 @@ const required = [
   'presets/pactflow/preset.yml',
   'presets/pactflow/plugin/index.js',
   'presets/pactflow/plugin/package.json',
+  'bin/generate-service.mjs',
 ]
 
 for (const relative of required) {

@@ -14,7 +14,8 @@
     "test:real-worker": "node scripts/run-real-worker-e2e.mjs",
     "test:real-k3s": "node scripts/run-real-k3s-e2e.mjs",
     "typecheck": "node scripts/build.mjs",
-    "verify:profile": "node scripts/verify-profile.mjs"
+    "verify:profile": "node scripts/verify-profile.mjs",
+    "service:generate": "node packages/dsh-pactflow/bin/generate-service.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../deepseek-harness-pactflow-p0/vendor/cordis",

@@ -97,6 +97,7 @@ export interface PactFlowK3sSettings {
   readonly imagePullSecret: string
   readonly pollIntervalMs: number
   readonly templates: readonly PactFlowHarnessTemplateView[]
+  readonly finishedJobTtlSeconds?: number
 }
 
 export interface PactFlowSettingsView {
@@ -245,6 +246,7 @@ export interface PactFlowK3sRunSpec {
   readonly cpuLimit: string
   readonly memoryLimit: string
   readonly activeDeadlineSeconds: number
+  readonly finishedJobTtlSeconds: number
 }
 
 export interface PactFlowK3sResult {

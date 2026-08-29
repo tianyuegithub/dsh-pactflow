@@ -88,6 +88,7 @@ describe('PactFlow K3s cold reconciliation', () => {
         modelSecretName: 'model-secret', gitSecretName: 'git-secret',
         cpuRequest: '100m', memoryRequest: '128Mi', cpuLimit: '1', memoryLimit: '1Gi',
         activeDeadlineSeconds: 600,
+        finishedJobTtlSeconds: 86_400,
       }
       const node = { ...ready, state: 'claimed' as const, revision: 2, updatedAt: finishedAt - 1_000 }
       const run: PactFlowRun = {

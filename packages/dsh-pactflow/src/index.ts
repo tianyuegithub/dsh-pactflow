@@ -104,6 +104,7 @@ export class PactFlowService extends TypertRemoteService {
       context: z.string(),
       imagePullSecret: z.string().required(),
       pollIntervalMs: z.number().default(2_000),
+      finishedJobTtlSeconds: z.number().default(86_400),
       templates: z.array(z.object({
         id: z.string().required(),
         harness: z.union(['claude', 'codex', 'opencode', 'dsh'] as const).required(),
@@ -313,19 +314,29 @@ export class PactFlowService extends TypertRemoteService {
       session.header.cwd,
       session.id,
       need.id,
+      need.revision,
       binding,
       taskRuns.map(run => run.gitResult!.remoteRef),
       gitSecret,
     )
-    const pullRequest = await this.gitea.createPullRequest(binding.gitea, giteaToken.value, {
-      title: `PactFlow: ${need.title}`,
-      body: `Need ${need.id}\n\nVerified task branches: ${taskRuns.length}`,
-      head: integration.branch,
-      base: binding.defaultBranch,
-    })
-    const merged = await this.gitea.mergePullRequest(
-      binding.gitea, giteaToken.value, pullRequest.number, integration.commit,
+    const existingPullRequest = await this.gitea.findPullRequest(
+      binding.gitea, giteaToken.value, integration.branch, binding.defaultBranch,
     )
+    const pullRequest = existingPullRequest ?? await this.gitea.createPullRequest(
+      binding.gitea,
+      giteaToken.value,
+      {
+        title: `PactFlow: ${need.title}`,
+        body: `Need ${need.id}\n\nVerified task branches: ${taskRuns.length}`,
+        head: integration.branch,
+        base: binding.defaultBranch,
+      },
+    )
+    const merged = pullRequest.merged
+      ? pullRequest
+      : await this.gitea.mergePullRequest(
+        binding.gitea, giteaToken.value, pullRequest.number, integration.commit,
+      )
     if (!merged.merged || merged.mergeCommit === undefined) {
       throw new Error('PactFlow Gitea PR did not report a merged commit')
     }

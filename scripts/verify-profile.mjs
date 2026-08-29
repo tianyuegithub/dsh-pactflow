@@ -25,6 +25,16 @@ try {
   requireText(installed, '/lib/index.js')
   await bootWeb()
 
+  // Re-adding the same complete artifact exercises the profile upgrade path:
+  // pnpm may replace or retain it, but Bundle order and activation must stay singular.
+  runDsh(['plugin', '--profile', 'web', 'add', tarball])
+  const upgraded = runDsh(['--profile', 'web', '--dump-config'])
+  requireText(upgraded, '# == dsh-pactflow')
+  if (upgraded.split('# == dsh-pactflow').length !== 2) {
+    throw new Error('profile upgrade duplicated the dsh-pactflow Bundle layer')
+  }
+  await bootWeb()
+
   runDsh(['plugin', '--profile', 'web', 'remove', 'dsh-pactflow'])
   const removed = runDsh(['--profile', 'web', '--dump-config'])
   rejectText(removed, 'dsh-pactflow')
