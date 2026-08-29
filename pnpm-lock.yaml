@@ -11,6 +11,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../deepseek-harness-pactflow-p0/vendor/cordis
         version: link:../deepseek-harness-pactflow-p0/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/core/agent
+        version: link:../deepseek-harness-pactflow-p0/packages/core/agent
       '@deepseek-ai/dsh-api-remotes':
         specifier: link:../deepseek-harness-pactflow-p0/packages/api/remotes
         version: link:../deepseek-harness-pactflow-p0/packages/api/remotes
@@ -50,6 +53,12 @@ importers:
       '@deepseek-ai/dsh-session-projection':
         specifier: link:../deepseek-harness-pactflow-p0/packages/session/session-projection
         version: link:../deepseek-harness-pactflow-p0/packages/session/session-projection
+      '@deepseek-ai/dsh-session-query':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/session-query/session-query
+        version: link:../deepseek-harness-pactflow-p0/packages/session-query/session-query
+      '@deepseek-ai/dsh-subagent':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
+        version: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
       '@deepseek-ai/dsh-typert-generator':
         specifier: link:../deepseek-harness-pactflow-p0/packages/typert/generator
         version: link:../deepseek-harness-pactflow-p0/packages/typert/generator

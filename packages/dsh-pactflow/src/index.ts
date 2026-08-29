@@ -4,12 +4,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/dsh-session'
+import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
+import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
+import type { SubagentResult, SubagentRun, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_PROJECTIONS } from './domain.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
   ClaimPactFlowNodeRequest,
   CreatePactFlowNeedRequest,
   CreatePactFlowNodeRequest,
+  DispatchPactFlowLocalNodeRequest,
   InitializePactFlowProjectRequest,
   PactFlowClaimResult,
   PactFlowDagProjection,
@@ -19,6 +23,7 @@ import type {
   PactFlowPhase,
   PactFlowProject,
   PactFlowProjectProjection,
+  PactFlowProjectRecord,
   PactFlowReview,
   PactFlowRun,
   RecordPactFlowReviewRequest,
@@ -356,6 +361,110 @@ export class PactFlowService extends TypertRemoteService {
     return this.ctx.sessionProjections.stateOf(session, 'pactflowDag') ?? { byId: {} }
   }
 
+  /** Discover every live or persisted PactFlow root Session without a second registry. */
+  @Remote('listProjects')
+  async listProjects(): Promise<readonly PactFlowProjectRecord[]> {
+    const query = this.ctx.get('sessionQuery') as SessionQueryEngine | undefined
+    if (query === undefined) throw new Error('PactFlow project discovery requires sessionQuery')
+    const records = (await query.listSessions())
+      .filter(record => record.header.agentPreset === 'pactflow')
+    return await Promise.all(records.map(async (record): Promise<PactFlowProjectRecord> => {
+      const live = this.ctx.sessions.get(record.header.id)
+      const project = live === undefined
+        ? this.projectFromEvents((await query.readSession(record.header.id)).events)
+        : this.ctx.sessionProjections.stateOf(live, 'pactflowProject')?.project ?? null
+      return {
+        sessionId: record.header.id,
+        live: record.live,
+        persisted: record.persisted,
+        project,
+      }
+    }))
+  }
+
+  /** Claim a node, execute one DSH one-shot Subagent, and settle from its terminal result. */
+  @Remote('dispatchLocalNode')
+  async dispatchLocalNode(
+    sessionId: string,
+    request: DispatchPactFlowLocalNodeRequest,
+  ): Promise<PactFlowClaimResult> {
+    const session = this.livePactFlowSession(sessionId)
+    const agents = this.ctx.get('agents') as AgentRegistry | undefined
+    const subagents = this.ctx.get('subagents') as SubagentRuntime | undefined
+    const parent = agents?.get(session.id)
+    if (parent === undefined) throw new Error(`session "${session.id}" has no live parent Agent`)
+    if (subagents === undefined) throw new Error('PactFlow local dispatch requires the Subagent runtime')
+    if (subagents.getProvider(request.provider) === undefined) {
+      throw new Error(`PactFlow Subagent provider "${request.provider}" is not registered`)
+    }
+    const prompt = request.prompt.trim()
+    if (prompt.length === 0) throw new Error('PactFlow local Worker prompt must be non-empty')
+
+    let owned = this.claimNode(sessionId, request)
+    const controller = new AbortController()
+    let child: SubagentRun
+    try {
+      child = await subagents.start(request.provider, {
+        label: owned.node.title,
+        prompt: [{ type: 'text', text: prompt }],
+        parent,
+        signal: controller.signal,
+      })
+    } catch (error) {
+      return this.settleRun(sessionId, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: 'failed',
+        outcome: this.boundedOutcome(error),
+      })
+    }
+    owned = this.renewRun(sessionId, {
+      runId: owned.run.id,
+      claimId: owned.run.claimId,
+      leaseDurationMs: request.leaseDurationMs,
+    })
+    const renewEvery = Math.max(1_000, Math.floor(request.leaseDurationMs / 2))
+    const timer = setInterval(() => {
+      try {
+        owned = this.renewRun(sessionId, {
+          runId: owned.run.id,
+          claimId: owned.run.claimId,
+          leaseDurationMs: request.leaseDurationMs,
+        })
+      } catch {
+        controller.abort('PactFlow lease renewal failed')
+      }
+    }, renewEvery)
+    try {
+      let result: SubagentResult
+      try {
+        result = await child.result
+      } catch (error) {
+        clearInterval(timer)
+        return this.settleRun(sessionId, {
+          runId: owned.run.id,
+          claimId: owned.run.claimId,
+          expectedNodeRevision: owned.node.revision,
+          state: 'failed',
+          outcome: this.boundedOutcome(error),
+        })
+      }
+      return this.settleRun(sessionId, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: result.stopReason === 'completed'
+          ? 'succeeded'
+          : result.stopReason === 'aborted' ? 'cancelled' : 'failed',
+        outcome: this.subagentOutcome(result),
+      })
+    } finally {
+      clearInterval(timer)
+      await child.dispose()
+    }
+  }
+
   /** Resolve a live Session without exporting DSH object identity over the wire. */
   private liveSession(sessionId: string): Session {
     if (sessionId.length === 0) throw new Error('sessionId must be non-empty')
@@ -496,6 +605,29 @@ export class PactFlowService extends TypertRemoteService {
       }
       this.events.append(session, 'pactflow/node-updated', { v: 1, node })
     }
+  }
+
+  /** Fold the single immutable project initialization fact from a cold log. */
+  private projectFromEvents(events: readonly { readonly type: string; readonly data: unknown }[]): PactFlowProject | null {
+    const event = events.find(candidate => candidate.type === 'pactflow/project-initialized')
+    if (event === undefined) return null
+    const data = event.data as { readonly v?: unknown; readonly project?: PactFlowProject }
+    if (data.v !== 1 || data.project === undefined) throw new Error('stored PactFlow project event is unsupported')
+    return data.project
+  }
+
+  private subagentOutcome(result: SubagentResult): string {
+    const text = result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    return this.boundedOutcome(result.diagnostic ?? (text || result.stopReason))
+  }
+
+  /** Keep operational outcomes useful without turning the Session Log into an output dump. */
+  private boundedOutcome(value: unknown): string {
+    const rendered = value instanceof Error ? value.message : String(value)
+    const encoded = new TextEncoder().encode(rendered)
+    return encoded.length <= 4_096
+      ? rendered
+      : `${new TextDecoder().decode(encoded.slice(0, 4_080))}…`
   }
 }
 

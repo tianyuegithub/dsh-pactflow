@@ -203,6 +203,17 @@ export interface PactFlowClaimResult {
   readonly run: PactFlowRun
 }
 
+export interface DispatchPactFlowLocalNodeRequest extends ClaimPactFlowNodeRequest {
+  readonly prompt: string
+}
+
+export interface PactFlowProjectRecord {
+  readonly sessionId: string
+  readonly live: boolean
+  readonly persisted: boolean
+  readonly project: PactFlowProject | null
+}
+
 export interface PactFlowProjectProjection { readonly project: PactFlowProject | null }
 export interface PactFlowNeedsProjection { readonly byId: Readonly<Record<string, PactFlowNeed>> }
 export interface PactFlowDagProjection { readonly byId: Readonly<Record<string, PactFlowNode>> }

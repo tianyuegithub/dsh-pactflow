@@ -221,4 +221,97 @@ describe('PactFlow domain foundation', () => {
       vi.useRealTimers()
     }
   })
+
+  it('discovers projects only from Session headers and reads live projections', async () => {
+    const ctx = await harness()
+    const pactflow = ctx.sessions.create(SessionId('listed-pactflow'), { meta: { agentPreset: 'pactflow' } })
+    const project = ctx.pactflow.initialize(pactflow.id, { name: 'Listed' })
+    const standard = ctx.sessions.create(SessionId('listed-standard'), { meta: { agentPreset: 'standard' } })
+    ctx.provide('sessionQuery', {
+      listSessions: () => Promise.resolve([
+        { header: pactflow.header, live: true, persisted: false },
+        { header: standard.header, live: true, persisted: false },
+      ]),
+      readSession: () => Promise.reject(new Error('live project must not cold-read')),
+    } as never)
+
+    await expect(ctx.pactflow.listProjects()).resolves.toEqual([{
+      sessionId: pactflow.id,
+      live: true,
+      persisted: false,
+      project,
+    }])
+  })
+
+  it('dispatches a local Subagent only after parent/provider preflight and settles its Run', async () => {
+    const ctx = await harness()
+    const session = ctx.sessions.create(SessionId('local-worker'), { meta: { agentPreset: 'pactflow' } })
+    ctx.pactflow.initialize(session.id, { name: 'Local worker' })
+    ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+    const node = ctx.pactflow.createNode(session.id, {
+      id: 'worker-node', needId: 'need', title: 'Worker node', dependencies: [],
+    })
+    const parent = { id: session.id, session }
+    let disposed = false
+    let receivedPrompt = ''
+    ctx.provide('agents', { get: () => parent } as never)
+    ctx.provide('subagents', {
+      getProvider: (name: string) => name === 'spawn' ? { name } : undefined,
+      start: (_name: string, request: { prompt: readonly { type: string; text?: string }[] }) => {
+        receivedPrompt = request.prompt[0]?.text ?? ''
+        return Promise.resolve({
+          id: SessionId('child'),
+          localAgent: undefined,
+          result: receivedPrompt === 'infrastructure failure'
+            ? Promise.reject(new Error('worker transport disconnected'))
+            : Promise.resolve({
+              output: [{ type: 'text', text: 'implemented commit abc' }],
+              stopReason: 'completed',
+            }),
+          dispose: () => { disposed = true; return Promise.resolve() },
+        })
+      },
+    } as never)
+
+    const settled = await ctx.pactflow.dispatchLocalNode(session.id, {
+      nodeId: node.id,
+      expectedRevision: node.revision,
+      provider: 'spawn',
+      leaseDurationMs: 60_000,
+      prompt: 'Implement the node',
+    })
+    expect(receivedPrompt).toBe('Implement the node')
+    expect(disposed).toBe(true)
+    expect(settled).toMatchObject({
+      node: { state: 'succeeded' },
+      run: { state: 'succeeded', outcome: 'implemented commit abc' },
+    })
+
+    const untouched = ctx.pactflow.createNode(session.id, {
+      id: 'untouched', needId: 'need', title: 'Untouched', dependencies: [],
+    })
+    await expect(ctx.pactflow.dispatchLocalNode(session.id, {
+      nodeId: untouched.id,
+      expectedRevision: untouched.revision,
+      provider: 'missing',
+      leaseDurationMs: 60_000,
+      prompt: 'must not claim',
+    })).rejects.toThrow(/not registered/)
+    expect(ctx.pactflow.dag(session.id).byId.untouched).toMatchObject({ state: 'ready', revision: 1 })
+
+    const infrastructure = ctx.pactflow.createNode(session.id, {
+      id: 'infrastructure', needId: 'need', title: 'Infrastructure', dependencies: [],
+    })
+    const failed = await ctx.pactflow.dispatchLocalNode(session.id, {
+      nodeId: infrastructure.id,
+      expectedRevision: infrastructure.revision,
+      provider: 'spawn',
+      leaseDurationMs: 60_000,
+      prompt: 'infrastructure failure',
+    })
+    expect(failed).toMatchObject({
+      node: { state: 'failed' },
+      run: { state: 'failed', outcome: 'worker transport disconnected' },
+    })
+  })
 })
