@@ -21,7 +21,7 @@ dsh --profile web
 
 `dump-config` 必须出现 `# == dsh-pactflow`、`pactflowPresetRoot`、一个 `pactflow` Host row 和现有 `agent-presets` row。启动后，新会话模式列表必须出现 PactFlow；Standard 等其它模式不应出现 PactFlow 工具或控制台入口。
 
-离线交付目录还包含 `dsh-pactflow-0.2.0-source.bundle`，它是截至发布提交的完整 Git 历史恢复载体。安装或恢复前，在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`；安装包和源码包任一校验失败都必须停止。
+离线交付目录还包含 `dsh-pactflow-0.2.0-source.bundle` 和 `deepseek-harness-pactflow-prerequisites-129a6e2498.bundle`：前者保存插件截至发布提交的完整 Git 历史，后者保存尚未进入官方 DSH 的上游前置分支。安装或恢复前，在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`；安装包或任一源码包校验失败都必须停止。
 
 ## 3. 非密钥 Settings
 
