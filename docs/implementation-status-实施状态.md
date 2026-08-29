@@ -27,5 +27,6 @@
 
 ## 当前边界与下一安全动作
 
-- 尚未完成：真实 Gitea token 配置与显式 closing PR/merge；成功 Job/ConfigMap 的产品保留期与 closing 清理；四个 Harness 各自完整代码任务（当前只有 DSH 完整任务，其余三个为真实 API/Harness 探针）；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
-- 下一安全动作：先补 Claude Code/Codex/OpenCode 完整代码任务矩阵并验证零残留；随后实现 Gitea integration branch/PR/merge closing，真实 main 合并前给出精确外部写预览。
+- 完整任务矩阵：Claude Code、Codex、OpenCode、DSH 均已在真实 K3s Pod 中修改 `zeromai-demo`、测试、commit/push，Host fetch 到独立 worktree 并运行 `git diff --check` 后成功结算；三条新增矩阵与既有 DSH case 均已删除 Job、ConfigMap 和远端测试分支。
+- 尚未完成：真实 Gitea token 配置与显式 closing PR/merge；成功 Job/ConfigMap 的产品保留期与 closing 清理；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
+- 下一安全动作：实现 Gitea integration branch/PR/merge closing 与 release event，真实 main 合并前给出精确外部写预览；随后完成资源保留/清理策略和发布总审计。
