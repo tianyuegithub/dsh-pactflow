@@ -87,6 +87,12 @@ describe('PactFlow domain foundation', () => {
       const reader = await harness()
       await reader.plugin(JsonlSessionPersistence, { root, compression: 'none' })
       const stored = await reader.sessionPersistence.load(session.id)
+      reader.provide('sessionQuery', {
+        readSession: () => Promise.resolve({ session: stored.meta, events: [...stored.events] }),
+      } as never)
+      await expect(reader.pactflow.snapshot(session.id)).resolves.toMatchObject({
+        project: { project },
+      })
       const restored = reader.sessions.prepare(session.id, {
         seed: structuredClone([...stored.events]),
         meta: structuredClone(stored.meta),

@@ -20,7 +20,8 @@ try {
   const installed = runDsh(['--profile', 'web', '--dump-config'])
   requireText(installed, '# == dsh-pactflow')
   requireText(installed, 'pactflowPresetRoot')
-  requireText(installed, 'name: dsh-pactflow')
+  requireText(installed, 'id: pactflow')
+  requireText(installed, '/lib/index.js')
   await bootWeb()
 
   runDsh(['plugin', '--profile', 'web', 'remove', 'dsh-pactflow'])

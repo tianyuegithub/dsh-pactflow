@@ -364,8 +364,32 @@ export class PactFlowService extends TypertRemoteService {
 
   /** Read one consistent synchronous cut across all PactFlow projections. */
   @Remote('snapshot')
-  snapshot(sessionId: string): PactFlowSnapshot {
-    const session = this.livePactFlowSession(sessionId)
+  async snapshot(sessionId: string): Promise<PactFlowSnapshot> {
+    const session = this.ctx.sessions.get(SessionId(sessionId))
+    if (session !== undefined) {
+      if (session.header.agentPreset !== 'pactflow') {
+        throw new Error(`session "${session.id}" is not composed from the pactflow preset`)
+      }
+      return this.snapshotOfLive(session)
+    }
+    const query = this.ctx.get('sessionQuery') as SessionQueryEngine | undefined
+    if (query === undefined) throw new Error('cold PactFlow snapshots require sessionQuery')
+    const stored = await query.readSession(SessionId(sessionId))
+    if (stored.session.agentPreset !== 'pactflow') {
+      throw new Error(`session "${sessionId}" is not composed from the pactflow preset`)
+    }
+    const values = this.ctx.sessionProjections.restore({}, stored.events, 0, stored.session).snapshot.values
+    return {
+      project: values.pactflowProject ?? { project: null },
+      needs: values.pactflowNeeds ?? { byId: {} },
+      dag: values.pactflowDag ?? { byId: {} },
+      runs: values.pactflowRuns ?? { byId: {} },
+      delivery: values.pactflowDelivery ?? { reviews: {}, documents: {}, releases: {} },
+    }
+  }
+
+  /** Read one consistent synchronous cut from a live Session. */
+  private snapshotOfLive(session: Session): PactFlowSnapshot {
     return {
       project: this.ctx.sessionProjections.stateOf(session, 'pactflowProject') ?? { project: null },
       needs: this.ctx.sessionProjections.stateOf(session, 'pactflowNeeds') ?? { byId: {} },

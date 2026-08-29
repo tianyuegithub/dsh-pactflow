@@ -22,3 +22,4 @@
 - Preset mount 证据：真实 DSH Loader/Include/AgentLoop/AgentPresets 公开路径已解析打包目录、导入相对 Agent 插件、创建 PactFlow Agent 并通过 mount audit；工具 roster 精确 4 项，根层 roster 为空
 - 下一安全动作：使用已配置 Model Provider 运行一条 spawn/fork Worker 支线并回读 Session Log；该验收需要可用凭证并会发生真实模型调用
 - 里程碑 5 独立进度：原生 `shell.overlay` 已改为读取 `snapshot()` Typert Remote 的真实项目/Need/DAG/Run 表格，Host 以同步 Projection 一致切面响应；没有 mock 数据、iframe 或第二 Web 壳，React 复核确认独立 Remote 使用 `Promise.all`、静态样式已提升、列表 key 稳定
+- 里程碑 5 浏览器证据：DSH 官方 Web scaffold 真实加载外部 Bundle layer 与 Client Module，持久但未激活 Agent 的 PactFlow Session 显示条件 Header Action；Overlay 打开后 Host 经 `sessionQuery.readSession()` + `sessionProjections.restore()` 冷重建并渲染 Project/Need/DAG 真实数据。Playwright 1/1、领域/挂载 10/10、Profile install/boot/remove/clean-boot 全部通过

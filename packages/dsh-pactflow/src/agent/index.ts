@@ -26,9 +26,9 @@ export function apply(ctx: Context): void {
     description: 'Read the current PactFlow project and DAG projections. Use before any mutation.',
     parameters: {},
     output: OUTPUT,
-    execute(_args, exec) {
+    async execute(_args, exec) {
       const sessionId = requireSessionId(exec.agent?.session.id)
-      return Promise.resolve(jsonObject(ctx.pactflow.snapshot(sessionId)))
+      return jsonObject(await ctx.pactflow.snapshot(sessionId))
     },
   }))
 

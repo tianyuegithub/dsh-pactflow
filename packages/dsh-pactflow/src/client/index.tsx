@@ -174,6 +174,11 @@ export const inject = ['remote', 'sessions', 'slots', 'locale']
 /** Mount the generated PactFlow Remote contribution and native DSH UI surfaces. */
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   const disposeRemote = await ctx.remote.$mount(pactflowRemote)
+  const pactflow = ctx.get('remote.pactflow')
+  if (pactflow === undefined) {
+    await disposeRemote()
+    throw new Error('PactFlow Remote contribution mounted without its namespace service')
+  }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'pactflow: locale dictionaries')
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
     name: 'conversation.session.header.actions',
@@ -189,8 +194,8 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     inject: (): OverlayInjected => ({
       load: async (sessionId) => {
         const [health, snapshot] = await Promise.all([
-          ctx.remote.pactflow.health(),
-          ctx.remote.pactflow.snapshot(sessionId),
+          pactflow.health(),
+          pactflow.snapshot(sessionId),
         ])
         if (!health.ok) throw new Error(health.error.message)
         if (!snapshot.ok) throw new Error(snapshot.error.message)

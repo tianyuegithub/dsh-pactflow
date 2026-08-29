@@ -10,6 +10,7 @@
     "pack": "pnpm run build && pnpm --dir packages/dsh-pactflow pack --pack-destination ../../dist",
     "pack:check": "node scripts/check-package.mjs",
     "test": "vitest run packages/dsh-pactflow/tests",
+    "test:web": "vitest run --config vitest.e2e.config.ts",
     "typecheck": "node scripts/build.mjs",
     "verify:profile": "node scripts/verify-profile.mjs"
   },
@@ -49,6 +50,8 @@
     "tsdown": "0.22.2",
     "typescript": "6.0.3",
     "vitest": "4.1.8",
+    "vite-tsconfig-paths": "6.1.1",
+    "playwright": "1.61.1",
     "zod": "4.4.3"
   }
 }
