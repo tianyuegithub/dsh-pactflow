@@ -25,6 +25,15 @@ export function PactFlowProjectId(value: string): PactFlowProjectId {
   return value as PactFlowProjectId
 }
 
+/** Validate and brand one caller-owned need id. */
+export function PactFlowNeedId(value: string): PactFlowNeedId {
+  const normalized = value.trim()
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(normalized)) {
+    throw new Error('PactFlow need id must be 1-64 lower-kebab-case characters')
+  }
+  return normalized as PactFlowNeedId
+}
+
 export type PactFlowPhase =
   | 'backlog'
   | 'discussion'
@@ -117,6 +126,25 @@ export interface PactFlowRelease {
 
 export interface InitializePactFlowProjectRequest {
   readonly name: string
+}
+
+export interface CreatePactFlowNeedRequest {
+  readonly id: string
+  readonly title: string
+  readonly description: string
+}
+
+export interface RecordPactFlowReviewRequest {
+  readonly needId: string
+  readonly kind: PactFlowReview['kind']
+  readonly decision: PactFlowReview['decision']
+  readonly note: string
+}
+
+export interface TransitionPactFlowNeedRequest {
+  readonly needId: string
+  readonly expectedRevision: number
+  readonly to: PactFlowPhase
 }
 
 export interface PactFlowProjectProjection { readonly project: PactFlowProject | null }

@@ -92,4 +92,49 @@ describe('PactFlow domain foundation', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('enforces sequential phases, revision CAS, and human review gates', async () => {
+    const ctx = await harness()
+    const session = ctx.sessions.create(SessionId('workflow-project'), {
+      meta: { agentPreset: 'pactflow' },
+    })
+    ctx.pactflow.initialize(session.id, { name: 'Workflow' })
+    const backlog = ctx.pactflow.createNeed(session.id, {
+      id: 'need-1',
+      title: 'Ship workflow',
+      description: 'Implement the stage machine',
+    })
+    expect(backlog.phase).toBe('backlog')
+
+    const discussion = ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: 1, to: 'discussion',
+    })
+    expect(() => ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: 2, to: 'confirmed',
+    })).toThrow(/requires latest requirement review approval/)
+    ctx.pactflow.recordReview(session.id, {
+      needId: backlog.id, kind: 'requirement', decision: 'approved', note: '范围确认',
+    })
+    const confirmed = ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: discussion.revision, to: 'confirmed',
+    })
+    expect(() => ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: 2, to: 'design',
+    })).toThrow(/revision conflict/)
+    const design = ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: confirmed.revision, to: 'design',
+    })
+    expect(() => ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: design.revision, to: 'executing',
+    })).toThrow(/illegal PactFlow phase transition/)
+    ctx.pactflow.recordReview(session.id, {
+      needId: backlog.id, kind: 'design', decision: 'approved', note: '设计批准',
+    })
+    const planning = ctx.pactflow.transitionNeed(session.id, {
+      needId: backlog.id, expectedRevision: design.revision, to: 'planning',
+    })
+    expect(planning).toMatchObject({ phase: 'planning', revision: 5 })
+    expect(ctx.sessionProjections.snapshot(session).values.pactflowNeeds)
+      .toMatchObject({ byId: { 'need-1': { phase: 'planning', revision: 5 } } })
+  })
 })
