@@ -6,9 +6,10 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "pnpm run build && pnpm run pack:check",
+    "check": "pnpm run build && pnpm run test && pnpm run pack:check",
     "pack": "pnpm run build && pnpm --dir packages/dsh-pactflow pack --pack-destination ../../dist",
     "pack:check": "node scripts/check-package.mjs",
+    "test": "vitest run packages/dsh-pactflow/tests",
     "typecheck": "node scripts/build.mjs"
   },
   "devDependencies": {
@@ -23,6 +24,9 @@
     "@deepseek-ai/dsh-client-ui-session": "link:../deepseek-harness-pactflow-p0/packages/client/ui-session",
     "@deepseek-ai/dsh-client-ui-slots": "link:../deepseek-harness-pactflow-p0/packages/client/ui-slots",
     "@deepseek-ai/dsh-session": "link:../deepseek-harness-pactflow-p0/packages/core/session",
+    "@deepseek-ai/dsh-session-projection": "link:../deepseek-harness-pactflow-p0/packages/session/session-projection",
+    "@deepseek-ai/dsh-session-persistence": "link:../deepseek-harness-pactflow-p0/packages/session/session-persistence",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "link:../deepseek-harness-pactflow-p0/packages/session/session-persistence-jsonl",
     "@deepseek-ai/dsh-typert-generator": "link:../deepseek-harness-pactflow-p0/packages/typert/generator",
     "@deepseek-ai/dsh-typert-protocol": "link:../deepseek-harness-pactflow-p0/packages/typert/protocol",
     "@types/node": "^22.18.0",
@@ -30,6 +34,7 @@
     "react": "^18.3.1",
     "tsdown": "0.22.2",
     "typescript": "6.0.3",
+    "vitest": "4.1.8",
     "zod": "4.4.3"
   }
 }
