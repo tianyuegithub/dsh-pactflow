@@ -18,6 +18,7 @@ import type {
 } from './types.ts'
 
 const GIT_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/
+const K8S_NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/
 
 export interface PactFlowGitAuthSecret {
   readonly username: string
@@ -45,12 +46,17 @@ export class PactFlowGitWorkspace {
     const remoteUrl = this.credentialFreeRemote(await this.git(root, ['remote', 'get-url', remote]))
     await this.git(root, ['rev-parse', '--verify', `refs/remotes/${remote}/${defaultBranch}^{commit}`])
     const auth = this.auth(remoteUrl, request)
+    const k3sGitSecretName = request.k3sGitSecretName?.trim()
+    if (k3sGitSecretName !== undefined && !K8S_NAME.test(k3sGitSecretName)) {
+      throw new Error('PactFlow K3s Git Secret name is invalid')
+    }
     return {
       remote,
       remoteUrl,
       defaultBranch,
       validationCommands: this.validationCommands(request.validationCommands ?? []),
       ...auth === undefined ? {} : { auth },
+      ...k3sGitSecretName === undefined ? {} : { k3sGitSecretName },
     }
   }
 
@@ -148,6 +154,38 @@ export class PactFlowGitWorkspace {
     const remoteRef = `refs/remotes/${spec.remote}/${spec.branch}`
     const fetched = await this.git(root, ['rev-parse', '--verify', `${remoteRef}^{commit}`])
     if (fetched !== result.commit) throw new Error('PactFlow fetched task commit differs from the Worker result')
+    return { ...result, remoteRef, syncedAt: Date.now() }
+  }
+
+  /** Fetch a remote Worker branch, fast-forward its local worktree, and validate it. */
+  async acceptRemoteResult(
+    workspace: string | undefined,
+    spec: PactFlowGitRunSpec,
+    remoteCommit: string,
+    secret?: PactFlowGitAuthSecret,
+  ): Promise<PactFlowGitResult> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    if (!/^[0-9a-f]{40,64}$/.test(remoteCommit)) throw new Error('PactFlow remote Worker commit is invalid')
+    if ((spec.auth === undefined) !== (secret === undefined)) {
+      throw new Error('PactFlow Git authentication does not match the Run spec')
+    }
+    const remoteRef = `refs/remotes/${spec.remote}/${spec.branch}`
+    await this.withAuthentication(secret, async (environment) => {
+      await this.git(root, [
+        'fetch', '--no-tags', spec.remote,
+        `refs/heads/${spec.branch}:${remoteRef}`,
+      ], environment)
+    })
+    const fetched = await this.git(root, ['rev-parse', '--verify', `${remoteRef}^{commit}`])
+    if (fetched !== remoteCommit) throw new Error('PactFlow fetched task commit differs from the remote Worker result')
+    try {
+      await this.git(root, ['merge-base', '--is-ancestor', spec.baseCommit, fetched])
+    } catch {
+      throw new Error('PactFlow remote Worker commit is not descended from the Run baseline')
+    }
+    await this.git(spec.worktreePath, ['merge', '--ff-only', remoteRef])
+    const result = await this.validateResult(spec)
+    if (result.commit !== remoteCommit) throw new Error('PactFlow local worktree differs from the remote Worker commit')
     return { ...result, remoteRef, syncedAt: Date.now() }
   }
 

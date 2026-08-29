@@ -14,6 +14,8 @@ import type {
   PactFlowNeed,
   PactFlowNeedsProjection,
   PactFlowNode,
+  PactFlowK3sResult,
+  PactFlowK3sRunSpec,
   PactFlowProject,
   PactFlowProjectProjection,
   PactFlowRelease,
@@ -73,6 +75,7 @@ const gitBindingSchema = z.object({
   remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
   revision: z.number().int().positive(), boundAt: z.number().int().nonnegative(), auth: gitAuthSchema.optional(),
   validationCommands: z.array(validationCommandSchema),
+  k3sGitSecretName: z.string().min(1).optional(),
 }) as unknown as ZodType<PactFlowGitBinding>
 
 const gitRunSpecSchema = z.object({
@@ -87,6 +90,24 @@ const gitResultSchema = z.object({
   remoteRef: z.string().min(1), syncedAt: z.number().int().nonnegative(),
   validations: z.array(validationEvidenceSchema),
 }) as unknown as ZodType<PactFlowGitResult>
+
+const k3sRunSpecSchema = z.object({
+  templateId: z.string().min(1), namespace: z.string().min(1), jobName: z.string().min(1),
+  configMapName: z.string().min(1), image: z.string().min(1), imagePullSecret: z.string().min(1),
+  harness: z.enum(['claude', 'codex', 'opencode', 'dsh']),
+  apiMode: z.enum(['anthropic-messages', 'openai-responses', 'openai-chat-completions']),
+  model: z.string().min(1), baseUrl: z.string().min(1),
+  modelSecretName: z.string().min(1), gitSecretName: z.string().min(1),
+  cpuRequest: z.string().min(1), memoryRequest: z.string().min(1),
+  cpuLimit: z.string().min(1), memoryLimit: z.string().min(1),
+  activeDeadlineSeconds: z.number().int().positive(),
+}) as unknown as ZodType<PactFlowK3sRunSpec>
+
+const k3sResultSchema = z.object({
+  podName: z.string().min(1), exitCode: z.number().int(), commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  branch: z.string().min(1), harnessVersion: z.string(),
+  finishedAt: z.number().int().nonnegative(),
+}) as unknown as ZodType<PactFlowK3sResult>
 
 const projectSchema = z.object({
   id: z.string().min(1), name: z.string().min(1), revision: z.number().int().positive(),
@@ -111,8 +132,10 @@ const runSchema = z.object({
   attempt: z.number().int().positive(), provider: z.string().min(1),
   claimId: z.string().min(1),
   state: z.enum(['claimed', 'running', 'blocked', 'succeeded', 'failed', 'cancelled']),
-  leaseDeadline: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(), outcome: z.string().optional(),
+  leaseDeadline: z.number().int().nonnegative(), leaseDurationMs: z.number().int().positive().optional(),
+  updatedAt: z.number().int().nonnegative(), outcome: z.string().optional(),
   git: gitRunSpecSchema.optional(), gitResult: gitResultSchema.optional(),
+  k3s: k3sRunSpecSchema.optional(), k3sResult: k3sResultSchema.optional(),
 }) as unknown as ZodType<PactFlowRun>
 
 const reviewSchema = z.object({
@@ -207,6 +230,14 @@ export const pactflowRunsProjection: ProjectionDefinition<'pactflowRuns'> = {
         || event.data.run.state !== 'succeeded'
         || event.data.run.gitResult.branch !== event.data.run.git.branch)) {
       throw new Error('PactFlow Git result does not match its successful Run spec')
+    }
+    if (event.data.run.k3sResult !== undefined
+      && (event.data.run.k3s === undefined
+        || event.data.run.state !== 'succeeded'
+        || event.data.run.k3sResult.exitCode !== 0
+        || event.data.run.k3sResult.branch !== event.data.run.gitResult?.branch
+        || event.data.run.k3sResult.commit !== event.data.run.gitResult?.commit)) {
+      throw new Error('PactFlow K3s result does not match its successful Git result')
     }
     return { byId: { ...state.byId, [event.data.run.id]: event.data.run } }
   },

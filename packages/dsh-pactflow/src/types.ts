@@ -73,6 +73,23 @@ export type PactFlowNodeState =
   | 'cancelled'
   | 'archived'
 
+export type PactFlowHarness = 'claude' | 'codex' | 'opencode' | 'dsh'
+export type PactFlowApiMode = 'anthropic-messages' | 'openai-responses' | 'openai-chat-completions'
+
+export interface PactFlowHarnessTemplateView {
+  readonly id: string
+  readonly harness: PactFlowHarness
+  readonly apiMode: PactFlowApiMode
+  readonly image: string
+  readonly model: string
+  readonly baseUrl: string
+  readonly modelSecretName: string
+  readonly cpuRequest: string
+  readonly memoryRequest: string
+  readonly cpuLimit: string
+  readonly memoryLimit: string
+}
+
 export interface PactFlowProject {
   readonly id: PactFlowProjectId
   readonly name: string
@@ -91,6 +108,7 @@ export interface PactFlowGitBinding {
   readonly boundAt: number
   readonly auth?: PactFlowGitAuth
   readonly validationCommands: readonly PactFlowValidationCommand[]
+  readonly k3sGitSecretName?: string
 }
 
 /** Non-secret reference to one HTTPS username/token credential. */
@@ -162,10 +180,42 @@ export interface PactFlowRun {
   readonly claimId: string
   readonly state: 'claimed' | 'running' | 'blocked' | 'succeeded' | 'failed' | 'cancelled'
   readonly leaseDeadline: number
+  readonly leaseDurationMs?: number
   readonly updatedAt: number
   readonly outcome?: string
   readonly git?: PactFlowGitRunSpec
   readonly gitResult?: PactFlowGitResult
+  readonly k3s?: PactFlowK3sRunSpec
+  readonly k3sResult?: PactFlowK3sResult
+}
+
+export interface PactFlowK3sRunSpec {
+  readonly templateId: string
+  readonly namespace: string
+  readonly jobName: string
+  readonly configMapName: string
+  readonly image: string
+  readonly imagePullSecret: string
+  readonly harness: PactFlowHarness
+  readonly apiMode: PactFlowApiMode
+  readonly model: string
+  readonly baseUrl: string
+  readonly modelSecretName: string
+  readonly gitSecretName: string
+  readonly cpuRequest: string
+  readonly memoryRequest: string
+  readonly cpuLimit: string
+  readonly memoryLimit: string
+  readonly activeDeadlineSeconds: number
+}
+
+export interface PactFlowK3sResult {
+  readonly podName: string
+  readonly exitCode: number
+  readonly commit: string
+  readonly branch: string
+  readonly harnessVersion: string
+  readonly finishedAt: number
 }
 
 export interface PactFlowReview {
@@ -205,6 +255,7 @@ export interface BindPactFlowGitRequest {
   readonly username?: string
   readonly credentialRef?: string
   readonly validationCommands?: readonly PactFlowValidationCommand[]
+  readonly k3sGitSecretName?: string
 }
 
 export interface CreatePactFlowNeedRequest {
@@ -270,6 +321,43 @@ export interface DispatchPactFlowLocalNodeRequest extends ClaimPactFlowNodeReque
 }
 
 export type DispatchPactFlowGitNodeRequest = DispatchPactFlowLocalNodeRequest
+
+export interface DispatchPactFlowK3sNodeRequest {
+  readonly nodeId: string
+  readonly expectedRevision: number
+  readonly templateId: string
+  readonly prompt: string
+  readonly leaseDurationMs: number
+}
+
+export interface PactFlowHarnessProbeRequest {
+  readonly templateId: string
+  readonly prompt: string
+  readonly timeoutMs: number
+}
+
+export interface PactFlowHarnessProbeStage {
+  readonly name: 'validate' | 'create-job' | 'model-response' | 'cleanup'
+  readonly state: 'succeeded' | 'failed'
+  readonly detail: string
+}
+
+export interface PactFlowHarnessProbeResult {
+  readonly kind: 'harness'
+  readonly templateId: string
+  readonly harness: PactFlowHarness
+  readonly apiMode: PactFlowApiMode
+  readonly model: string
+  readonly baseUrl: string
+  readonly image: string
+  readonly modelSecretName: string
+  readonly prompt: string
+  readonly timeoutMs: number
+  readonly success: boolean
+  readonly durationMs: number
+  readonly output: string
+  readonly stages: readonly PactFlowHarnessProbeStage[]
+}
 
 export interface PactFlowProjectRecord {
   readonly sessionId: string

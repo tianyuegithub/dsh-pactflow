@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/dsh-session'
@@ -12,6 +13,10 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_PROJECTIONS } from './domain.ts'
 import { PactFlowGitWorkspace, type PactFlowGitAuthSecret } from './git-workspace.ts'
+import {
+  PactFlowK3sWorker,
+  type PactFlowK3sConfig,
+} from './k3s-worker.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
   BindPactFlowGitRequest,
@@ -19,6 +24,7 @@ import type {
   CreatePactFlowNeedRequest,
   CreatePactFlowNodeRequest,
   DispatchPactFlowGitNodeRequest,
+  DispatchPactFlowK3sNodeRequest,
   DispatchPactFlowLocalNodeRequest,
   InitializePactFlowProjectRequest,
   PactFlowClaimResult,
@@ -26,6 +32,11 @@ import type {
   PactFlowGitResult,
   PactFlowGitRunSpec,
   PactFlowHealth,
+  PactFlowHarnessTemplateView,
+  PactFlowHarnessProbeRequest,
+  PactFlowHarnessProbeResult,
+  PactFlowK3sResult,
+  PactFlowK3sRunSpec,
   PactFlowNeed,
   PactFlowNode,
   PactFlowPhase,
@@ -43,6 +54,10 @@ import type {
 } from './types.ts'
 
 export type { PactFlowHealth } from './types.ts'
+
+export interface Config {
+  readonly k3s?: false | PactFlowK3sConfig
+}
 
 const VERSION = '0.2.0'
 const PRESET_ROOT = fileURLToPath(new URL('../presets', import.meta.url))
@@ -74,12 +89,48 @@ declare module '@deepseek-ai/cordis' {
 /** Process-global Host service for the PactFlow product domain. */
 export class PactFlowService extends TypertRemoteService {
   static inject = ['sessions', 'sessionProjections']
+  static Config = z.object({
+    k3s: z.union([z.const(false), z.object({
+      namespace: z.string().default('pactflow'),
+      kubeconfig: z.string(),
+      context: z.string(),
+      imagePullSecret: z.string().required(),
+      pollIntervalMs: z.number().default(2_000),
+      templates: z.array(z.object({
+        id: z.string().required(),
+        harness: z.union(['claude', 'codex', 'opencode', 'dsh'] as const).required(),
+        apiMode: z.union([
+          'anthropic-messages', 'openai-responses', 'openai-chat-completions',
+        ] as const).required(),
+        image: z.string().required(),
+        model: z.string().required(),
+        baseUrl: z.string().required(),
+        modelSecretName: z.string().required(),
+        cpuRequest: z.string().required(),
+        memoryRequest: z.string().required(),
+        cpuLimit: z.string().required(),
+        memoryLimit: z.string().required(),
+      })).default([]),
+    })]).default(false),
+  })
 
   private readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
   private readonly git = new PactFlowGitWorkspace()
+  private readonly k3s: PactFlowK3sWorker | undefined
+  private readonly reconcilingK3s = new Set<string>()
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'pactflow')
+    this.k3s = config.k3s === undefined || config.k3s === false
+      ? undefined
+      : new PactFlowK3sWorker(config.k3s)
+    if (this.k3s !== undefined) {
+      ctx.on('agent/created', ({ agent }) => {
+        void this.reconcileK3sSession(agent.session).catch((error: unknown) => {
+          ctx.logger.warn('PactFlow K3s recovery failed for session "%s": %s', agent.id, this.boundedOutcome(error))
+        })
+      })
+    }
     ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
       version: '0.1.0',
@@ -310,7 +361,11 @@ export class PactFlowService extends TypertRemoteService {
   private claimNodeInSession(
     session: Session,
     request: ClaimPactFlowNodeRequest,
-    options: { readonly runId?: PactFlowRun['id']; readonly git?: PactFlowGitRunSpec } = {},
+    options: {
+      readonly runId?: PactFlowRun['id']
+      readonly git?: PactFlowGitRunSpec
+      readonly k3s?: PactFlowK3sRunSpec
+    } = {},
   ): PactFlowClaimResult {
     const current = this.node(session, request.nodeId)
     this.requireRevision('node', current.id, current.revision, request.expectedRevision)
@@ -335,8 +390,10 @@ export class PactFlowService extends TypertRemoteService {
       claimId: `claim-${randomUUID()}`,
       state: 'claimed',
       leaseDeadline: now + duration,
+      leaseDurationMs: duration,
       updatedAt: now,
       ...options.git === undefined ? {} : { git: options.git },
+      ...options.k3s === undefined ? {} : { k3s: options.k3s },
     }
     this.events.append(session, 'pactflow/run-claimed', { v: 1, run, node })
     return { node, run }
@@ -384,12 +441,17 @@ export class PactFlowService extends TypertRemoteService {
     session: Session,
     request: SettlePactFlowRunRequest,
     gitResult?: PactFlowGitResult,
+    k3sResult?: PactFlowK3sResult,
+    resultAt?: number,
   ): PactFlowClaimResult {
     const currentRun = this.run(session, request.runId)
     this.requireClaim(currentRun, request.claimId)
     if (this.isTerminalRun(currentRun)) throw new Error(`PactFlow Run "${currentRun.id}" already has a terminal result`)
     const now = Date.now()
-    if (now >= currentRun.leaseDeadline) throw new Error(`PactFlow Run "${currentRun.id}" result arrived after lease expiry`)
+    const observedAt = resultAt ?? now
+    if (!Number.isSafeInteger(observedAt) || observedAt < 0 || observedAt >= currentRun.leaseDeadline) {
+      throw new Error(`PactFlow Run "${currentRun.id}" result arrived after lease expiry`)
+    }
     const currentNode = this.node(session, currentRun.nodeId)
     this.requireRevision('node', currentNode.id, currentNode.revision, request.expectedNodeRevision)
     if (currentNode.revision !== currentRun.nodeRevision) {
@@ -407,6 +469,7 @@ export class PactFlowService extends TypertRemoteService {
       updatedAt: now,
       outcome: request.outcome,
       ...gitResult === undefined ? {} : { gitResult },
+      ...k3sResult === undefined ? {} : { k3sResult },
     }
     this.events.append(session, 'pactflow/run-settled', { v: 1, run, node })
     if (request.state === 'succeeded') this.readyDependents(session, node.needId)
@@ -483,6 +546,131 @@ export class PactFlowService extends TypertRemoteService {
       }
     }))
     return discovered.filter((record): record is PactFlowProjectRecord => record !== undefined)
+  }
+
+  /** List Host-configured Harness templates without returning Secret values. */
+  @Remote('listK3sTemplates')
+  listK3sTemplates(): readonly PactFlowHarnessTemplateView[] {
+    return this.k3s?.listTemplates() ?? []
+  }
+
+  /** Reconcile nonterminal K3s Runs for one live PactFlow Session on demand. */
+  @Remote('reconcileK3s')
+  async reconcileK3s(sessionId: string): Promise<PactFlowSnapshot> {
+    const session = this.livePactFlowSession(sessionId)
+    await this.reconcileK3sSession(session)
+    return this.snapshotOfLive(session)
+  }
+
+  /** Run one real Harness connectivity probe with explicit visible inputs. */
+  @Remote('probeHarness')
+  async probeHarness(request: PactFlowHarnessProbeRequest): Promise<PactFlowHarnessProbeResult> {
+    if (this.k3s === undefined) throw new Error('PactFlow K3s provider is not configured')
+    await this.k3s.preflight()
+    return await this.k3s.probe(request.templateId, request.prompt, request.timeoutMs)
+  }
+
+  /** Run one Git-backed node in a K3s Job and locally verify its pushed commit. */
+  @Remote('dispatchK3sNode')
+  async dispatchK3sNode(
+    sessionId: string,
+    request: DispatchPactFlowK3sNodeRequest,
+  ): Promise<PactFlowClaimResult> {
+    const session = this.livePactFlowSession(sessionId)
+    if (this.k3s === undefined) throw new Error('PactFlow K3s provider is not configured')
+    const project = this.requireProject(session)
+    if (project.git === undefined) throw new Error('PactFlow project has no Git binding')
+    if (project.git.k3sGitSecretName === undefined) {
+      throw new Error('PactFlow project has no K3s Git Secret binding')
+    }
+    const prompt = request.prompt.trim()
+    const leaseDurationMs = this.leaseDuration(request.leaseDurationMs)
+    const node = this.node(session, request.nodeId)
+    this.requireRevision('node', node.id, node.revision, request.expectedRevision)
+    if (node.state !== 'ready') throw new Error(`PactFlow node "${node.id}" is not ready`)
+    await this.k3s.preflight()
+    const runId = PactFlowRunId(`run-${randomUUID()}`)
+    const git = await this.git.plan(session.header.cwd, session.id, runId, node, project.git)
+    this.k3s.preflightRun(git, prompt)
+    const k3s = this.k3s.plan(runId, request.templateId, project.git.k3sGitSecretName, leaseDurationMs)
+    this.requireRevision('project', project.id, this.requireProject(session).revision, project.revision)
+    let owned = this.claimNodeInSession(session, {
+      nodeId: request.nodeId,
+      expectedRevision: request.expectedRevision,
+      provider: `k3s:${request.templateId}`,
+      leaseDurationMs,
+    }, { runId, git, k3s })
+    try {
+      await this.git.materialize(session.header.cwd, git)
+    } catch (error) {
+      return this.settleRunInSession(session, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: 'failed',
+        outcome: this.boundedOutcome(error),
+      })
+    }
+
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setInterval> | undefined
+    try {
+      owned = this.renewRun(session.id, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        leaseDurationMs,
+      })
+      timer = setInterval(() => {
+        try {
+          owned = this.renewRun(session.id, {
+            runId: owned.run.id,
+            claimId: owned.run.claimId,
+            leaseDurationMs,
+          })
+        } catch {
+          controller.abort('PactFlow K3s lease renewal failed')
+        }
+      }, Math.max(1_000, Math.floor(leaseDurationMs / 2)))
+      let remoteResult: PactFlowK3sResult
+      try {
+        remoteResult = await this.k3s.run(k3s, git, prompt, controller.signal)
+        if (remoteResult.branch !== git.branch) throw new Error('PactFlow K3s Worker returned another branch')
+      } catch (error) {
+        return this.settleRunInSession(session, {
+          runId: owned.run.id,
+          claimId: owned.run.claimId,
+          expectedNodeRevision: owned.node.revision,
+          state: controller.signal.aborted ? 'cancelled' : 'failed',
+          outcome: this.boundedOutcome(error),
+        })
+      }
+      let gitResult: PactFlowGitResult
+      try {
+        gitResult = await this.git.acceptRemoteResult(
+          session.header.cwd,
+          git,
+          remoteResult.commit,
+          await this.resolveGitAuth(git),
+        )
+      } catch (error) {
+        return this.settleRunInSession(session, {
+          runId: owned.run.id,
+          claimId: owned.run.claimId,
+          expectedNodeRevision: owned.node.revision,
+          state: 'failed',
+          outcome: this.boundedOutcome(error),
+        })
+      }
+      return this.settleRunInSession(session, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: 'succeeded',
+        outcome: `K3s Worker ${remoteResult.podName} committed ${remoteResult.commit}`,
+      }, gitResult, remoteResult, remoteResult.finishedAt)
+    } finally {
+      if (timer !== undefined) clearInterval(timer)
+    }
   }
 
   /** Claim a node, execute one DSH one-shot Subagent, and settle from its terminal result. */
@@ -653,6 +841,139 @@ export class PactFlowService extends TypertRemoteService {
     const resolved = await credentials.resolve(credentialRef(spec.auth.credentialRef))
     if (resolved === undefined) throw new Error('PactFlow Git credential reference is not configured')
     return { username: spec.auth.username, token: resolved.value }
+  }
+
+  /** Reattach every nonterminal K3s Run when its PactFlow Agent becomes live. */
+  private async reconcileK3sSession(session: Session): Promise<void> {
+    if (this.k3s === undefined || this.currentPreset(session) !== 'pactflow') return
+    const runs = Object.values(this.runState(session))
+      .filter(run => !this.isTerminalRun(run) && run.k3s !== undefined && run.git !== undefined)
+    await Promise.all(runs.map(run => this.reconcileK3sRun(session, run)))
+  }
+
+  private async reconcileK3sRun(session: Session, initial: PactFlowRun): Promise<void> {
+    if (this.k3s === undefined || initial.k3s === undefined || initial.git === undefined) return
+    const key = `${session.id}:${initial.id}`
+    if (this.reconcilingK3s.has(key)) return
+    this.reconcilingK3s.add(key)
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setInterval> | undefined
+    try {
+      let owned = { run: initial, node: this.node(session, initial.nodeId) }
+      let observation = await this.k3s.observe(initial.k3s)
+      if (observation.state === 'missing') {
+        if (Date.now() >= owned.run.leaseDeadline) {
+          this.expireRunInSession(session, owned.run, 'K3s Job is missing after lease expiry')
+        } else {
+          this.settleRunInSession(session, {
+            runId: owned.run.id,
+            claimId: owned.run.claimId,
+            expectedNodeRevision: owned.node.revision,
+            state: 'failed',
+            outcome: 'K3s Job is missing during recovery',
+          })
+        }
+        return
+      }
+      if (observation.state === 'pending') {
+        if (Date.now() >= owned.run.leaseDeadline) {
+          await this.k3s.cancelRun(initial.k3s)
+          this.expireRunInSession(session, owned.run, 'K3s Job exceeded its persisted lease')
+          return
+        }
+        const leaseDurationMs = owned.run.leaseDurationMs
+          ?? Math.max(1_000, owned.run.leaseDeadline - Date.now())
+        owned = this.renewRun(session.id, {
+          runId: owned.run.id,
+          claimId: owned.run.claimId,
+          leaseDurationMs,
+        })
+        timer = setInterval(() => {
+          try {
+            owned = this.renewRun(session.id, {
+              runId: owned.run.id,
+              claimId: owned.run.claimId,
+              leaseDurationMs,
+            })
+          } catch {
+            controller.abort('PactFlow recovered K3s lease renewal failed')
+          }
+        }, Math.max(1_000, Math.floor(leaseDurationMs / 2)))
+        try {
+          const result = await this.k3s.waitExisting(initial.k3s, controller.signal)
+          observation = { state: 'succeeded', result }
+        } catch (error) {
+          if (Date.now() >= owned.run.leaseDeadline) {
+            this.expireRunInSession(session, owned.run, 'K3s Job failed after lease expiry')
+          } else {
+            this.settleRunInSession(session, {
+              runId: owned.run.id,
+              claimId: owned.run.claimId,
+              expectedNodeRevision: owned.node.revision,
+              state: controller.signal.aborted ? 'cancelled' : 'failed',
+              outcome: this.boundedOutcome(error),
+            })
+          }
+          return
+        }
+      }
+      if (observation.state === 'failed') {
+        if (observation.finishedAt >= owned.run.leaseDeadline) {
+          this.expireRunInSession(session, owned.run, 'K3s Job failed after lease expiry')
+          return
+        }
+        this.settleRunInSession(session, {
+          runId: owned.run.id,
+          claimId: owned.run.claimId,
+          expectedNodeRevision: owned.node.revision,
+          state: 'failed',
+          outcome: observation.outcome,
+        }, undefined, undefined, observation.finishedAt)
+        return
+      }
+      if (observation.state !== 'succeeded') {
+        throw new Error(`PactFlow K3s recovery remained ${observation.state}`)
+      }
+      const remoteResult = observation.result
+      if (remoteResult.finishedAt >= owned.run.leaseDeadline) {
+        this.expireRunInSession(session, owned.run, 'K3s Worker completed after lease expiry')
+        return
+      }
+      if (remoteResult.branch !== initial.git.branch) throw new Error('recovered K3s Worker returned another branch')
+      const gitResult = await this.git.acceptRemoteResult(
+        session.header.cwd,
+        initial.git,
+        remoteResult.commit,
+        await this.resolveGitAuth(initial.git),
+      )
+      this.settleRunInSession(session, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: 'succeeded',
+        outcome: `Recovered K3s Worker ${remoteResult.podName} committed ${remoteResult.commit}`,
+      }, gitResult, remoteResult, remoteResult.finishedAt)
+    } finally {
+      if (timer !== undefined) clearInterval(timer)
+      this.reconcilingK3s.delete(key)
+    }
+  }
+
+  /** Record scheduler-owned expiry; this is not a late Worker result. */
+  private expireRunInSession(session: Session, currentRun: PactFlowRun, outcome: string): PactFlowClaimResult {
+    if (this.isTerminalRun(currentRun)) throw new Error(`PactFlow Run "${currentRun.id}" is already terminal`)
+    const now = Date.now()
+    if (now < currentRun.leaseDeadline) throw new Error(`PactFlow Run "${currentRun.id}" lease is still active`)
+    const currentNode = this.node(session, currentRun.nodeId)
+    if (currentNode.revision !== currentRun.nodeRevision) {
+      throw new Error(`PactFlow Run "${currentRun.id}" expiry targets a stale node revision`)
+    }
+    const node: PactFlowNode = {
+      ...currentNode, state: 'failed', revision: currentNode.revision + 1, updatedAt: now,
+    }
+    const run: PactFlowRun = { ...currentRun, state: 'failed', outcome, updatedAt: now }
+    this.events.append(session, 'pactflow/run-settled', { v: 1, run, node })
+    return { run, node }
   }
 
   /** Resolve a live Session without exporting DSH object identity over the wire. */

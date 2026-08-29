@@ -10,6 +10,7 @@
     "src/agent/index.ts",
     "src/domain.ts",
     "src/git-workspace.ts",
+    "src/k3s-worker.ts",
     "src/types.ts"
   ]
 }

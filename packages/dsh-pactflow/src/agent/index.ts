@@ -30,6 +30,7 @@ export function apply(ctx: Context): void {
       default_branch: { type: 'string', required: true, description: 'Protected baseline branch, usually main.' },
       username: { type: 'string', description: 'HTTPS Git username; configure together with credential_ref.' },
       credential_ref: { type: 'string', description: 'DSH Credentials reference containing the HTTPS token; never the token value.' },
+      k3s_git_secret_name: { type: 'string', description: 'Existing K3s Secret containing id_ed25519 and known_hosts for remote Workers.' },
       validation_commands: {
         type: 'array',
         description: 'Host-side validation commands executed without a shell after the Worker commits and before push.',
@@ -52,6 +53,7 @@ export function apply(ctx: Context): void {
         defaultBranch: args.default_branch,
         ...args.username === undefined ? {} : { username: args.username },
         ...args.credential_ref === undefined ? {} : { credentialRef: args.credential_ref },
+        ...args.k3s_git_secret_name === undefined ? {} : { k3sGitSecretName: args.k3s_git_secret_name },
         ...args.validation_commands === undefined ? {} : {
           validationCommands: args.validation_commands.map(command => ({
             command: command.command,
@@ -168,6 +170,29 @@ export function apply(ctx: Context): void {
         nodeId: args.node_id,
         expectedRevision: args.expected_revision,
         provider: args.provider,
+        prompt: args.prompt,
+        leaseDurationMs: args.lease_duration_ms,
+      }))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'pactflow_dispatch_k3s',
+    description: 'Execute one Git-backed node through a Host-configured K3s Harness template. Each template fixes its supported API mode; Secret values stay in Kubernetes.',
+    parameters: {
+      node_id: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+      template_id: { type: 'string', required: true, description: 'Configured K3s Harness template id.' },
+      prompt: { type: 'string', required: true, description: 'Complete bounded Worker instruction requiring tests and a task-branch commit.' },
+      lease_duration_ms: { type: 'integer', required: true },
+    },
+    output: OUTPUT,
+    timeoutMs: 86_400_000,
+    async execute(args, exec) {
+      return jsonObject(await ctx.pactflow.dispatchK3sNode(requireSessionId(exec.agent?.session.id), {
+        nodeId: args.node_id,
+        expectedRevision: args.expected_revision,
+        templateId: args.template_id,
         prompt: args.prompt,
         leaseDurationMs: args.lease_duration_ms,
       }))

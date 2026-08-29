@@ -546,6 +546,7 @@ describe('PactFlow domain foundation', () => {
       'pactflow_create_need',
       'pactflow_create_node',
       'pactflow_dispatch_git',
+      'pactflow_dispatch_k3s',
       'pactflow_dispatch_local',
       'pactflow_initialize',
       'pactflow_transition_need',

@@ -4,7 +4,12 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import pactflowRemote from 'dsh-pactflow/remote'
-import type { PactFlowHealth, PactFlowSnapshot } from '../types.ts'
+import type {
+  PactFlowHarnessProbeResult,
+  PactFlowHarnessTemplateView,
+  PactFlowHealth,
+  PactFlowSnapshot,
+} from '../types.ts'
 
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
@@ -34,6 +39,10 @@ type PactFlowLocaleKey =
   | 'gitCommit'
   | 'attempt'
   | 'validations'
+  | 'k3sTemplates'
+  | 'apiMode'
+  | 'harnessTest'
+  | 'testing'
   | 'empty'
 
 const zh: Record<PactFlowLocaleKey, string> = {
@@ -54,6 +63,10 @@ const zh: Record<PactFlowLocaleKey, string> = {
   gitCommit: '提交',
   attempt: '尝试',
   validations: '验证命令',
+  k3sTemplates: 'K3s Harness 模板',
+  apiMode: 'API 模式',
+  harnessTest: 'Harness 测试',
+  testing: '测试中…',
   empty: '暂无数据',
 }
 
@@ -75,6 +88,10 @@ const en: Record<PactFlowLocaleKey, string> = {
   gitCommit: 'Commit',
   attempt: 'Attempt',
   validations: 'Validation commands',
+  k3sTemplates: 'K3s Harness templates',
+  apiMode: 'API mode',
+  harnessTest: 'Harness test',
+  testing: 'Testing…',
   empty: 'No data',
 }
 
@@ -91,6 +108,9 @@ interface OverlayState {
   readonly health: PactFlowHealth | null
   readonly snapshot: PactFlowSnapshot | null
   readonly error: string | null
+  readonly templates: readonly PactFlowHarnessTemplateView[]
+  readonly probingTemplateId: string | null
+  readonly probe: PactFlowHarnessProbeResult | null
 }
 
 const overlay = createSnapshotStore<OverlayState>({
@@ -100,6 +120,9 @@ const overlay = createSnapshotStore<OverlayState>({
   health: null,
   snapshot: null,
   error: null,
+  templates: [],
+  probingTemplateId: null,
+  probe: null,
 })
 
 type HeaderActionProps =
@@ -107,7 +130,12 @@ type HeaderActionProps =
   & PropsLocale<typeof NS>
 
 interface OverlayInjected {
-  load(sessionId: string): Promise<{ readonly health: PactFlowHealth; readonly snapshot: PactFlowSnapshot }>
+  load(sessionId: string): Promise<{
+    readonly health: PactFlowHealth
+    readonly snapshot: PactFlowSnapshot
+    readonly templates: readonly PactFlowHarnessTemplateView[]
+  }>
+  probeHarness(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowHarnessProbeResult>
 }
 
 type OverlayProps =
@@ -123,7 +151,10 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
     <button
       type="button"
       onClick={() => {
-        overlay.set({ open: true, sessionId, phase: 'idle', health: null, snapshot: null, error: null })
+        overlay.set({
+          open: true, sessionId, phase: 'idle', health: null, snapshot: null, error: null,
+          templates: [], probingTemplateId: null, probe: null,
+        })
       }}
       style={buttonStyle}
     >
@@ -133,7 +164,7 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-function PactFlowOverlay({ load, t }: OverlayProps) {
+function PactFlowOverlay({ load, probeHarness, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
 
   useEffect(() => {
@@ -178,7 +209,25 @@ function PactFlowOverlay({ load, t }: OverlayProps) {
           {state.health !== null && (
             <pre style={preStyle}>{JSON.stringify(state.health, null, 2)}</pre>
           )}
-          {state.snapshot !== null && <PactFlowProjectionTables snapshot={state.snapshot} t={t} />}
+          {state.snapshot !== null && (
+            <PactFlowProjectionTables
+              snapshot={state.snapshot}
+              templates={state.templates}
+              probingTemplateId={state.probingTemplateId}
+              onProbe={(templateId) => {
+                overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null })
+                void probeHarness(templateId, 'say hi to me', 180_000).then(
+                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe }),
+                  error => overlay.set({
+                    ...overlay.getSnapshot(), probingTemplateId: null,
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+                )
+              }}
+              t={t}
+            />
+          )}
+          {state.probe !== null && <pre style={probeStyle}>{JSON.stringify(state.probe, null, 2)}</pre>}
           {state.error !== null && <pre style={errorStyle}>{state.error}</pre>}
         </div>
       </section>
@@ -211,13 +260,20 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     locale: NS,
     inject: (): OverlayInjected => ({
       load: async (sessionId) => {
-        const [health, snapshot] = await Promise.all([
+        const [health, snapshot, templates] = await Promise.all([
           pactflow.health(),
           pactflow.snapshot(sessionId),
+          pactflow.listK3sTemplates(),
         ])
         if (!health.ok) throw new Error(health.error.message)
         if (!snapshot.ok) throw new Error(snapshot.error.message)
-        return { health: health.value, snapshot: snapshot.value }
+        if (!templates.ok) throw new Error(templates.error.message)
+        return { health: health.value, snapshot: snapshot.value, templates: templates.value }
+      },
+      probeHarness: async (templateId, prompt, timeoutMs) => {
+        const result = await pactflow.probeHarness({ templateId, prompt, timeoutMs })
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
       },
     }),
   }, PactFlowOverlay))
@@ -225,9 +281,12 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
 }
 
 function PactFlowProjectionTables({
-  snapshot, t,
+  snapshot, templates, probingTemplateId, onProbe, t,
 }: {
   readonly snapshot: PactFlowSnapshot
+  readonly templates: readonly PactFlowHarnessTemplateView[]
+  readonly probingTemplateId: string | null
+  readonly onProbe: (templateId: string) => void
   readonly t: (key: PactFlowLocaleKey) => string
 }) {
   const needs = Object.values(snapshot.needs.byId)
@@ -260,6 +319,31 @@ function PactFlowProjectionTables({
         run.gitResult === undefined ? '—' : `${t('gitCommit')}: ${run.gitResult.commit.slice(0, 12)}`,
         run.gitResult === undefined ? '—' : `${t('validations')}: ${run.gitResult.validations.length}`,
       ])} empty={t('empty')} />
+      <section style={cardStyle}>
+        <h2 style={sectionTitleStyle}>{t('k3sTemplates')}</h2>
+        {templates.length === 0 ? <p>{t('empty')}</p> : (
+          <table style={tableStyle}>
+            <tbody>{templates.map(template => (
+              <tr key={template.id}>
+                <td style={cellStyle}>{template.id}</td>
+                <td style={cellStyle}>{template.harness}</td>
+                <td style={cellStyle}>{template.apiMode}</td>
+                <td style={cellStyle}>{template.model}</td>
+                <td style={cellStyle}>
+                  <button
+                    type="button"
+                    disabled={probingTemplateId !== null}
+                    onClick={() => onProbe(template.id)}
+                    style={buttonStyle}
+                  >
+                    {probingTemplateId === template.id ? t('testing') : t('harnessTest')}
+                  </button>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </section>
     </div>
   )
 }
@@ -327,6 +411,7 @@ const subtitleStyle: CSSProperties = { margin: '6px 0 0', opacity: 0.72 }
 const bodyStyle: CSSProperties = { padding: 28 }
 const preStyle: CSSProperties = { padding: 16, overflow: 'auto', background: '#03100f' }
 const errorStyle: CSSProperties = { ...preStyle, color: '#ff8b8b' }
+const probeStyle: CSSProperties = { ...preStyle, maxHeight: 320, whiteSpace: 'pre-wrap' }
 const gridStyle: CSSProperties = { display: 'grid', gap: 16, marginTop: 20 }
 const cardStyle: CSSProperties = { border: '1px solid #263d39', borderRadius: 8, padding: 16 }
 const sectionTitleStyle: CSSProperties = { margin: '0 0 12px', fontSize: 16 }

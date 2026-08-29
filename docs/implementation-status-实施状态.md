@@ -2,7 +2,7 @@
 
 - 当前里程碑：6 —— Git/Gitea、K3s/Harbor 与多 Harness Worker
 - 状态：进行中；里程碑 1—4 已完成，里程碑 5 的原生控制台基础链已完成
-- 最后已验证提交：DSH 通用能力分支 `a18ee41c60`；Bundle 仓库 `8e40e18`，本轮 Git 凭证/同步/验证增量待提交
+- 最后已验证提交：DSH 通用能力分支 `a18ee41c60`；Bundle 仓库 `963f177`，本轮 K3s/多 Harness 增量待提交
 
 ## 已完成合同
 
@@ -12,15 +12,18 @@
 - 本地 Worker：零脉 Preset 暴露 8 个作用域编排工具，并组合 Bash、文件读写/搜索与工作区指令等编码能力；`dispatchLocalNode()` 使用 DSH 原生 Subagent Runtime，父 Provider/prompt 预检先于 claim，自动续租，失败和基础设施拒绝均持久终结。
 - Git worktree：DSH 通用 `SubagentStartRequest.cwd` capability 已在独立上游分支完成；零脉可绑定无密钥远端身份，从远端跟踪分支冻结 base commit，由 Host 生成任务分支与 DSH Home 下的 worktree，并只接受该分支上干净、可追溯的后代 commit。
 - Git 同步与验证：项目可保存 HTTPS 用户名和 DSH Credential Ref，不保存 token；Host 在清除凭证环境后执行结构化 `{command,args,timeoutMs}` 验证，复核 commit/clean tree，再用私有临时 AskPass push 任务分支并由根 checkout fetch/比对 commit。真实 Basic Auth Smart HTTP 集成测试通过，验证失败不会 push。
+- K3s Provider：使用 Kubernetes Client、不可变 ConfigMap/Job、digest 镜像、无 ServiceAccount token、非 root UID/GID 1001、SecretKeyRef、严格 SSH known_hosts 和 0 backoff；Pod 只 push 任务分支并通过 termination document 报告，Host fetch/快进本地 worktree、执行验证后才结算。Agent 恢复时会按持久 Job/spec 对账，接受租约内已完成结果、继续等待活动 Job、取消过期 Job或失败关闭缺失 Job。
+- Harness/协议矩阵：Harbor 实际项目为 `datavdl`，治理后镜像精确为 Claude Code、Codex、OpenCode、DSH 四个 digest；协议分别固定为 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions、OpenAI Chat Completions。`probeHarness` Remote 与原生模板表会显示 template/image/model/baseUrl/API mode/真实 prompt、逐步状态和有界输出；四个真实 K3s Harness 探针均返回 `hi` 并自动清理 Job。
 - 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
 
 ## 最新真实验收
 
 - `pnpm run test:real-worker`：真实浏览器选择零脉模式，真实 DeepSeek 父 Agent 调用初始化、Git 绑定、Need/Node 创建与 Git 派发工具；DSH `spawn` 子 Agent 在独立 worktree 创建文件、验证、`git add/commit`，Host 校验 branch、clean tree、base ancestry 和 commit 后记录成功 `pactflow/run-settled`。
+- `pnpm run test:real-k3s`：真实 DSH K3s Pod 基于 `tianyue/zeromai-demo` base commit 创建证明文件并提交/push 随机任务分支，Host fetch 到对应本地 worktree、运行 `/bin/test` 并成功结算；测试 Job、ConfigMap 和远端分支已全部删除。
 - 凭证只由测试启动器从 DSH Credentials 读取并作为子进程环境传入；原值未进入 argv、URL、Session Log、Tool result、测试输出或 Git。
 - 调试修复了两个真实边界：活动模式必须读 Projection，而非不可变 Header；Preset 内部 Package 必须包含 name/version，才能通过 DeepSeek request extension inventory 校验。
 
 ## 当前边界与下一安全动作
 
-- 尚未完成：真实 Gitea 项目/分支保护 API 对账与 closing 合并；K3s Run Spec、Secret、Job/Pod 对账；Harbor 模板与 Harness/协议兼容矩阵；远端真实 Worker。
-- 下一安全动作：实现 Gitea 只读仓库/分支保护检查和显式 closing 合并合同；真实 Gitea 写入验收需要精确外部写授权。并行安全范围转入 K3s Run Spec 与 Harness/协议模板。
+- 尚未完成：真实 Gitea 分支保护 API 与显式 closing 合并；模板持久 Settings/编辑表单与独立 API 协议探针；成功 Job/ConfigMap 的产品保留期与 closing 清理；四个 Harness 各自完整代码任务（当前只有 DSH 完整任务，其余三个为真实 Harness 探针）。
+- 下一安全动作：把 K3s 模板从静态 Profile config 接入 DSH Settings 与原生编辑/测试 UI，并补独立 API 协议探针；随后实现 Gitea closing 合同和剩余 Harness 完整任务矩阵。
