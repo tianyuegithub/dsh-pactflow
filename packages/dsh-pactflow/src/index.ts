@@ -24,6 +24,7 @@ import type {
   PactFlowProject,
   PactFlowProjectProjection,
   PactFlowProjectRecord,
+  PactFlowSnapshot,
   PactFlowReview,
   PactFlowRun,
   RecordPactFlowReviewRequest,
@@ -359,6 +360,20 @@ export class PactFlowService extends TypertRemoteService {
   dag(sessionId: string): PactFlowDagProjection {
     const session = this.livePactFlowSession(sessionId)
     return this.ctx.sessionProjections.stateOf(session, 'pactflowDag') ?? { byId: {} }
+  }
+
+  /** Read one consistent synchronous cut across all PactFlow projections. */
+  @Remote('snapshot')
+  snapshot(sessionId: string): PactFlowSnapshot {
+    const session = this.livePactFlowSession(sessionId)
+    return {
+      project: this.ctx.sessionProjections.stateOf(session, 'pactflowProject') ?? { project: null },
+      needs: this.ctx.sessionProjections.stateOf(session, 'pactflowNeeds') ?? { byId: {} },
+      dag: this.ctx.sessionProjections.stateOf(session, 'pactflowDag') ?? { byId: {} },
+      runs: this.ctx.sessionProjections.stateOf(session, 'pactflowRuns') ?? { byId: {} },
+      delivery: this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')
+        ?? { reviews: {}, documents: {}, releases: {} },
+    }
   }
 
   /** Discover every live or persisted PactFlow root Session without a second registry. */

@@ -28,10 +28,7 @@ export function apply(ctx: Context): void {
     output: OUTPUT,
     execute(_args, exec) {
       const sessionId = requireSessionId(exec.agent?.session.id)
-      return Promise.resolve(jsonObject({
-        project: ctx.pactflow.project(sessionId),
-        dag: ctx.pactflow.dag(sessionId),
-      }))
+      return Promise.resolve(jsonObject(ctx.pactflow.snapshot(sessionId)))
     },
   }))
 

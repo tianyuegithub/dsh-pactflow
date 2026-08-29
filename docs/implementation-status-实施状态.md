@@ -20,3 +20,4 @@
 - Host 进度：已完成 `listProjects()` 和 `dispatchLocalNode()` 的项目发现、预检、claim、续租、Subagent 调用和终态收敛合同
 - Agent-plane 进度：Preset 现在通过嵌套、无 `dsh.client` manifest 的自带插件注册 `pactflow_view/create_need/transition_need/dispatch_local` 4 个窄工具；作用域测试证明普通 Session 看不到它们，打包检查和 Profile install/boot/remove 复验通过
 - 下一安全动作：在测试 Profile 中真实创建 `agentPreset=pactflow` Session，验证 Preset mount audit 与工具 roster；然后使用已配置 Model 运行 spawn/fork Worker 支线并回读 Session Log
+- 里程碑 5 独立进度：原生 `shell.overlay` 已改为读取 `snapshot()` Typert Remote 的真实项目/Need/DAG/Run 表格，Host 以同步 Projection 一致切面响应；没有 mock 数据、iframe 或第二 Web 壳，React 复核确认独立 Remote 使用 `Promise.all`、静态样式已提升、列表 key 稳定

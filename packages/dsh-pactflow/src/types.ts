@@ -214,6 +214,14 @@ export interface PactFlowProjectRecord {
   readonly project: PactFlowProject | null
 }
 
+export interface PactFlowSnapshot {
+  readonly project: PactFlowProjectProjection
+  readonly needs: PactFlowNeedsProjection
+  readonly dag: PactFlowDagProjection
+  readonly runs: PactFlowRunsProjection
+  readonly delivery: PactFlowDeliveryProjection
+}
+
 export interface PactFlowProjectProjection { readonly project: PactFlowProject | null }
 export interface PactFlowNeedsProjection { readonly byId: Readonly<Record<string, PactFlowNeed>> }
 export interface PactFlowDagProjection { readonly byId: Readonly<Record<string, PactFlowNode>> }

@@ -4,7 +4,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import pactflowRemote from 'dsh-pactflow/remote'
-import type { PactFlowHealth } from '../types.ts'
+import type { PactFlowHealth, PactFlowSnapshot } from '../types.ts'
 
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
@@ -24,6 +24,11 @@ type PactFlowLocaleKey =
   | 'loading'
   | 'ready'
   | 'failed'
+  | 'project'
+  | 'needs'
+  | 'dag'
+  | 'runs'
+  | 'empty'
 
 const zh: Record<PactFlowLocaleKey, string> = {
   open: '打开零脉',
@@ -33,6 +38,11 @@ const zh: Record<PactFlowLocaleKey, string> = {
   loading: '正在验证 Host 与 Typert Remote…',
   ready: '外部 Bundle、Preset Root 与事件生产者已就绪',
   failed: '连接验证失败',
+  project: '项目',
+  needs: '需求与阶段',
+  dag: 'DAG 节点',
+  runs: 'Worker 运行',
+  empty: '暂无数据',
 }
 
 const en: Record<PactFlowLocaleKey, string> = {
@@ -43,6 +53,11 @@ const en: Record<PactFlowLocaleKey, string> = {
   loading: 'Checking Host and Typert Remote…',
   ready: 'External Bundle, preset root, and event producer are ready',
   failed: 'Connection check failed',
+  project: 'Project',
+  needs: 'Needs and phases',
+  dag: 'DAG nodes',
+  runs: 'Worker runs',
+  empty: 'No data',
 }
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -56,6 +71,7 @@ interface OverlayState {
   readonly sessionId: string | null
   readonly phase: 'idle' | 'loading' | 'ready' | 'failed'
   readonly health: PactFlowHealth | null
+  readonly snapshot: PactFlowSnapshot | null
   readonly error: string | null
 }
 
@@ -64,6 +80,7 @@ const overlay = createSnapshotStore<OverlayState>({
   sessionId: null,
   phase: 'idle',
   health: null,
+  snapshot: null,
   error: null,
 })
 
@@ -72,7 +89,7 @@ type HeaderActionProps =
   & PropsLocale<typeof NS>
 
 interface OverlayInjected {
-  health(): Promise<PactFlowHealth>
+  load(sessionId: string): Promise<{ readonly health: PactFlowHealth; readonly snapshot: PactFlowSnapshot }>
 }
 
 type OverlayProps =
@@ -88,7 +105,7 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
     <button
       type="button"
       onClick={() => {
-        overlay.set({ open: true, sessionId, phase: 'idle', health: null, error: null })
+        overlay.set({ open: true, sessionId, phase: 'idle', health: null, snapshot: null, error: null })
       }}
       style={buttonStyle}
     >
@@ -98,14 +115,15 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-function PactFlowOverlay({ health, t }: OverlayProps) {
+function PactFlowOverlay({ load, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
 
   useEffect(() => {
     if (!state.open || state.phase !== 'idle') return
+    if (state.sessionId === null) return
     overlay.set({ ...state, phase: 'loading', error: null })
-    void health().then(
-      value => { overlay.set({ ...overlay.getSnapshot(), phase: 'ready', health: value }) },
+    void load(state.sessionId).then(
+      value => { overlay.set({ ...overlay.getSnapshot(), phase: 'ready', ...value }) },
       error => {
         overlay.set({
           ...overlay.getSnapshot(),
@@ -114,7 +132,7 @@ function PactFlowOverlay({ health, t }: OverlayProps) {
         })
       },
     )
-  }, [health, state])
+  }, [load, state])
 
   if (!state.open) return null
   return (
@@ -142,6 +160,7 @@ function PactFlowOverlay({ health, t }: OverlayProps) {
           {state.health !== null && (
             <pre style={preStyle}>{JSON.stringify(state.health, null, 2)}</pre>
           )}
+          {state.snapshot !== null && <PactFlowProjectionTables snapshot={state.snapshot} t={t} />}
           {state.error !== null && <pre style={errorStyle}>{state.error}</pre>}
         </div>
       </section>
@@ -168,14 +187,61 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     order: 30,
     locale: NS,
     inject: (): OverlayInjected => ({
-      health: async () => {
-        const result = await ctx.remote.pactflow.health()
-        if (!result.ok) throw new Error(result.error.message)
-        return result.value
+      load: async (sessionId) => {
+        const [health, snapshot] = await Promise.all([
+          ctx.remote.pactflow.health(),
+          ctx.remote.pactflow.snapshot(sessionId),
+        ])
+        if (!health.ok) throw new Error(health.error.message)
+        if (!snapshot.ok) throw new Error(snapshot.error.message)
+        return { health: health.value, snapshot: snapshot.value }
       },
     }),
   }, PactFlowOverlay))
   return disposeRemote
+}
+
+function PactFlowProjectionTables({
+  snapshot, t,
+}: {
+  readonly snapshot: PactFlowSnapshot
+  readonly t: (key: PactFlowLocaleKey) => string
+}) {
+  const needs = Object.values(snapshot.needs.byId)
+  const nodes = Object.values(snapshot.dag.byId)
+  const runs = Object.values(snapshot.runs.byId)
+  return (
+    <div style={gridStyle}>
+      <section style={cardStyle}>
+        <h2 style={sectionTitleStyle}>{t('project')}</h2>
+        <p>{snapshot.project.project?.name ?? t('empty')}</p>
+      </section>
+      <ProjectionTable title={t('needs')} rows={needs.map(need => [need.id, need.title, need.phase, `r${need.revision}`])} empty={t('empty')} />
+      <ProjectionTable title={t('dag')} rows={nodes.map(node => [node.id, node.title, node.state, node.dependencies.join(', ') || '—'])} empty={t('empty')} />
+      <ProjectionTable title={t('runs')} rows={runs.map(run => [run.id, run.provider, run.state, `attempt ${run.attempt}`])} empty={t('empty')} />
+    </div>
+  )
+}
+
+function ProjectionTable({ title, rows, empty }: {
+  readonly title: string
+  readonly rows: readonly (readonly string[])[]
+  readonly empty: string
+}) {
+  return (
+    <section style={cardStyle}>
+      <h2 style={sectionTitleStyle}>{title}</h2>
+      {rows.length === 0 ? <p>{empty}</p> : (
+        <table style={tableStyle}>
+          <tbody>{rows.map(row => (
+            <tr key={row[0]}>{row.map((cell, index) => (
+              <td key={`${row[0]}-${String(index)}`} style={cellStyle}>{cell}</td>
+            ))}</tr>
+          ))}</tbody>
+        </table>
+      )}
+    </section>
+  )
 }
 
 const buttonStyle: CSSProperties = {
@@ -220,3 +286,8 @@ const subtitleStyle: CSSProperties = { margin: '6px 0 0', opacity: 0.72 }
 const bodyStyle: CSSProperties = { padding: 28 }
 const preStyle: CSSProperties = { padding: 16, overflow: 'auto', background: '#03100f' }
 const errorStyle: CSSProperties = { ...preStyle, color: '#ff8b8b' }
+const gridStyle: CSSProperties = { display: 'grid', gap: 16, marginTop: 20 }
+const cardStyle: CSSProperties = { border: '1px solid #263d39', borderRadius: 8, padding: 16 }
+const sectionTitleStyle: CSSProperties = { margin: '0 0 12px', fontSize: 16 }
+const tableStyle: CSSProperties = { width: '100%', borderCollapse: 'collapse' }
+const cellStyle: CSSProperties = { padding: '8px 10px', borderTop: '1px solid #263d39', textAlign: 'left' }
