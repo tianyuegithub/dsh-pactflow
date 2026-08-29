@@ -31,6 +31,10 @@ export function apply(ctx: Context): void {
       username: { type: 'string', description: 'HTTPS Git username; configure together with credential_ref.' },
       credential_ref: { type: 'string', description: 'DSH Credentials reference containing the HTTPS token; never the token value.' },
       k3s_git_secret_name: { type: 'string', description: 'Existing K3s Secret containing id_ed25519 and known_hosts for remote Workers.' },
+      gitea_base_url: { type: 'string', description: 'Credential-free Gitea base URL; configure with all gitea_* fields.' },
+      gitea_owner: { type: 'string', description: 'Gitea repository owner.' },
+      gitea_repo: { type: 'string', description: 'Gitea repository name.' },
+      gitea_token_credential_ref: { type: 'string', description: 'DSH Credentials reference containing a Gitea API token.' },
       validation_commands: {
         type: 'array',
         description: 'Host-side validation commands executed without a shell after the Worker commits and before push.',
@@ -54,6 +58,12 @@ export function apply(ctx: Context): void {
         ...args.username === undefined ? {} : { username: args.username },
         ...args.credential_ref === undefined ? {} : { credentialRef: args.credential_ref },
         ...args.k3s_git_secret_name === undefined ? {} : { k3sGitSecretName: args.k3s_git_secret_name },
+        ...args.gitea_base_url === undefined ? {} : { giteaBaseUrl: args.gitea_base_url },
+        ...args.gitea_owner === undefined ? {} : { giteaOwner: args.gitea_owner },
+        ...args.gitea_repo === undefined ? {} : { giteaRepo: args.gitea_repo },
+        ...args.gitea_token_credential_ref === undefined
+          ? {}
+          : { giteaTokenCredentialRef: args.gitea_token_credential_ref },
         ...args.validation_commands === undefined ? {} : {
           validationCommands: args.validation_commands.map(command => ({
             command: command.command,

@@ -12,6 +12,7 @@ import type {
   PactFlowHealth,
   PactFlowSnapshot,
   PactFlowSettingsView,
+  PactFlowGiteaStatus,
 } from '../types.ts'
 
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -55,6 +56,9 @@ type PactFlowLocaleKey =
   | 'settingsDisable'
   | 'settingsInvalid'
   | 'settingsSaved'
+  | 'verifyGitea'
+  | 'giteaProtected'
+  | 'giteaUnprotected'
   | 'empty'
 
 const zh: Record<PactFlowLocaleKey, string> = {
@@ -87,6 +91,9 @@ const zh: Record<PactFlowLocaleKey, string> = {
   settingsDisable: '禁用 K3s',
   settingsInvalid: 'JSON 配置无效',
   settingsSaved: '已保存，等待重启',
+  verifyGitea: '验证 Gitea',
+  giteaProtected: '默认分支已保护',
+  giteaUnprotected: '默认分支未保护',
   empty: '暂无数据',
 }
 
@@ -120,6 +127,9 @@ const en: Record<PactFlowLocaleKey, string> = {
   settingsDisable: 'Disable K3s',
   settingsInvalid: 'Invalid JSON configuration',
   settingsSaved: 'Saved; restart required',
+  verifyGitea: 'Verify Gitea',
+  giteaProtected: 'Default branch protected',
+  giteaUnprotected: 'Default branch unprotected',
   empty: 'No data',
 }
 
@@ -139,6 +149,7 @@ interface OverlayState {
   readonly templates: readonly PactFlowHarnessTemplateView[]
   readonly probingTemplateId: string | null
   readonly probe: PactFlowHarnessProbeResult | PactFlowApiProbeResult | null
+  readonly giteaStatus: PactFlowGiteaStatus | null
 }
 
 const overlay = createSnapshotStore<OverlayState>({
@@ -151,6 +162,7 @@ const overlay = createSnapshotStore<OverlayState>({
   templates: [],
   probingTemplateId: null,
   probe: null,
+  giteaStatus: null,
 })
 
 type HeaderActionProps =
@@ -165,6 +177,7 @@ interface OverlayInjected {
   }>
   probeHarness(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowHarnessProbeResult>
   probeApi(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowApiProbeResult>
+  verifyGitea(sessionId: string): Promise<PactFlowGiteaStatus>
 }
 
 type OverlayProps =
@@ -188,6 +201,7 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
         overlay.set({
           open: true, sessionId, phase: 'idle', health: null, snapshot: null, error: null,
           templates: [], probingTemplateId: null, probe: null,
+          giteaStatus: null,
         })
       }}
       style={buttonStyle}
@@ -198,7 +212,7 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-function PactFlowOverlay({ load, probeApi, probeHarness, t }: OverlayProps) {
+function PactFlowOverlay({ load, probeApi, probeHarness, verifyGitea, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
 
   useEffect(() => {
@@ -264,6 +278,17 @@ function PactFlowOverlay({ load, probeApi, probeHarness, t }: OverlayProps) {
                   probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe }),
                   error => overlay.set({
                     ...overlay.getSnapshot(), probingTemplateId: null,
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+                )
+              }}
+              giteaStatus={state.giteaStatus}
+              onVerifyGitea={() => {
+                if (state.sessionId === null) return
+                void verifyGitea(state.sessionId).then(
+                  giteaStatus => overlay.set({ ...overlay.getSnapshot(), giteaStatus }),
+                  error => overlay.set({
+                    ...overlay.getSnapshot(),
                     error: error instanceof Error ? error.message : String(error),
                   }),
                 )
@@ -406,19 +431,26 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
+      verifyGitea: async (sessionId) => {
+        const result = await pactflow.verifyGitea(sessionId)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
     }),
   }, PactFlowOverlay))
   return disposeRemote
 }
 
 function PactFlowProjectionTables({
-  snapshot, templates, probingTemplateId, onApiProbe, onProbe, t,
+  snapshot, templates, probingTemplateId, giteaStatus, onApiProbe, onProbe, onVerifyGitea, t,
 }: {
   readonly snapshot: PactFlowSnapshot
   readonly templates: readonly PactFlowHarnessTemplateView[]
   readonly probingTemplateId: string | null
   readonly onProbe: (templateId: string) => void
   readonly onApiProbe: (templateId: string) => void
+  readonly giteaStatus: PactFlowGiteaStatus | null
+  readonly onVerifyGitea: () => void
   readonly t: (key: PactFlowLocaleKey) => string
 }) {
   const needs = Object.values(snapshot.needs.byId)
@@ -437,6 +469,22 @@ function PactFlowProjectionTables({
             <dd>{snapshot.project.project.git.defaultBranch}</dd>
             <dt>{t('validations')}</dt>
             <dd>{String(snapshot.project.project.git.validationCommands.length)}</dd>
+            {snapshot.project.project.git.gitea !== undefined && (
+              <>
+                <dt>Gitea</dt>
+                <dd>
+                  {snapshot.project.project.git.gitea.owner}/{snapshot.project.project.git.gitea.repo}
+                  {' '}
+                  <button type="button" onClick={onVerifyGitea} style={buttonStyle}>{t('verifyGitea')}</button>
+                </dd>
+                {giteaStatus !== null && (
+                  <>
+                    <dt>{giteaStatus.fullName}</dt>
+                    <dd>{giteaStatus.branchProtected ? t('giteaProtected') : t('giteaUnprotected')}</dd>
+                  </>
+                )}
+              </>
+            )}
           </dl>
         )}
       </section>

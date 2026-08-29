@@ -8,6 +8,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type {
   BindPactFlowGitRequest,
   PactFlowGitAuth,
+  PactFlowGiteaBinding,
   PactFlowGitBinding,
   PactFlowGitResult,
   PactFlowGitRunSpec,
@@ -50,6 +51,7 @@ export class PactFlowGitWorkspace {
     if (k3sGitSecretName !== undefined && !K8S_NAME.test(k3sGitSecretName)) {
       throw new Error('PactFlow K3s Git Secret name is invalid')
     }
+    const gitea = this.gitea(request)
     return {
       remote,
       remoteUrl,
@@ -57,6 +59,7 @@ export class PactFlowGitWorkspace {
       validationCommands: this.validationCommands(request.validationCommands ?? []),
       ...auth === undefined ? {} : { auth },
       ...k3sGitSecretName === undefined ? {} : { k3sGitSecretName },
+      ...gitea === undefined ? {} : { gitea },
     }
   }
 
@@ -237,6 +240,38 @@ export class PactFlowGitWorkspace {
       throw new Error('PactFlow Git token authentication requires an HTTP(S) remote')
     }
     return { kind: 'https-token', username, credentialRef }
+  }
+
+  private gitea(request: BindPactFlowGitRequest): PactFlowGiteaBinding | undefined {
+    const fields = [
+      request.giteaBaseUrl, request.giteaOwner, request.giteaRepo, request.giteaTokenCredentialRef,
+    ]
+    if (fields.every(value => value === undefined)) return undefined
+    if (fields.some(value => value === undefined || value.trim() === '')) {
+      throw new Error('PactFlow Gitea baseUrl, owner, repo, and tokenCredentialRef must be configured together')
+    }
+    const [rawBaseUrl, rawOwner, rawRepo, rawRef] = fields as [string, string, string, string]
+    let parsed: URL
+    try {
+      parsed = new URL(rawBaseUrl)
+    } catch {
+      throw new Error('PactFlow Gitea baseUrl must be an HTTP(S) URL')
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username !== '' || parsed.password !== ''
+      || parsed.search !== '' || parsed.hash !== '') {
+      throw new Error('PactFlow Gitea baseUrl must be credential-free')
+    }
+    const owner = rawOwner.trim()
+    const repo = rawRepo.trim()
+    if (!/^[A-Za-z0-9_.-]{1,100}$/.test(owner) || !/^[A-Za-z0-9_.-]{1,100}$/.test(repo)) {
+      throw new Error('PactFlow Gitea owner and repo are invalid')
+    }
+    return {
+      baseUrl: parsed.toString().replace(/\/$/, ''),
+      owner,
+      repo,
+      tokenCredentialRef: rawRef.trim(),
+    }
   }
 
   private credentialFreeRemote(value: string): string {

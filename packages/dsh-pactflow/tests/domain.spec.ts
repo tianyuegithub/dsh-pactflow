@@ -478,6 +478,10 @@ describe('PactFlow domain foundation', () => {
         defaultBranch: 'main',
         username: 'pactflow-worker',
         credentialRef: 'PACTFLOW_GITEA_TOKEN',
+        giteaBaseUrl: gitServer.url,
+        giteaOwner: 'owner',
+        giteaRepo: 'repo',
+        giteaTokenCredentialRef: 'PACTFLOW_GITEA_API_TOKEN',
       }
       await expect(ctx.pactflow.bindGit(session.id, request))
         .rejects.toThrow(/requires the Credentials service/)
@@ -491,6 +495,10 @@ describe('PactFlow domain foundation', () => {
       const bound = await ctx.pactflow.bindGit(session.id, request)
       expect(bound.git?.auth).toEqual({
         kind: 'https-token', username: 'pactflow-worker', credentialRef: 'PACTFLOW_GITEA_TOKEN',
+      })
+      expect(bound.git?.gitea).toEqual({
+        baseUrl: gitServer.url,
+        owner: 'owner', repo: 'repo', tokenCredentialRef: 'PACTFLOW_GITEA_API_TOKEN',
       })
       expect(resolveCredential).not.toHaveBeenCalled()
 

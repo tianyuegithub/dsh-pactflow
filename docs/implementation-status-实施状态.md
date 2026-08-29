@@ -15,6 +15,7 @@
 - K3s Provider：使用 Kubernetes Client、不可变 ConfigMap/Job、digest 镜像、无 ServiceAccount token、非 root UID/GID 1001、SecretKeyRef、严格 SSH known_hosts 和 0 backoff；Pod 只 push 任务分支并通过 termination document 报告，Host fetch/快进本地 worktree、执行验证后才结算。Agent 恢复时会按持久 Job/spec 对账，接受租约内已完成结果、继续等待活动 Job、取消过期 Job或失败关闭缺失 Job。
 - Harness/协议矩阵：Harbor 实际项目为 `datavdl`，治理后镜像精确为 Claude Code、Codex、OpenCode、DSH 四个 digest；协议分别固定为 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions、OpenAI Chat Completions。`probeHarness` Remote 与原生模板表会显示 template/image/model/baseUrl/API mode/真实 prompt、逐步状态和有界输出；四个真实 K3s Harness 探针均返回 `hi` 并自动清理 Job。
 - Settings 与测试 UI：`pactflow` Settings namespace 持久化非密钥 K3s/Harness 元数据并声明 restart-applied；原生 Plugins 配置卡可查看模板、透明编辑/禁用并持久保存。控制台模板表提供 API/Harness 双测试，默认真实内容 `say hi to me`，显示 path/payload、阶段和滚动输出；四种协议的直接 API 探针与四个 Harness 探针均通过。
+- Gitea admission：Git 绑定可保存 credential-free API base/owner/repo/token Credential Ref；Host 只读核验仓库 full name、默认分支、归档状态、branch protection、required approvals、status checks 和 merge style，Remote/UI 不返回 token。Gitea 1.22 Swagger 与本地真实 HTTP 契约测试通过；当前 DSH Credentials 尚无 Gitea API token，因此未对真实仓库调用受保护接口。
 - 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
 
 ## 最新真实验收
@@ -26,5 +27,5 @@
 
 ## 当前边界与下一安全动作
 
-- 尚未完成：真实 Gitea 分支保护 API 与显式 closing 合并；成功 Job/ConfigMap 的产品保留期与 closing 清理；四个 Harness 各自完整代码任务（当前只有 DSH 完整任务，其余三个为真实 API/Harness 探针）；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
-- 下一安全动作：实现 Gitea 仓库/分支保护只读核验、基于已批准 verification gate 的 `--ff-only` closing 与精确资源清理，然后补 Claude Code/Codex/OpenCode 完整代码任务矩阵。
+- 尚未完成：真实 Gitea token 配置与显式 closing PR/merge；成功 Job/ConfigMap 的产品保留期与 closing 清理；四个 Harness 各自完整代码任务（当前只有 DSH 完整任务，其余三个为真实 API/Harness 探针）；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
+- 下一安全动作：先补 Claude Code/Codex/OpenCode 完整代码任务矩阵并验证零残留；随后实现 Gitea integration branch/PR/merge closing，真实 main 合并前给出精确外部写预览。

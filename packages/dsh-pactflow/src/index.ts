@@ -14,6 +14,7 @@ import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_PROJECTIONS } from './domain.ts'
 import { PactFlowGitWorkspace, type PactFlowGitAuthSecret } from './git-workspace.ts'
+import { PactFlowGiteaClient } from './gitea.ts'
 import {
   PactFlowK3sWorker,
   type PactFlowK3sConfig,
@@ -32,6 +33,7 @@ import type {
   PactFlowDagProjection,
   PactFlowGitResult,
   PactFlowGitRunSpec,
+  PactFlowGiteaStatus,
   PactFlowHealth,
   PactFlowHarnessTemplateView,
   PactFlowHarnessProbeRequest,
@@ -119,6 +121,7 @@ export class PactFlowService extends TypertRemoteService {
 
   private readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
   private readonly git = new PactFlowGitWorkspace()
+  private readonly gitea = new PactFlowGiteaClient()
   private k3s: PactFlowK3sWorker | undefined
   private readonly reconcilingK3s = new Set<string>()
 
@@ -230,6 +233,12 @@ export class PactFlowService extends TypertRemoteService {
       const info = await credentials.describe(credentialRef(inspected.auth.credentialRef))
       if (!info.configured) throw new Error('PactFlow Git credential reference is not configured')
     }
+    if (inspected.gitea !== undefined) {
+      const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
+      if (credentials === undefined) throw new Error('PactFlow Gitea requires the Credentials service')
+      const info = await credentials.describe(credentialRef(inspected.gitea.tokenCredentialRef))
+      if (!info.configured) throw new Error('PactFlow Gitea token credential reference is not configured')
+    }
     const latest = this.requireProject(session)
     this.requireRevision('project', latest.id, latest.revision, request.expectedRevision)
     const now = Date.now()
@@ -241,6 +250,19 @@ export class PactFlowService extends TypertRemoteService {
     }
     this.events.append(session, 'pactflow/project-configured', { v: 1, project })
     return project
+  }
+
+  /** Verify the bound Gitea repository and default-branch protection without writing. */
+  @Remote('verifyGitea')
+  async verifyGitea(sessionId: string): Promise<PactFlowGiteaStatus> {
+    const session = this.livePactFlowSession(sessionId)
+    const git = this.requireProject(session).git
+    if (git?.gitea === undefined) throw new Error('PactFlow project has no Gitea binding')
+    const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
+    if (credentials === undefined) throw new Error('PactFlow Gitea requires the Credentials service')
+    const token = await credentials.resolve(credentialRef(git.gitea.tokenCredentialRef))
+    if (token === undefined) throw new Error('PactFlow Gitea token credential reference is not configured')
+    return await this.gitea.verify(git.gitea, token.value, git.defaultBranch)
   }
 
   /** Create one backlog need under an initialized project. */

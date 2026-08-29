@@ -122,6 +122,25 @@ export interface PactFlowGitBinding {
   readonly auth?: PactFlowGitAuth
   readonly validationCommands: readonly PactFlowValidationCommand[]
   readonly k3sGitSecretName?: string
+  readonly gitea?: PactFlowGiteaBinding
+}
+
+export interface PactFlowGiteaBinding {
+  readonly baseUrl: string
+  readonly owner: string
+  readonly repo: string
+  readonly tokenCredentialRef: string
+}
+
+export interface PactFlowGiteaStatus {
+  readonly fullName: string
+  readonly defaultBranch: string
+  readonly private: boolean
+  readonly archived: boolean
+  readonly branchProtected: boolean
+  readonly requiredApprovals: number
+  readonly statusChecks: readonly string[]
+  readonly mergeStyle: string
 }
 
 /** Non-secret reference to one HTTPS username/token credential. */
@@ -269,6 +288,10 @@ export interface BindPactFlowGitRequest {
   readonly credentialRef?: string
   readonly validationCommands?: readonly PactFlowValidationCommand[]
   readonly k3sGitSecretName?: string
+  readonly giteaBaseUrl?: string
+  readonly giteaOwner?: string
+  readonly giteaRepo?: string
+  readonly giteaTokenCredentialRef?: string
 }
 
 export interface CreatePactFlowNeedRequest {

@@ -9,6 +9,7 @@ import type {
   PactFlowDocument,
   PactFlowGitBinding,
   PactFlowGitAuth,
+  PactFlowGiteaBinding,
   PactFlowGitResult,
   PactFlowGitRunSpec,
   PactFlowNeed,
@@ -62,6 +63,11 @@ const gitAuthSchema = z.object({
   kind: z.literal('https-token'), username: z.string().min(1), credentialRef: z.string().min(1),
 }) as unknown as ZodType<PactFlowGitAuth>
 
+const giteaBindingSchema = z.object({
+  baseUrl: z.string().min(1), owner: z.string().min(1), repo: z.string().min(1),
+  tokenCredentialRef: z.string().min(1),
+}) as unknown as ZodType<PactFlowGiteaBinding>
+
 const validationCommandSchema = z.object({
   command: z.string().min(1), args: z.array(z.string()), timeoutMs: z.number().int().positive(),
 }) as unknown as ZodType<PactFlowValidationCommand>
@@ -76,6 +82,7 @@ const gitBindingSchema = z.object({
   revision: z.number().int().positive(), boundAt: z.number().int().nonnegative(), auth: gitAuthSchema.optional(),
   validationCommands: z.array(validationCommandSchema),
   k3sGitSecretName: z.string().min(1).optional(),
+  gitea: giteaBindingSchema.optional(),
 }) as unknown as ZodType<PactFlowGitBinding>
 
 const gitRunSpecSchema = z.object({
