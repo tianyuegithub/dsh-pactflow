@@ -10,7 +10,8 @@
     "pack": "pnpm run build && pnpm --dir packages/dsh-pactflow pack --pack-destination ../../dist",
     "pack:check": "node scripts/check-package.mjs",
     "test": "vitest run packages/dsh-pactflow/tests",
-    "typecheck": "node scripts/build.mjs"
+    "typecheck": "node scripts/build.mjs",
+    "verify:profile": "node scripts/verify-profile.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../deepseek-harness-pactflow-p0/vendor/cordis",
