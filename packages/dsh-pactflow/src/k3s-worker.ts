@@ -13,6 +13,7 @@ import {
 } from '@kubernetes/client-node'
 import type {
   PactFlowApiMode,
+  PactFlowApiProbeResult,
   PactFlowGitRunSpec,
   PactFlowHarness,
   PactFlowHarnessProbeResult,
@@ -20,6 +21,7 @@ import type {
   PactFlowHarnessTemplateView,
   PactFlowK3sResult,
   PactFlowK3sRunSpec,
+  PactFlowK3sSettings,
   PactFlowRunId,
 } from './types.ts'
 
@@ -36,14 +38,7 @@ export const PACTFLOW_HARNESS_API_MODE: Readonly<Record<PactFlowHarness, PactFlo
 
 export type PactFlowHarnessTemplateConfig = PactFlowHarnessTemplateView
 
-export interface PactFlowK3sConfig {
-  readonly namespace: string
-  readonly kubeconfig?: string
-  readonly context?: string
-  readonly imagePullSecret: string
-  readonly pollIntervalMs: number
-  readonly templates: readonly PactFlowHarnessTemplateConfig[]
-}
+export type PactFlowK3sConfig = PactFlowK3sSettings
 
 interface WorkerResultDocument {
   readonly schema: 'dsh_pactflow_k3s_result/v1'
@@ -238,6 +233,64 @@ export class PactFlowK3sWorker {
     }
   }
 
+  /** Send one direct protocol request in a short-lived Job without invoking the Harness CLI. */
+  async probeApi(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowApiProbeResult> {
+    const startedAt = Date.now()
+    const stages: PactFlowHarnessProbeStage[] = []
+    const template = this.templates.get(templateId)
+    if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
+    const promptBytes = new TextEncoder().encode(prompt).length
+    if (promptBytes === 0 || promptBytes > 65_536 || !Number.isSafeInteger(timeoutMs)
+      || timeoutMs < 10_000 || timeoutMs > 600_000) {
+      throw new Error('PactFlow API probe requires a 1-65536 byte prompt and timeoutMs 10000-600000')
+    }
+    const request = this.apiRequest(template, prompt)
+    stages.push({ name: 'validate', state: 'succeeded', detail: 'protocol, URL, payload, and timeout accepted' })
+    const jobName = `dsh-pf-api-${randomUUID().slice(0, 20)}`
+    let output = ''
+    let success = false
+    try {
+      await this.batch.createNamespacedJob({
+        namespace: this.config.namespace,
+        body: this.apiProbeJob(jobName, template, request.url, request.payload, timeoutMs),
+      })
+      stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
+      for (;;) {
+        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace })
+        if ((job.status?.succeeded ?? 0) > 0 || (job.status?.failed ?? 0) > 0) {
+          output = await this.probeLog(jobName)
+          success = (job.status?.succeeded ?? 0) > 0
+          stages.push({
+            name: 'api-response', state: success ? 'succeeded' : 'failed',
+            detail: success ? 'API returned successfully' : 'API request Job failed',
+          })
+          break
+        }
+        await new Promise(resolveDelay => setTimeout(resolveDelay, this.config.pollIntervalMs))
+      }
+    } catch (error) {
+      output = error instanceof Error ? error.message.slice(0, 4_096) : 'API probe failed'
+      stages.push({ name: 'api-response', state: 'failed', detail: 'API probe failed before a response' })
+    } finally {
+      try {
+        await this.batch.deleteNamespacedJob({
+          name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
+          propagationPolicy: 'Background', body: {},
+        })
+        stages.push({ name: 'cleanup', state: 'succeeded', detail: `Job ${jobName} deleted` })
+      } catch {
+        stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
+      }
+    }
+    return {
+      kind: 'api', templateId: template.id, harness: template.harness, apiMode: template.apiMode,
+      model: template.model, baseUrl: template.baseUrl, image: template.image,
+      modelSecretName: template.modelSecretName, prompt, timeoutMs,
+      requestPath: request.path, requestPayload: request.payload,
+      success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages,
+    }
+  }
+
   /** Observe an existing Job without creating or mutating resources. */
   async observe(spec: PactFlowK3sRunSpec): Promise<PactFlowK3sObservation> {
     let job: V1Job
@@ -378,6 +431,73 @@ export class PactFlowK3sWorker {
           },
         },
       },
+    }
+  }
+
+  private apiProbeJob(
+    jobName: string,
+    template: PactFlowHarnessTemplateConfig,
+    url: string,
+    payload: string,
+    timeoutMs: number,
+  ): V1Job {
+    const timeoutSeconds = Math.ceil(timeoutMs / 1_000)
+    return {
+      apiVersion: 'batch/v1', kind: 'Job',
+      metadata: {
+        name: jobName, namespace: this.config.namespace,
+        labels: { 'app.kubernetes.io/name': 'dsh-pactflow-api-probe', 'app.kubernetes.io/managed-by': 'dsh-pactflow' },
+      },
+      spec: {
+        activeDeadlineSeconds: timeoutSeconds,
+        backoffLimit: 0,
+        template: {
+          metadata: { labels: { 'app.kubernetes.io/name': 'dsh-pactflow-api-probe' } },
+          spec: {
+            automountServiceAccountToken: false,
+            restartPolicy: 'Never',
+            nodeSelector: { 'kubernetes.io/arch': 'amd64' },
+            imagePullSecrets: [{ name: this.config.imagePullSecret }],
+            containers: [{
+              name: 'probe', image: template.image, imagePullPolicy: 'IfNotPresent',
+              command: ['python3', '-c', API_PROBE_SCRIPT],
+              env: [
+                ...this.modelEnvironment({ ...template, activeDeadlineSeconds: timeoutSeconds }),
+                { name: 'PACTFLOW_API_URL', value: url },
+                { name: 'PACTFLOW_API_PAYLOAD', value: payload },
+                { name: 'PACTFLOW_API_MODE', value: template.apiMode },
+              ],
+              resources: {
+                requests: { cpu: template.cpuRequest, memory: template.memoryRequest },
+                limits: { cpu: template.cpuLimit, memory: template.memoryLimit },
+              },
+              securityContext: {
+                allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] },
+                runAsNonRoot: true, runAsUser: 1_001, runAsGroup: 1_001,
+              },
+            }],
+          },
+        },
+      },
+    }
+  }
+
+  private apiRequest(
+    template: PactFlowHarnessTemplateConfig,
+    prompt: string,
+  ): { readonly path: string; readonly url: string; readonly payload: string } {
+    const path = template.apiMode === 'anthropic-messages'
+      ? '/v1/messages'
+      : template.apiMode === 'openai-responses' ? '/v1/responses' : '/v1/chat/completions'
+    const payload = template.apiMode === 'anthropic-messages'
+      ? { model: template.model, max_tokens: 32, messages: [{ role: 'user', content: prompt }] }
+      : template.apiMode === 'openai-responses'
+        ? { model: template.model, input: prompt, max_output_tokens: 32 }
+        : { model: template.model, messages: [{ role: 'user', content: prompt }], max_tokens: 32 }
+    return {
+      path,
+      url: `${template.baseUrl.replace(/\/+$/, '')}${path}`,
+      payload: JSON.stringify(payload),
     }
   }
 
@@ -563,6 +683,40 @@ export class PactFlowK3sWorker {
     return `${new TextDecoder().decode(bytes.slice(0, maximumBytes - 16))}\n[truncated]`
   }
 }
+
+const API_PROBE_SCRIPT = String.raw`import json, os, urllib.error, urllib.request
+mode = os.environ['PACTFLOW_API_MODE']
+url = os.environ['PACTFLOW_API_URL']
+payload = os.environ['PACTFLOW_API_PAYLOAD'].encode()
+headers = {'Content-Type': 'application/json'}
+if mode == 'anthropic-messages':
+    headers['Authorization'] = 'Bearer ' + os.environ['ANTHROPIC_AUTH_TOKEN']
+    headers['anthropic-version'] = '2023-06-01'
+else:
+    headers['Authorization'] = 'Bearer ' + os.environ['OPENAI_API_KEY']
+request = urllib.request.Request(url, data=payload, headers=headers, method='POST')
+try:
+    with urllib.request.urlopen(request, timeout=120) as response:
+        document = json.load(response)
+except urllib.error.HTTPError as error:
+    body = error.read(2048).decode('utf-8', 'replace')
+    print(json.dumps({'status': error.code, 'error': body}, ensure_ascii=False))
+    raise SystemExit(1)
+text = ''
+if mode == 'anthropic-messages':
+    text = ''.join(block.get('text', '') for block in document.get('content', []) if isinstance(block, dict))
+elif mode == 'openai-responses':
+    text = document.get('output_text', '')
+    if not text:
+        for item in document.get('output', []):
+            for block in item.get('content', []) if isinstance(item, dict) else []:
+                if isinstance(block, dict): text += block.get('text', '')
+else:
+    text = ((document.get('choices') or [{}])[0].get('message') or {}).get('content', '')
+result = {'status': 200, 'text': text}
+if not text: result['response'] = document
+print(json.dumps(result, ensure_ascii=False))
+`
 
 const WORKER_SCRIPT = String.raw`#!/bin/bash
 set -euo pipefail

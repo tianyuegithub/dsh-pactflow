@@ -11,6 +11,7 @@ import type { SubagentResult, SubagentRun, SubagentRuntime } from '@deepseek-ai/
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_PROJECTIONS } from './domain.ts'
 import { PactFlowGitWorkspace, type PactFlowGitAuthSecret } from './git-workspace.ts'
 import {
@@ -35,6 +36,7 @@ import type {
   PactFlowHarnessTemplateView,
   PactFlowHarnessProbeRequest,
   PactFlowHarnessProbeResult,
+  PactFlowApiProbeResult,
   PactFlowK3sResult,
   PactFlowK3sRunSpec,
   PactFlowNeed,
@@ -61,6 +63,7 @@ export interface Config {
 
 const VERSION = '0.2.0'
 const PRESET_ROOT = fileURLToPath(new URL('../presets', import.meta.url))
+const PACTFLOW_SETTINGS_NS = settingsNamespace('pactflow')
 const NEXT_PHASE: Readonly<Partial<Record<PactFlowPhase, PactFlowPhase>>> = {
   backlog: 'discussion',
   discussion: 'confirmed',
@@ -116,7 +119,7 @@ export class PactFlowService extends TypertRemoteService {
 
   private readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
   private readonly git = new PactFlowGitWorkspace()
-  private readonly k3s: PactFlowK3sWorker | undefined
+  private k3s: PactFlowK3sWorker | undefined
   private readonly reconcilingK3s = new Set<string>()
 
   constructor(ctx: Context, config: Config = {}) {
@@ -124,6 +127,21 @@ export class PactFlowService extends TypertRemoteService {
     this.k3s = config.k3s === undefined || config.k3s === false
       ? undefined
       : new PactFlowK3sWorker(config.k3s)
+    ctx.inject(['settings'], (settingsCtx) => {
+      const scope = settingsCtx.settings.register(
+        PACTFLOW_SETTINGS_NS,
+        PactFlowService.Config as unknown as z<Config>,
+        {
+          base: config,
+          applies: 'restart',
+          validate: value => { void this.k3sFrom(value.k3s) },
+        },
+      )
+      this.k3s = this.k3sFrom(scope.get().k3s)
+      scope.watch(() => {
+        settingsCtx.logger.info('PactFlow settings changed; restart the Profile to apply K3s templates')
+      })
+    })
     if (this.k3s !== undefined) {
       ctx.on('agent/created', ({ agent }) => {
         void this.reconcileK3sSession(agent.session).catch((error: unknown) => {
@@ -570,6 +588,14 @@ export class PactFlowService extends TypertRemoteService {
     return await this.k3s.probe(request.templateId, request.prompt, request.timeoutMs)
   }
 
+  /** Run one direct API protocol probe with a visible redacted request payload. */
+  @Remote('probeApi')
+  async probeApi(request: PactFlowHarnessProbeRequest): Promise<PactFlowApiProbeResult> {
+    if (this.k3s === undefined) throw new Error('PactFlow K3s provider is not configured')
+    await this.k3s.preflight()
+    return await this.k3s.probeApi(request.templateId, request.prompt, request.timeoutMs)
+  }
+
   /** Run one Git-backed node in a K3s Job and locally verify its pushed commit. */
   @Remote('dispatchK3sNode')
   async dispatchK3sNode(
@@ -831,6 +857,11 @@ export class PactFlowService extends TypertRemoteService {
       if (timer !== undefined) clearInterval(timer)
       await child.dispose()
     }
+  }
+
+  /** Build the restart-applied K3s provider from validated non-secret settings. */
+  private k3sFrom(config: false | PactFlowK3sConfig | undefined): PactFlowK3sWorker | undefined {
+    return config === undefined || config === false ? undefined : new PactFlowK3sWorker(config)
   }
 
   /** Resolve the current Git token per operation without persisting or returning it. */

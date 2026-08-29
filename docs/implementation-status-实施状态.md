@@ -14,6 +14,7 @@
 - Git 同步与验证：项目可保存 HTTPS 用户名和 DSH Credential Ref，不保存 token；Host 在清除凭证环境后执行结构化 `{command,args,timeoutMs}` 验证，复核 commit/clean tree，再用私有临时 AskPass push 任务分支并由根 checkout fetch/比对 commit。真实 Basic Auth Smart HTTP 集成测试通过，验证失败不会 push。
 - K3s Provider：使用 Kubernetes Client、不可变 ConfigMap/Job、digest 镜像、无 ServiceAccount token、非 root UID/GID 1001、SecretKeyRef、严格 SSH known_hosts 和 0 backoff；Pod 只 push 任务分支并通过 termination document 报告，Host fetch/快进本地 worktree、执行验证后才结算。Agent 恢复时会按持久 Job/spec 对账，接受租约内已完成结果、继续等待活动 Job、取消过期 Job或失败关闭缺失 Job。
 - Harness/协议矩阵：Harbor 实际项目为 `datavdl`，治理后镜像精确为 Claude Code、Codex、OpenCode、DSH 四个 digest；协议分别固定为 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions、OpenAI Chat Completions。`probeHarness` Remote 与原生模板表会显示 template/image/model/baseUrl/API mode/真实 prompt、逐步状态和有界输出；四个真实 K3s Harness 探针均返回 `hi` 并自动清理 Job。
+- Settings 与测试 UI：`pactflow` Settings namespace 持久化非密钥 K3s/Harness 元数据并声明 restart-applied；原生 Plugins 配置卡可查看模板、透明编辑/禁用并持久保存。控制台模板表提供 API/Harness 双测试，默认真实内容 `say hi to me`，显示 path/payload、阶段和滚动输出；四种协议的直接 API 探针与四个 Harness 探针均通过。
 - 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
 
 ## 最新真实验收
@@ -25,5 +26,5 @@
 
 ## 当前边界与下一安全动作
 
-- 尚未完成：真实 Gitea 分支保护 API 与显式 closing 合并；模板持久 Settings/编辑表单与独立 API 协议探针；成功 Job/ConfigMap 的产品保留期与 closing 清理；四个 Harness 各自完整代码任务（当前只有 DSH 完整任务，其余三个为真实 Harness 探针）。
-- 下一安全动作：把 K3s 模板从静态 Profile config 接入 DSH Settings 与原生编辑/测试 UI，并补独立 API 协议探针；随后实现 Gitea closing 合同和剩余 Harness 完整任务矩阵。
+- 尚未完成：真实 Gitea 分支保护 API 与显式 closing 合并；成功 Job/ConfigMap 的产品保留期与 closing 清理；四个 Harness 各自完整代码任务（当前只有 DSH 完整任务，其余三个为真实 API/Harness 探针）；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
+- 下一安全动作：实现 Gitea 仓库/分支保护只读核验、基于已批准 verification gate 的 `--ff-only` closing 与精确资源清理，然后补 Claude Code/Codex/OpenCode 完整代码任务矩阵。

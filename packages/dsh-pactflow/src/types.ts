@@ -90,6 +90,19 @@ export interface PactFlowHarnessTemplateView {
   readonly memoryLimit: string
 }
 
+export interface PactFlowK3sSettings {
+  readonly namespace: string
+  readonly kubeconfig?: string
+  readonly context?: string
+  readonly imagePullSecret: string
+  readonly pollIntervalMs: number
+  readonly templates: readonly PactFlowHarnessTemplateView[]
+}
+
+export interface PactFlowSettingsView {
+  readonly k3s: false | PactFlowK3sSettings
+}
+
 export interface PactFlowProject {
   readonly id: PactFlowProjectId
   readonly name: string
@@ -337,7 +350,7 @@ export interface PactFlowHarnessProbeRequest {
 }
 
 export interface PactFlowHarnessProbeStage {
-  readonly name: 'validate' | 'create-job' | 'model-response' | 'cleanup'
+  readonly name: 'validate' | 'create-job' | 'model-response' | 'api-response' | 'cleanup'
   readonly state: 'succeeded' | 'failed'
   readonly detail: string
 }
@@ -353,6 +366,25 @@ export interface PactFlowHarnessProbeResult {
   readonly modelSecretName: string
   readonly prompt: string
   readonly timeoutMs: number
+  readonly success: boolean
+  readonly durationMs: number
+  readonly output: string
+  readonly stages: readonly PactFlowHarnessProbeStage[]
+}
+
+export interface PactFlowApiProbeResult {
+  readonly kind: 'api'
+  readonly templateId: string
+  readonly harness: PactFlowHarness
+  readonly apiMode: PactFlowApiMode
+  readonly model: string
+  readonly baseUrl: string
+  readonly image: string
+  readonly modelSecretName: string
+  readonly prompt: string
+  readonly timeoutMs: number
+  readonly requestPath: string
+  readonly requestPayload: string
   readonly success: boolean
   readonly durationMs: number
   readonly output: string

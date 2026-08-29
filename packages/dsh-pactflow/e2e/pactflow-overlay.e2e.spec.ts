@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url'
+import { readFile } from 'node:fs/promises'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -85,5 +86,40 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
       await content.waitFor({ timeout: 15_000 })
       expect(await content.count()).toBeGreaterThan(0)
     }
+  })
+
+  it('registers a restart-applied PactFlow settings card', async () => {
+    const response = await scaffold.hostFetch('/api/settings/describe', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request', rpcId: 'pactflow-settings-describe',
+        method: 'settings/describe', payload: { args: {} },
+      }),
+    })
+    const described = await response.json() as {
+      result?: { value?: { namespaces?: { ns: string }[] } }
+    }
+    expect(described.result?.value?.namespaces?.map(namespace => namespace.ns)).toContain('pactflow')
+    const pactflowDialog = page.getByRole('dialog', { name: 'PactFlow' })
+    if (await pactflowDialog.count() > 0) await pactflowDialog.getByRole('button', { name: 'Close' }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    const settings = page.getByRole('dialog', { name: 'Settings' })
+    await settings.waitFor({ timeout: 10_000 })
+    await settings.getByRole('button', { name: 'Plugins', exact: true }).click()
+    const pluginConfiguration = settings.getByRole('tab', { name: 'Plugin configuration', exact: true })
+    await pluginConfiguration.click()
+    const title = settings.getByText('PactFlow K3s templates', { exact: true })
+    try {
+      await expect.poll(() => title.count(), { timeout: 10_000 }).toBe(1)
+    } catch {
+      throw new Error(`PactFlow settings card missing; dialog=${(await settings.innerText()).slice(0, 2_000)}`)
+    }
+    expect(await settings.getByLabel('PactFlow K3s templates').count()).toBe(1)
+    expect(await settings.getByText('Restart the Profile after saving.', { exact: true }).count()).toBe(1)
+    await settings.getByRole('button', { name: 'Save configuration', exact: true }).click()
+    await expect.poll(async () => {
+      const document = await readFile(`${scaffold.harnessHome}/settings.yaml`, 'utf8').catch(() => '')
+      return document.includes('pactflow:') && document.includes('k3s: false')
+    }, { timeout: 10_000 }).toBe(true)
   })
 })

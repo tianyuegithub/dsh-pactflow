@@ -56,6 +56,12 @@ importers:
       '@deepseek-ai/dsh-client-ui-session':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-session
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-session
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-settings
+        version: link:../deepseek-harness-pactflow-p0/packages/client/ui-settings
+      '@deepseek-ai/dsh-client-ui-settings-plugins':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-settings-plugins
+        version: link:../deepseek-harness-pactflow-p0/packages/client/ui-settings-plugins
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
@@ -89,6 +95,9 @@ importers:
       '@deepseek-ai/dsh-session-query':
         specifier: link:../deepseek-harness-pactflow-p0/packages/session-query/session-query
         version: link:../deepseek-harness-pactflow-p0/packages/session-query/session-query
+      '@deepseek-ai/dsh-settings':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/settings/settings
+        version: link:../deepseek-harness-pactflow-p0/packages/settings/settings
       '@deepseek-ai/dsh-subagent':
         specifier: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
         version: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent

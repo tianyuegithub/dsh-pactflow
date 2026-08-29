@@ -59,10 +59,25 @@ describe.skipIf(!enabled)('PactFlow real Harness probes', { timeout: 900_000 }, 
       ctx.pactflow.probeHarness({ templateId, prompt: 'say hi to me', timeoutMs: 180_000 })))
     for (const result of results) {
       expect(result.success).toBe(true)
-      expect(result.output.toLowerCase()).toContain('hi')
+      expect(result.output.toLowerCase(), `${result.templateId}/${result.apiMode}`).toContain('hi')
       expect(result.stages).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'create-job', state: 'succeeded' }),
         expect.objectContaining({ name: 'model-response', state: 'succeeded' }),
+        expect.objectContaining({ name: 'cleanup', state: 'succeeded' }),
+      ]))
+    }
+  })
+
+  it('sends the visible protocol payload directly for every template', async () => {
+    const results = await Promise.all(['claude', 'codex', 'opencode', 'dsh'].map(templateId =>
+      ctx.pactflow.probeApi({ templateId, prompt: 'say hi to me', timeoutMs: 180_000 })))
+    for (const result of results) {
+      expect(result.success).toBe(true)
+      expect(result.requestPath).toMatch(/^\/v1\/(messages|responses|chat\/completions)$/)
+      expect(JSON.parse(result.requestPayload)).toMatchObject({ model: result.model })
+      expect(result.output.toLowerCase(), `${result.templateId}/${result.apiMode}`).toContain('hi')
+      expect(result.stages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'api-response', state: 'succeeded' }),
         expect.objectContaining({ name: 'cleanup', state: 'succeeded' }),
       ]))
     }
