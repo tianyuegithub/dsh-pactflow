@@ -57,7 +57,7 @@
     "lib/types/**/*.js",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
-    "presets/**/*.yml",
+    "presets/**/*",
     "README.md"
   ],
   "dependencies": {
@@ -79,6 +79,7 @@
     "@deepseek-ai/dsh-session-projection": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-session-query": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-subagent": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-typert-protocol": "0.1.2-alpha.1",
     "react": "^18.3.1"
   },

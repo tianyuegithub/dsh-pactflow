@@ -41,6 +41,12 @@ importers:
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/llm/llm
+        version: link:../deepseek-harness-pactflow-p0/packages/llm/llm
+      '@deepseek-ai/dsh-scope':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/core/scope
+        version: link:../deepseek-harness-pactflow-p0/packages/core/scope
       '@deepseek-ai/dsh-session':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/session
         version: link:../deepseek-harness-pactflow-p0/packages/core/session
@@ -59,6 +65,12 @@ importers:
       '@deepseek-ai/dsh-subagent':
         specifier: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
         version: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/core/system-prompt
+        version: link:../deepseek-harness-pactflow-p0/packages/core/system-prompt
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/core/tools
+        version: link:../deepseek-harness-pactflow-p0/packages/core/tools
       '@deepseek-ai/dsh-typert-generator':
         specifier: link:../deepseek-harness-pactflow-p0/packages/typert/generator
         version: link:../deepseek-harness-pactflow-p0/packages/typert/generator

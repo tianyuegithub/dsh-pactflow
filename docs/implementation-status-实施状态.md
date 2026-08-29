@@ -17,4 +17,6 @@
 - 里程碑 4 起点：PactFlow Preset 仍是 Persona-only，需扩展为窄 Tool/Skill/Workflow 组合并完成真实本地任务支线
 - 里程碑 4 进度：`listProjects()` 已只按 `SessionHeader.agentPreset === 'pactflow'` 发现 live/persisted 项目，不建第二注册表；`dispatchLocalNode()` 在父 Agent/Provider/prompt 预检后才 claim，通过 DSH `SubagentRuntime.start()` 运行、自动续租、有界记录 outcome，并将普通子任务失败和 infrastructure rejection 都收敛为持久终态
 - 验证边界：当前 8 项领域/冷恢复/本地调度测试通过，本地 Subagent 使用受控真实 Service 合同 fake 验证 Host 边界；尚未用真实 DSH Model Provider 完成开发任务，不声称本里程碑完成
-- 下一安全动作：向 PactFlow Preset 注入 Agent Tool/Skill，在已配置 Model 的真实 DSH Web Profile 中创建 PactFlow Session，运行一条本地 spawn/fork Worker 支线并回读 Session Log
+- Host 进度：已完成 `listProjects()` 和 `dispatchLocalNode()` 的项目发现、预检、claim、续租、Subagent 调用和终态收敛合同
+- Agent-plane 进度：Preset 现在通过嵌套、无 `dsh.client` manifest 的自带插件注册 `pactflow_view/create_need/transition_need/dispatch_local` 4 个窄工具；作用域测试证明普通 Session 看不到它们，打包检查和 Profile install/boot/remove 复验通过
+- 下一安全动作：在测试 Profile 中真实创建 `agentPreset=pactflow` Session，验证 Preset mount audit 与工具 roster；然后使用已配置 Model 运行 spawn/fork Worker 支线并回读 Session Log

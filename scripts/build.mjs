@@ -16,6 +16,7 @@ if (existsSync(lib)) rmSync(lib, { recursive: true })
 run(tsc, ['-b', 'tsconfig.host.json'])
 run(generateTypert, [])
 run(tsdown, ['--config', 'tsdown.host.config.ts'], packageRoot)
+run(tsdown, ['--config', 'tsdown.agent.config.ts'], packageRoot)
 run(tsc, ['-b', 'tsconfig.client.json'])
 run(tsdown, ['--config', 'tsdown.client.config.ts'], packageRoot)
 

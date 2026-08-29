@@ -1,0 +1,6 @@
+{
+  "name": "dsh-pactflow-agent-internal",
+  "private": true,
+  "type": "module",
+  "main": "./index.js"
+}

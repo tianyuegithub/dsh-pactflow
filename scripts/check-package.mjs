@@ -15,6 +15,8 @@ const required = [
   'cordis.patch.yml',
   'presets/pactflow/agent.cordis.yml',
   'presets/pactflow/preset.yml',
+  'presets/pactflow/plugin/index.js',
+  'presets/pactflow/plugin/package.json',
 ]
 
 for (const relative of required) {

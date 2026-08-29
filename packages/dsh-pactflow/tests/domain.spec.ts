@@ -3,10 +3,16 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
 import PactFlowService from '../lib/index.js'
+import * as PactFlowAgentTools from '../presets/pactflow/plugin/index.js'
 
 async function harness(): Promise<Context> {
   const ctx = new Context()
@@ -313,5 +319,36 @@ describe('PactFlow domain foundation', () => {
       node: { state: 'failed' },
       run: { state: 'failed', outcome: 'worker transport disconnected' },
     })
+  })
+
+  it('registers the four PactFlow tools only in the PactFlow Agent scope', async () => {
+    const ctx = await harness()
+    await ctx.plugin(SystemPrompt, {})
+    await ctx.plugin(ToolRuntime)
+    const session = ctx.sessions.create(SessionId('tool-project'), { meta: { agentPreset: 'pactflow' } })
+    ctx.pactflow.initialize(session.id, { name: 'Tools' })
+    const agent = { id: session.id, session } as Agent
+    let scoped!: ReturnType<typeof createScope>
+    await ctx.plugin(Object.assign((inner: Context) => {
+      scoped = createScope(inner, agent)
+    }, { inject: ['tools', 'pactflow'] }))
+    await scoped.ctx.plugin(PactFlowAgentTools)
+
+    expect(ctx.tools.schemas(agent).map(schema => schema.name).sort()).toEqual([
+      'pactflow_create_need',
+      'pactflow_dispatch_local',
+      'pactflow_transition_need',
+      'pactflow_view',
+    ])
+    expect(ctx.tools.schemas().map(schema => schema.name)).not.toContain('pactflow_view')
+    const result = await ctx.tools.execute({
+      callId: ToolCallId('pactflow-view'),
+      name: 'pactflow_view',
+      arguments: {},
+      agent,
+      signal: new AbortController().signal,
+    })
+    expect(result.isError).toBe(false)
+    expect(result.content[0]).toMatchObject({ type: 'text' })
   })
 })
