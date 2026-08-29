@@ -62,17 +62,17 @@
 
 ## 3. P0 前置：DSH 通用外部事件词汇机制
 
-### 3.1 已证实的阻塞
+### 3.1 已消除的阻塞
 
 DSH `PersistenceCoordinator` 对每个读取事件执行 `KNOWN_SESSION_EVENT_TYPES` 检查。该集合由 DSH 仓库中的 `SessionEventMap` 声明生成，仓库外扩展不在其中。外部 PactFlow 可以在 live 进程追加和持久 `pactflow/*` 事件，但重启读取会抛出 `SessionFormatUnsupportedError`。
 
-因此，在受支持 DSH 发行版存在通用外部 log-only 事件机制前，零脉领域实施被硬阻塞。禁止通过私有 fork、关闭读侧检查、滥用已知事件或静默忽略未知事件绕过。
+该阻塞已在 DSH 本地上游分支中以通用机制消除；公开安装仍等待这些提交进入受支持的 DSH 发行版。实现没有使用私有 fork、关闭读侧检查、滥用已知事件或静默忽略未知事件。
 
-### 3.2 拟议的上游通用合同
+### 3.2 已实施的上游通用合同
 
-向 DSH 上游提交一个非 PactFlow 私有的外部事件词汇能力，首版只支持 `required + log-only`，不支持外部 surface event 或在生产者缺失时静默跳过。合同必须使日志可读性由持久生产者身份决定，而不是由「当前恰好安装了哪些任意插件」决定。
+DSH 上游分支已实现一个非 PactFlow 私有的外部事件词汇能力，首版只支持 `required + log-only`，不支持外部 surface event 或在生产者缺失时静默跳过。合同使日志可读性由持久生产者身份决定，而不是由「当前恰好安装了哪些任意插件」决定。
 
-上游合同已收敛为 DSH proposed Agent Note `2026-08-29-durable-external-session-event-producers`：
+上游合同由 DSH implemented Agent Note `2026-08-29-durable-external-session-event-producers` 持有：
 
 1. 核心新增一个自己认识的 `session/external-event-producer` 仅日志声明事件，持久 `{ producer, version, eventTypes }` 精确规范元组。不使用无密钥 digest，因为它不增加信任或信息。
 2. `SessionStore` 提供由 fiber 管理生命周期的生产者注册表；注册返回生产者绑定 handle，在首个外部事件前无异步间隙地先追加声明。
@@ -238,10 +238,12 @@ UI 包含：
 
 只有以下条件停止自主推进：上游 DSH 拒绝或不提供安全的外部事件词汇机制；发现零源码修改与必需能力不可兼得；需要创建/推送外部仓库、新凭证或权限扩大；相同验证失败三次且无新证据；或用户产品决策会改变范围、数据含义或安全边界。
 
-## 13. 当前进入条件和下一动作
+## 13. 当前状态和外部进入条件
 
-当前已完成里程碑 1—4，并完成里程碑 5 的原生控制台基础链；进入里程碑 6。立即动作为：
+里程碑 1—7 的本地实现与验证均已完成：Bundle 安装/卸载、领域事件与冷恢复、十阶段/DAG、Agent Tool、本地 Worker、原生 Web 控制台、Git/Gitea 合同、真实 K3s 四 Harness、升级恢复和服务生成器均有证据。当前实现提交、命令结果和真实环境边界由 `implementation-status-实施状态.md` 持有。
 
-1. 建立 Project Git Binding、不可变 Run Spec、任务分支/worktree 与提交证据合同，先用临时本地 Git 远端验证全流程。
-2. 在同一合同上接入 Gitea 凭证引用、分支保护检查和 Host 本地验证，不让 Worker 获得默认分支合并权限。
-3. 实现 K3s Provider、Harbor Template 与 Harness/协议兼容矩阵，完成真实 Pod Worker 支线后再进入发布验收。
+公开发布只剩三项外部进入条件：
+
+1. DSH 通用前置分支通过上游评审、合并并进入受支持发行版；插件不得要求用户使用源码 worktree。
+2. 为插件仓配置正式远端并发布可校验的 0.2.0 安装包；当前 `dist/` 已提供 npm tarball、插件源码 Bundle、DSH 前置分支 Bundle 和 SHA-256 校验清单作为离线恢复载体。
+3. 在明确授权的测试仓库配置真实 Gitea API token，完成一次受保护 Pull Request（合并请求）创建、审批状态读取、合并、默认分支更新和清理；在此之前保持 `CONDITIONAL_GO（有条件可发布）`。
