@@ -102,6 +102,23 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'pactflow_close_git_need',
+    description: 'Merge all verified task branches through a protected Gitea PR. Requires closing phase, latest verification approval, and no unmet Gitea approvals or status checks.',
+    parameters: {
+      need_id: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+    },
+    output: OUTPUT,
+    timeoutMs: 600_000,
+    async execute(args, exec) {
+      return jsonObject(await ctx.pactflow.closeGitNeed(requireSessionId(exec.agent?.session.id), {
+        needId: args.need_id,
+        expectedRevision: args.expected_revision,
+      }))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_create_need',
     description: 'Create one backlog Need in the current initialized PactFlow project.',
     parameters: {

@@ -16,6 +16,7 @@
 - Harness/协议矩阵：Harbor 实际项目为 `datavdl`，治理后镜像精确为 Claude Code、Codex、OpenCode、DSH 四个 digest；协议分别固定为 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions、OpenAI Chat Completions。`probeHarness` Remote 与原生模板表会显示 template/image/model/baseUrl/API mode/真实 prompt、逐步状态和有界输出；四个真实 K3s Harness 探针均返回 `hi` 并自动清理 Job。
 - Settings 与测试 UI：`pactflow` Settings namespace 持久化非密钥 K3s/Harness 元数据并声明 restart-applied；原生 Plugins 配置卡可查看模板、透明编辑/禁用并持久保存。控制台模板表提供 API/Harness 双测试，默认真实内容 `say hi to me`，显示 path/payload、阶段和滚动输出；四种协议的直接 API 探针与四个 Harness 探针均通过。
 - Gitea admission：Git 绑定可保存 credential-free API base/owner/repo/token Credential Ref；Host 只读核验仓库 full name、默认分支、归档状态、branch protection、required approvals、status checks 和 merge style，Remote/UI 不返回 token。Gitea 1.22 Swagger 与本地真实 HTTP 契约测试通过；当前 DSH Credentials 尚无 Gitea API token，因此未对真实仓库调用受保护接口。
+- Closing：只有 Need 位于 closing、最新 verification review 批准、全部 DAG 节点成功、Gitea 默认分支受保护且没有未满足 approvals/status checks 时，Host 才在隔离 worktree 合并任务 refs、复验、push integration branch、创建并合并 PR、核验默认分支 ancestry、记录 release event 并推进 deployed。完成后精确删除 integration/task worktree、本地/远端任务分支及 K3s Job/ConfigMap；清理失败单独返回，不反转已完成 merge。
 - 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
 
 ## 最新真实验收
@@ -28,5 +29,5 @@
 ## 当前边界与下一安全动作
 
 - 完整任务矩阵：Claude Code、Codex、OpenCode、DSH 均已在真实 K3s Pod 中修改 `zeromai-demo`、测试、commit/push，Host fetch 到独立 worktree 并运行 `git diff --check` 后成功结算；三条新增矩阵与既有 DSH case 均已删除 Job、ConfigMap 和远端测试分支。
-- 尚未完成：真实 Gitea token 配置与显式 closing PR/merge；成功 Job/ConfigMap 的产品保留期与 closing 清理；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
-- 下一安全动作：实现 Gitea integration branch/PR/merge closing 与 release event，真实 main 合并前给出精确外部写预览；随后完成资源保留/清理策略和发布总审计。
+- 尚未完成：真实 Gitea API token 配置与一次真实受保护 PR/merge 验收；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力；DSH 三项通用上游提交尚未进入官方发行版。
+- 下一安全动作：完成升级/卸载/服务运行与发布总审计，验证当前所有矩阵；真实 Gitea main 合并和 DSH 上游推送在获得精确外部写授权后执行。

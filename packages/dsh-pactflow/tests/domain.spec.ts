@@ -551,6 +551,7 @@ describe('PactFlow domain foundation', () => {
 
     expect(ctx.tools.schemas(agent).map(schema => schema.name).sort()).toEqual([
       'pactflow_bind_git',
+      'pactflow_close_git_need',
       'pactflow_create_need',
       'pactflow_create_node',
       'pactflow_dispatch_git',

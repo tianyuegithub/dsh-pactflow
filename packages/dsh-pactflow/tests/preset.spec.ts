@@ -52,6 +52,7 @@ describe('PactFlow packaged Agent Preset', () => {
       'glob',
       'grep',
       'pactflow_bind_git',
+      'pactflow_close_git_need',
       'pactflow_create_need',
       'pactflow_create_node',
       'pactflow_dispatch_git',

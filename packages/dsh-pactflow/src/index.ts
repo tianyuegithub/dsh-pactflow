@@ -22,6 +22,8 @@ import {
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
   BindPactFlowGitRequest,
+  ClosePactFlowNeedRequest,
+  ClosePactFlowNeedResult,
   ClaimPactFlowNodeRequest,
   CreatePactFlowNeedRequest,
   CreatePactFlowNodeRequest,
@@ -47,6 +49,7 @@ import type {
   PactFlowProject,
   PactFlowProjectProjection,
   PactFlowProjectRecord,
+  PactFlowRelease,
   PactFlowSnapshot,
   PactFlowReview,
   PactFlowRun,
@@ -263,6 +266,119 @@ export class PactFlowService extends TypertRemoteService {
     const token = await credentials.resolve(credentialRef(git.gitea.tokenCredentialRef))
     if (token === undefined) throw new Error('PactFlow Gitea token credential reference is not configured')
     return await this.gitea.verify(git.gitea, token.value, git.defaultBranch)
+  }
+
+  /** Merge verified task branches through a protected Gitea PR and deploy the Need state. */
+  @Remote('closeGitNeed')
+  async closeGitNeed(
+    sessionId: string,
+    request: ClosePactFlowNeedRequest,
+  ): Promise<ClosePactFlowNeedResult> {
+    const session = this.livePactFlowSession(sessionId)
+    const project = this.requireProject(session)
+    const binding = project.git
+    if (binding?.gitea === undefined) throw new Error('PactFlow project has no Gitea binding')
+    const need = this.need(session, request.needId)
+    this.requireRevision('need', need.id, need.revision, request.expectedRevision)
+    if (need.phase !== 'closing' || !this.latestReviewApproved(session, need.id, 'verification')) {
+      throw new Error('PactFlow closing requires the closing phase and latest verification approval')
+    }
+    const nodes = Object.values(this.dagState(session)).filter(node => node.needId === need.id)
+    if (nodes.length === 0 || nodes.some(node => node.state !== 'succeeded')) {
+      throw new Error('PactFlow closing requires every Need node to be succeeded')
+    }
+    const runs = Object.values(this.runState(session))
+    const taskRuns = nodes.map((node) => {
+      const run = runs.filter(candidate => candidate.nodeId === node.id
+        && candidate.state === 'succeeded' && candidate.git !== undefined && candidate.gitResult !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]
+      if (run?.git === undefined || run.gitResult === undefined) {
+        throw new Error(`PactFlow node "${node.id}" has no verified Git result`)
+      }
+      return run
+    })
+    const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
+    if (credentials === undefined) throw new Error('PactFlow Gitea requires the Credentials service')
+    const giteaToken = await credentials.resolve(credentialRef(binding.gitea.tokenCredentialRef))
+    if (giteaToken === undefined) throw new Error('PactFlow Gitea token credential reference is not configured')
+    const status = await this.gitea.verify(binding.gitea, giteaToken.value, binding.defaultBranch)
+    if (!status.branchProtected || status.archived) {
+      throw new Error('PactFlow closing requires an active protected Gitea default branch')
+    }
+    if (status.requiredApprovals > 0 || status.statusChecks.length > 0) {
+      throw new Error('PactFlow closing cannot auto-merge while Gitea approvals or status checks are required')
+    }
+    const gitSecret = await this.resolveGitAuth(taskRuns[0]!.git!)
+    const integration = await this.git.prepareClosing(
+      session.header.cwd,
+      session.id,
+      need.id,
+      binding,
+      taskRuns.map(run => run.gitResult!.remoteRef),
+      gitSecret,
+    )
+    const pullRequest = await this.gitea.createPullRequest(binding.gitea, giteaToken.value, {
+      title: `PactFlow: ${need.title}`,
+      body: `Need ${need.id}\n\nVerified task branches: ${taskRuns.length}`,
+      head: integration.branch,
+      base: binding.defaultBranch,
+    })
+    const merged = await this.gitea.mergePullRequest(
+      binding.gitea, giteaToken.value, pullRequest.number, integration.commit,
+    )
+    if (!merged.merged || merged.mergeCommit === undefined) {
+      throw new Error('PactFlow Gitea PR did not report a merged commit')
+    }
+    const defaultCommit = await this.git.verifyClosingMerged(
+      session.header.cwd, binding, integration.commit, gitSecret,
+    )
+    const release: PactFlowRelease = {
+      needId: need.id,
+      commit: defaultCommit,
+      branch: binding.defaultBranch,
+      serviceUrl: merged.htmlUrl,
+      recordedAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/release-recorded', { v: 1, release })
+    const deployed = this.transitionNeed(session.id, {
+      needId: need.id,
+      expectedRevision: need.revision,
+      to: 'deployed',
+    })
+    const cleanupFailures: string[] = []
+    try {
+      await this.git.cleanupClosing(session.header.cwd, integration)
+    } catch (error) {
+      cleanupFailures.push(`closing:${integration.branch}`)
+      this.ctx.logger.warn('PactFlow closing cleanup failed for Need "%s": %s', need.id, this.boundedOutcome(error))
+    }
+    for (const run of taskRuns) {
+      if (run.k3s !== undefined && this.k3s !== undefined) {
+        try {
+          await this.k3s.cleanupRun(run.k3s)
+        } catch (error) {
+          cleanupFailures.push(`k3s:${run.k3s.jobName}`)
+          this.ctx.logger.warn('PactFlow K3s cleanup failed for Run "%s": %s', run.id, this.boundedOutcome(error))
+        }
+      }
+      try {
+        await this.git.cleanupTaskRun(
+          session.header.cwd, binding, run.git!, await this.resolveGitAuth(run.git!),
+        )
+      } catch (error) {
+        cleanupFailures.push(`git:${run.git!.branch}`)
+        this.ctx.logger.warn('PactFlow Git cleanup failed for Run "%s": %s', run.id, this.boundedOutcome(error))
+      }
+    }
+    return {
+      need: deployed,
+      release,
+      pullRequestNumber: merged.number,
+      pullRequestUrl: merged.htmlUrl,
+      integrationBranch: integration.branch,
+      integrationCommit: integration.commit,
+      cleanupFailures,
+    }
   }
 
   /** Create one backlog need under an initialized project. */

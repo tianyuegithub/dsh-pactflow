@@ -143,6 +143,12 @@ export interface PactFlowGiteaStatus {
   readonly mergeStyle: string
 }
 
+export interface PactFlowClosingGit {
+  readonly branch: string
+  readonly commit: string
+  readonly worktreePath: string
+}
+
 /** Non-secret reference to one HTTPS username/token credential. */
 export interface PactFlowGitAuth {
   readonly kind: 'https-token'
@@ -364,6 +370,21 @@ export interface DispatchPactFlowK3sNodeRequest {
   readonly templateId: string
   readonly prompt: string
   readonly leaseDurationMs: number
+}
+
+export interface ClosePactFlowNeedRequest {
+  readonly needId: string
+  readonly expectedRevision: number
+}
+
+export interface ClosePactFlowNeedResult {
+  readonly need: PactFlowNeed
+  readonly release: PactFlowRelease
+  readonly pullRequestNumber: number
+  readonly pullRequestUrl: string
+  readonly integrationBranch: string
+  readonly integrationCommit: string
+  readonly cleanupFailures: readonly string[]
 }
 
 export interface PactFlowHarnessProbeRequest {

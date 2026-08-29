@@ -1,6 +1,6 @@
 /** Host-owned Git checkout, task branch, and worktree operations. */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -10,6 +10,7 @@ import type {
   PactFlowGitAuth,
   PactFlowGiteaBinding,
   PactFlowGitBinding,
+  PactFlowClosingGit,
   PactFlowGitResult,
   PactFlowGitRunSpec,
   PactFlowNode,
@@ -190,6 +191,122 @@ export class PactFlowGitWorkspace {
     const result = await this.validateResult(spec)
     if (result.commit !== remoteCommit) throw new Error('PactFlow local worktree differs from the remote Worker commit')
     return { ...result, remoteRef, syncedAt: Date.now() }
+  }
+
+  /** Merge verified task refs on an isolated integration branch and push it for PR creation. */
+  async prepareClosing(
+    workspace: string | undefined,
+    sessionId: string,
+    needId: string,
+    binding: PactFlowGitBinding,
+    remoteRefs: readonly string[],
+    secret?: PactFlowGitAuthSecret,
+  ): Promise<PactFlowClosingGit> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    if (remoteRefs.length === 0) throw new Error('PactFlow closing requires at least one task branch')
+    if ((binding.auth === undefined) !== (secret === undefined)) {
+      throw new Error('PactFlow Git authentication does not match the project binding')
+    }
+    const prefix = `refs/remotes/${binding.remote}/`
+    const branches = [...new Set(remoteRefs)].sort().map((remoteRef) => {
+      if (!remoteRef.startsWith(prefix)) throw new Error('PactFlow closing received a foreign task ref')
+      return remoteRef.slice(prefix.length)
+    })
+    await this.withAuthentication(secret, async (environment) => {
+      await this.git(root, [
+        'fetch', '--no-tags', binding.remote,
+        `refs/heads/${binding.defaultBranch}:refs/remotes/${binding.remote}/${binding.defaultBranch}`,
+      ], environment)
+      for (const branch of branches) {
+        await this.git(root, [
+          'fetch', '--no-tags', binding.remote,
+          `refs/heads/${branch}:refs/remotes/${binding.remote}/${branch}`,
+        ], environment)
+      }
+    })
+    const baseCommit = await this.git(root, [
+      'rev-parse', '--verify', `refs/remotes/${binding.remote}/${binding.defaultBranch}^{commit}`,
+    ])
+    const suffix = randomUUID().slice(0, 12)
+    const branch = `pactflow/closing/${needId}/${suffix}`
+    await this.git(root, ['check-ref-format', '--branch', branch])
+    const projectKey = createHash('sha256').update(sessionId).digest('hex').slice(0, 20)
+    const worktreePath = join(this.worktreeRoot, 'closing', projectKey, suffix)
+    await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
+    await this.git(root, ['worktree', 'add', '-b', branch, worktreePath, baseCommit])
+    for (const taskBranch of branches) {
+      await this.git(worktreePath, ['merge', '--no-ff', '--no-edit', `${prefix}${taskBranch}`])
+    }
+    const result = await this.validateResult({
+      remote: binding.remote,
+      remoteUrl: binding.remoteUrl,
+      defaultBranch: binding.defaultBranch,
+      baseCommit,
+      branch,
+      worktreePath,
+      validationCommands: binding.validationCommands,
+      ...binding.auth === undefined ? {} : { auth: binding.auth },
+    })
+    await this.withAuthentication(secret, async (environment) => {
+      await this.git(worktreePath, [
+        'push', '--porcelain', binding.remote, `HEAD:refs/heads/${branch}`,
+      ], environment)
+    })
+    return { branch, commit: result.commit, worktreePath }
+  }
+
+  /** Fetch the default branch after Gitea merge and require the integration commit in its ancestry. */
+  async verifyClosingMerged(
+    workspace: string | undefined,
+    binding: PactFlowGitBinding,
+    integrationCommit: string,
+    secret?: PactFlowGitAuthSecret,
+  ): Promise<string> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    await this.withAuthentication(secret, async (environment) => {
+      await this.git(root, [
+        'fetch', '--no-tags', binding.remote,
+        `refs/heads/${binding.defaultBranch}:refs/remotes/${binding.remote}/${binding.defaultBranch}`,
+      ], environment)
+    })
+    const merged = await this.git(root, [
+      'rev-parse', '--verify', `refs/remotes/${binding.remote}/${binding.defaultBranch}^{commit}`,
+    ])
+    try {
+      await this.git(root, ['merge-base', '--is-ancestor', integrationCommit, merged])
+    } catch {
+      throw new Error('PactFlow Gitea default branch does not contain the integration commit')
+    }
+    return merged
+  }
+
+  /** Remove only the clean local worktree and branch created for closing. */
+  async cleanupClosing(workspace: string | undefined, closing: PactFlowClosingGit): Promise<void> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    const dirty = await this.git(closing.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
+    if (dirty.length > 0) throw new Error('PactFlow closing worktree is not clean')
+    await this.git(root, ['worktree', 'remove', closing.worktreePath])
+    await this.git(root, ['branch', '-D', closing.branch])
+  }
+
+  /** Remove one merged task branch from the remote and its clean local worktree. */
+  async cleanupTaskRun(
+    workspace: string | undefined,
+    binding: PactFlowGitBinding,
+    spec: PactFlowGitRunSpec,
+    secret?: PactFlowGitAuthSecret,
+  ): Promise<void> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    if ((binding.auth === undefined) !== (secret === undefined)) {
+      throw new Error('PactFlow Git authentication does not match the project binding')
+    }
+    const dirty = await this.git(spec.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
+    if (dirty.length > 0) throw new Error(`PactFlow task worktree ${spec.branch} is not clean`)
+    await this.withAuthentication(secret, async (environment) => {
+      await this.git(root, ['push', '--porcelain', binding.remote, `:refs/heads/${spec.branch}`], environment)
+    })
+    await this.git(root, ['worktree', 'remove', spec.worktreePath])
+    await this.git(root, ['branch', '-D', spec.branch])
   }
 
   private async requireWorkspaceRoot(workspace: string | undefined): Promise<string> {

@@ -318,6 +318,19 @@ export class PactFlowK3sWorker {
     await this.cancel(spec)
   }
 
+  /** Delete completed resources owned by one Run; missing resources count as clean. */
+  async cleanupRun(spec: PactFlowK3sRunSpec): Promise<void> {
+    const operations = await Promise.allSettled([
+      this.batch.deleteNamespacedJob({
+        name: spec.jobName, namespace: spec.namespace, gracePeriodSeconds: 0,
+        propagationPolicy: 'Background', body: {},
+      }),
+      this.core.deleteNamespacedConfigMap({ name: spec.configMapName, namespace: spec.namespace }),
+    ])
+    const failed = operations.filter(result => result.status === 'rejected' && !this.isNotFound(result.reason))
+    if (failed.length > 0) throw new Error(`PactFlow failed to clean K3s resources for Job "${spec.jobName}"`)
+  }
+
   private configMap(spec: PactFlowK3sRunSpec, git: PactFlowGitRunSpec, prompt: string): V1ConfigMap {
     return {
       apiVersion: 'v1',
@@ -681,6 +694,12 @@ export class PactFlowK3sWorker {
     const bytes = new TextEncoder().encode(value)
     if (bytes.length <= maximumBytes) return value
     return `${new TextDecoder().decode(bytes.slice(0, maximumBytes - 16))}\n[truncated]`
+  }
+
+  private isNotFound(error: unknown): boolean {
+    const status = (error as { code?: unknown; statusCode?: unknown })?.code
+      ?? (error as { statusCode?: unknown })?.statusCode
+    return status === 404
   }
 }
 
