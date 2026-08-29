@@ -342,7 +342,9 @@ describe('PactFlow domain foundation', () => {
 
     expect(ctx.tools.schemas(agent).map(schema => schema.name).sort()).toEqual([
       'pactflow_create_need',
+      'pactflow_create_node',
       'pactflow_dispatch_local',
+      'pactflow_initialize',
       'pactflow_transition_need',
       'pactflow_view',
     ])

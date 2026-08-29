@@ -38,8 +38,8 @@
 
 ### 2.3 持久事实与项目身份
 
-- 一个项目对应一个 `agentPreset: pactflow` 的根 Session 和一个绑定项目 Git checkout 的 Workspace；Session ID 是项目 ID。
-- 零脉项目从 `ctx.sessionQuery.listSessions()` 返回的 `SessionRecord.header.agentPreset` 筛选；禁止在 Settings 内维护第二份项目注册表。
+- 一个项目对应一个当前 `agentPreset` Projection 为 `pactflow` 的根 Session 和一个绑定项目 Git checkout 的 Workspace；Session ID 是项目 ID。`SessionHeader.agentPreset` 只记录创建时模式，不能表示空白会话在首轮前切换后的当前模式。
+- 零脉项目从 `ctx.sessionQuery.listSessions()` 获取候选 Session，再用完整事件折叠得到的当前 `agentPreset` Projection 筛选；live Session 直接读取同一 Projection，裸 Host 嵌入才回退 Header。禁止在 Settings 内维护第二份项目注册表。
 - 业务事件是 log-only 自定义 Session Event，payload 携带明确 `v`；Projection 是可重建视图，Projection Cache 只是加速器。
 - 高频 heartbeat sample 是进程内观测；claim、lease deadline、有意义的 lease renewal、timeout 和 terminal outcome 是持久事件。
 - 节点变更使用每节点 revision CAS，不使用全局 Session seq 作为并发版本。
@@ -138,7 +138,7 @@ DSH `PersistenceCoordinator` 对每个读取事件执行 `KNOWN_SESSION_EVENT_TY
 
 ### 5.3 冷恢复
 
-`listSessions()` 返回包含完整 `SessionHeader` 的 `SessionRecord`，直接按 `header.agentPreset === 'pactflow'` 筛选项目。对非终态项目，恢复 Projection Cache 加日志尾部，然后与 Git、K3s 和活动 Subagent 对账。禁止 Settings 项目注册表。
+`listSessions()` 只提供候选 Session 和创建时 Header。项目发现必须读取 Session 事件并恢复当前 `agentPreset` Projection；这是因为 DSH 允许空白 Session 在第一次执行前通过 `agent-preset/selected` 改变模式。对非终态项目，恢复 Projection Cache 加日志尾部，然后与 Git、K3s 和活动 Subagent 对账。禁止 Settings 项目注册表。
 
 ## 6. 里程碑 3：十阶段、DAG 与人工门禁
 
@@ -240,8 +240,8 @@ UI 包含：
 
 ## 13. 当前进入条件和下一动作
 
-当前进入里程碑 0，不同时实施业务功能。立即动作为：
+当前已完成里程碑 1—4，并完成里程碑 5 的原生控制台基础链；进入里程碑 6。立即动作为：
 
-1. 完成 DSH 外部事件词汇方案的独立源码复核，写入 DSH proposed Agent Note。
-2. 在 DSH 独立 worktree 中实现并验证通用 P0 change；推送/提交上游前获得精确外部写入批准。
-3. 同时只读完成外部 Bundle PoC 合同复核；P0 合同冻结后才开始写 PoC 代码。
+1. 建立 Project Git Binding、不可变 Run Spec、任务分支/worktree 与提交证据合同，先用临时本地 Git 远端验证全流程。
+2. 在同一合同上接入 Gitea 凭证引用、分支保护检查和 Host 本地验证，不让 Worker 获得默认分支合并权限。
+3. 实现 K3s Provider、Harbor Template 与 Harness/协议兼容矩阵，完成真实 Pod Worker 支线后再进入发布验收。

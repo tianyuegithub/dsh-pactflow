@@ -22,6 +22,21 @@ const PHASES = [
 /** Register PactFlow-only tools into the preset's standing Agent scope. */
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
+    name: 'pactflow_initialize',
+    description: 'Initialize the one PactFlow project owned by the current PactFlow Session. Call once before other PactFlow mutations.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'Human-readable project name.' },
+    },
+    output: OUTPUT,
+    execute(args, exec) {
+      return Promise.resolve(jsonObject(ctx.pactflow.initialize(
+        requireSessionId(exec.agent?.session.id),
+        { name: args.name },
+      )))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_view',
     description: 'Read the current PactFlow project and DAG projections. Use before any mutation.',
     parameters: {},
@@ -63,6 +78,34 @@ export function apply(ctx: Context): void {
         to: args.to,
       })
       return Promise.resolve(jsonObject(value))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'pactflow_create_node',
+    description: 'Create one DAG node under an existing Need. Dependencies must name existing nodes in the same Need.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'Unique lower-kebab-case node id.' },
+      need_id: { type: 'string', required: true },
+      title: { type: 'string', required: true },
+      dependencies: {
+        type: 'array',
+        required: true,
+        items: { type: 'string' },
+        description: 'Existing same-Need node ids; use [] for a root node.',
+      },
+    },
+    output: OUTPUT,
+    execute(args, exec) {
+      return Promise.resolve(jsonObject(ctx.pactflow.createNode(
+        requireSessionId(exec.agent?.session.id),
+        {
+          id: args.id,
+          needId: args.need_id,
+          title: args.title,
+          dependencies: args.dependencies,
+        },
+      )))
     },
   }))
 

@@ -1,25 +1,24 @@
 # DSH 零脉实施状态
 
-- 当前里程碑：4 —— Agent Tool、Workflow 与本地 Worker
-- 状态：进行中
-- 最后已验证提交：DSH P0 `a4633e650b`、外部 Typert `817b9e6120`；本仓库 Bundle `ef4ceda`
-- 已通过验证：DSH 架构评审 Agent Note 的 `test:docs`、`doc-sync` 32/32、`doc-typecheck`、双语配对和 `diff --check`
-- 已证实 blocker：官方 DSH 读取仓库外 Session Event 时被 `KNOWN_SESSION_EVENT_TYPES` 拒绝，尚无外部注册机制
-- 侧车结论：已证实外部事件冷读拒绝链和生成边界；已冻结最小外部 Bundle/Typert/Client/Preset/remove PoC 路径
-- P0 合同：DSH proposed Agent Note `2026-08-29-durable-external-session-event-producers` 已写入；本地隔离分支已实施生产者注册、绑定追加、JSONL/SQLite 冷读与卸载/精确重装语义，尚未推送或进入官方发行版
-- P0 验证：相关 527/527 测试、全量 typecheck/lint、`doc-sync` 32/32 通过；默认全仓两次各有 1-2 个不同的并发时序 flake，对应文件隔离重跑全部通过
-- 里程碑 1：单一 Loader 身份的 `dsh-pactflow` Package 已预构建 Host、Client、Typert、Remote 和 Preset；临时 Profile 的 tarball install、dump-config、带插件启动、remove、无插件重启全部通过
-- 发行边界：当前 DSH alpha 包尚未全部发布到 npm，源码 Profile 安装会报 peer 缺失警告，但 Loader 通过官方 in-box 解析成功启动；正式发行前必须在对应已发布 DSH 版本上重跑干净安装
-- 里程碑 2 进度：已实现 Branded ID、十阶段/节点/Run 词汇、12 个带 `v: 1` 的事件类型、5 个独立 Projection Unit 和项目初始化/查询 Remote；真实 JSONL 证明缺少生产者失败关闭、精确重装后冷读并重建 Projection
-- 里程碑 3 进度：已实现 Need 创建、严格相邻十阶段转移、每 Need revision CAS、需求/设计/计划/验证四类人工门禁和最新评审决策；跳阶段、陈旧 revision 和缺失批准均有回归测试
-- 里程碑 3 完成：DAG 节点创建/依赖更新、跨 Need 依赖拒绝、无环校验、ready 推导、Node revision CAS、Run claim/续租/终态已实现；claim 和 settle 各用一个事件同时携带 Run/Node 快照，第一终态获胜，错误 claimId、重复结果、陈旧 revision 和截止点到期结果全部失败关闭
-- 安全边界：Session Log 只保存非秘密 `claimId`；Worker callback 认证将由 DSH Credentials/Kubernetes Secret 持有，不进入事件、Remote 或日志
-- 里程碑 4 起点：PactFlow Preset 仍是 Persona-only，需扩展为窄 Tool/Skill/Workflow 组合并完成真实本地任务支线
-- 里程碑 4 进度：`listProjects()` 已只按 `SessionHeader.agentPreset === 'pactflow'` 发现 live/persisted 项目，不建第二注册表；`dispatchLocalNode()` 在父 Agent/Provider/prompt 预检后才 claim，通过 DSH `SubagentRuntime.start()` 运行、自动续租、有界记录 outcome，并将普通子任务失败和 infrastructure rejection 都收敛为持久终态
-- 验证边界：当前 8 项领域/冷恢复/本地调度测试通过，本地 Subagent 使用受控真实 Service 合同 fake 验证 Host 边界；尚未用真实 DSH Model Provider 完成开发任务，不声称本里程碑完成
-- Host 进度：已完成 `listProjects()` 和 `dispatchLocalNode()` 的项目发现、预检、claim、续租、Subagent 调用和终态收敛合同
-- Agent-plane 进度：Preset 现在通过嵌套、无 `dsh.client` manifest 的自带插件注册 `pactflow_view/create_need/transition_need/dispatch_local` 4 个窄工具；作用域测试证明普通 Session 看不到它们，打包检查和 Profile install/boot/remove 复验通过
-- Preset mount 证据：真实 DSH Loader/Include/AgentLoop/AgentPresets 公开路径已解析打包目录、导入相对 Agent 插件、创建 PactFlow Agent 并通过 mount audit；工具 roster 精确 4 项，根层 roster 为空
-- 下一安全动作：使用已配置 Model Provider 运行一条 spawn/fork Worker 支线并回读 Session Log；该验收需要可用凭证并会发生真实模型调用
-- 里程碑 5 独立进度：原生 `shell.overlay` 已改为读取 `snapshot()` Typert Remote 的真实项目/Need/DAG/Run 表格，Host 以同步 Projection 一致切面响应；没有 mock 数据、iframe 或第二 Web 壳，React 复核确认独立 Remote 使用 `Promise.all`、静态样式已提升、列表 key 稳定
-- 里程碑 5 浏览器证据：DSH 官方 Web scaffold 真实加载外部 Bundle layer 与 Client Module，持久但未激活 Agent 的 PactFlow Session 显示条件 Header Action；Overlay 打开后 Host 经 `sessionQuery.readSession()` + `sessionProjections.restore()` 冷重建并渲染 Project/Need/DAG 真实数据。Playwright 1/1、领域/挂载 10/10、Profile install/boot/remove/clean-boot 全部通过
+- 当前里程碑：6 —— Git/Gitea、K3s/Harbor 与多 Harness Worker
+- 状态：进行中；里程碑 1—4 已完成，里程碑 5 的原生控制台基础链已完成
+- 最后已验证提交：DSH 通用能力分支 `817b9e6120`；Bundle 仓库 `5810c89`，本轮真实 Worker 增量待提交
+
+## 已完成合同
+
+- 外部 Bundle：单一 Loader 身份交付 Host、Agent Preset、Client、Typert 和 Remote；临时 Profile 的 tarball 安装、配置展开、启动、卸载和无插件重启已通过。
+- 持久事实：12 类带 `v: 1` 的外部 Session Event、5 个 Projection、十阶段与四个人工门禁、DAG revision CAS、Run claim/renew/settle、租约边界和第一终态获胜已通过回归测试。
+- 当前模式权威：`SessionHeader.agentPreset` 只表示创建时模式；项目发现、授权和冷恢复以 `agentPreset` Projection 的当前值为准，裸 Host 嵌入才回退到 Header。Settings 不维护第二项目注册表。
+- 本地 Worker：零脉 Preset 精确暴露 6 个作用域工具；`dispatchLocalNode()` 使用 DSH 原生 Subagent Runtime，父 Provider/prompt 预检先于 claim，自动续租，失败和基础设施拒绝均持久终结。
+- 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
+
+## 最新真实验收
+
+- `pnpm run test:real-worker`：真实浏览器选择零脉模式，真实 DeepSeek 父 Agent 调用 `pactflow_initialize/create_need/create_node/dispatch_local`，DSH `spawn` 子 Agent 完成任务，父 Session 记录 `pactflow/run-settled`，Run 与 Node 均为 `succeeded`。
+- 凭证只由测试启动器从 DSH Credentials 读取并作为子进程环境传入；原值未进入 argv、URL、Session Log、Tool result、测试输出或 Git。
+- 调试修复了两个真实边界：活动模式必须读 Projection，而非不可变 Header；Preset 内部 Package 必须包含 name/version，才能通过 DeepSeek request extension inventory 校验。
+
+## 当前边界与下一安全动作
+
+- 尚未完成：项目 Git/Gitea 绑定、任务分支/worktree、提交证据与本地验证；K3s Run Spec、Secret、Job/Pod 对账；Harbor 模板与 Harness/协议兼容矩阵；远端真实 Worker。
+- 下一安全动作：先冻结并实现不含密钥的 Git Project/Run Spec 与本地 git worktree Provider，使用临时仓库证明“一任务一分支一 worktree、Worker 只提交任务分支、Host 验证后才允许 closing”；再接 Gitea 和 K3s。

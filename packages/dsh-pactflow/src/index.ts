@@ -7,6 +7,7 @@ import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/d
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { SubagentResult, SubagentRun, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
+import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { PACTFLOW_EVENT_TYPES, PACTFLOW_PROJECTIONS } from './domain.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
@@ -103,10 +104,7 @@ export class PactFlowService extends TypertRemoteService {
    */
   @Remote('initialize')
   initialize(sessionId: string, request: InitializePactFlowProjectRequest): PactFlowProject {
-    const session = this.liveSession(sessionId)
-    if (session.header.agentPreset !== 'pactflow') {
-      throw new Error(`session "${session.id}" is not composed from the pactflow preset`)
-    }
+    const session = this.livePactFlowSession(sessionId)
     const current = this.ctx.sessionProjections.stateOf(session, 'pactflowProject')
     if (current?.project !== null && current?.project !== undefined) {
       throw new Error(`session "${session.id}" already owns a PactFlow project`)
@@ -367,18 +365,17 @@ export class PactFlowService extends TypertRemoteService {
   async snapshot(sessionId: string): Promise<PactFlowSnapshot> {
     const session = this.ctx.sessions.get(SessionId(sessionId))
     if (session !== undefined) {
-      if (session.header.agentPreset !== 'pactflow') {
-        throw new Error(`session "${session.id}" is not composed from the pactflow preset`)
-      }
+      this.requirePactFlowPreset(session)
       return this.snapshotOfLive(session)
     }
     const query = this.ctx.get('sessionQuery') as SessionQueryEngine | undefined
     if (query === undefined) throw new Error('cold PactFlow snapshots require sessionQuery')
     const stored = await query.readSession(SessionId(sessionId))
-    if (stored.session.agentPreset !== 'pactflow') {
+    const restored = this.ctx.sessionProjections.restore({}, stored.events, 0, stored.session).snapshot
+    if ((restored.values.agentPreset ?? stored.session.agentPreset) !== 'pactflow') {
       throw new Error(`session "${sessionId}" is not composed from the pactflow preset`)
     }
-    const values = this.ctx.sessionProjections.restore({}, stored.events, 0, stored.session).snapshot.values
+    const values = restored.values
     return {
       project: values.pactflowProject ?? { project: null },
       needs: values.pactflowNeeds ?? { byId: {} },
@@ -405,13 +402,19 @@ export class PactFlowService extends TypertRemoteService {
   async listProjects(): Promise<readonly PactFlowProjectRecord[]> {
     const query = this.ctx.get('sessionQuery') as SessionQueryEngine | undefined
     if (query === undefined) throw new Error('PactFlow project discovery requires sessionQuery')
-    const records = (await query.listSessions())
-      .filter(record => record.header.agentPreset === 'pactflow')
-    return await Promise.all(records.map(async (record): Promise<PactFlowProjectRecord> => {
+    const records = await query.listSessions()
+    const discovered = await Promise.all(records.map(async (record): Promise<PactFlowProjectRecord | undefined> => {
       const live = this.ctx.sessions.get(record.header.id)
-      const project = live === undefined
-        ? this.projectFromEvents((await query.readSession(record.header.id)).events)
-        : this.ctx.sessionProjections.stateOf(live, 'pactflowProject')?.project ?? null
+      let project: PactFlowProject | null
+      if (live !== undefined) {
+        if (this.currentPreset(live) !== 'pactflow') return undefined
+        project = this.ctx.sessionProjections.stateOf(live, 'pactflowProject')?.project ?? null
+      } else {
+        const stored = await query.readSession(record.header.id)
+        const values = this.ctx.sessionProjections.restore({}, stored.events, 0, stored.session).snapshot.values
+        if ((values.agentPreset ?? stored.session.agentPreset) !== 'pactflow') return undefined
+        project = values.pactflowProject?.project ?? null
+      }
       return {
         sessionId: record.header.id,
         live: record.live,
@@ -419,6 +422,7 @@ export class PactFlowService extends TypertRemoteService {
         project,
       }
     }))
+    return discovered.filter((record): record is PactFlowProjectRecord => record !== undefined)
   }
 
   /** Claim a node, execute one DSH one-shot Subagent, and settle from its terminal result. */
@@ -515,10 +519,20 @@ export class PactFlowService extends TypertRemoteService {
   /** Resolve a live Session and enforce the PactFlow preset owner. */
   private livePactFlowSession(sessionId: string): Session {
     const session = this.liveSession(sessionId)
-    if (session.header.agentPreset !== 'pactflow') {
+    this.requirePactFlowPreset(session)
+    return session
+  }
+
+  /** Enforce the log-backed current preset rather than the immutable creation header. */
+  private requirePactFlowPreset(session: Session): void {
+    if (this.currentPreset(session) !== 'pactflow') {
       throw new Error(`session "${session.id}" is not composed from the pactflow preset`)
     }
-    return session
+  }
+
+  /** Current log-backed preset when the roster is composed; creation header in bare embeds. */
+  private currentPreset(session: Session): string | undefined {
+    return this.ctx.sessionProjections.stateOf(session, 'agentPreset') ?? session.header.agentPreset
   }
 
   /** Require the root project projection. */
@@ -644,15 +658,6 @@ export class PactFlowService extends TypertRemoteService {
       }
       this.events.append(session, 'pactflow/node-updated', { v: 1, node })
     }
-  }
-
-  /** Fold the single immutable project initialization fact from a cold log. */
-  private projectFromEvents(events: readonly { readonly type: string; readonly data: unknown }[]): PactFlowProject | null {
-    const event = events.find(candidate => candidate.type === 'pactflow/project-initialized')
-    if (event === undefined) return null
-    const data = event.data as { readonly v?: unknown; readonly project?: PactFlowProject }
-    if (data.v !== 1 || data.project === undefined) throw new Error('stored PactFlow project event is unsupported')
-    return data.project
   }
 
   private subagentOutcome(result: SubagentResult): string {

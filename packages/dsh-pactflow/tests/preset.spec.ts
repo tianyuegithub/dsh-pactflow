@@ -44,7 +44,9 @@ describe('PactFlow packaged Agent Preset', () => {
     const names = ctx.tools.schemas(handle.agent).map(schema => schema.name).sort()
     expect(names).toEqual([
       'pactflow_create_need',
+      'pactflow_create_node',
       'pactflow_dispatch_local',
+      'pactflow_initialize',
       'pactflow_transition_need',
       'pactflow_view',
     ])
