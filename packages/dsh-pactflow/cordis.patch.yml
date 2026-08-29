@@ -1,0 +1,15 @@
+# One Loader identity supplies both Host and dsh.client faces. The Host also
+# provides pactflowPresetRoot, so the agent-presets row can wait for and use
+# the package-owned directory without loading this dsh.client package twice.
+- insert:
+    - id: pactflow
+      name: dsh-pactflow
+
+- id: agent-presets
+  inject: [pactflowPresetRoot]
+  config:
+    default: standard
+    includeShippedRoot: true
+    includeUserRoot: true
+    roots: !!js |-
+      [{ path: ctx.pactflowPresetRoot, trust: 'user' }]

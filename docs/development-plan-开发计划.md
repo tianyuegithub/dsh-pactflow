@@ -27,11 +27,11 @@
 
 | 目录/导出 | 职责 |
 | --- | --- |
-| `src/host` / `.` | Host Service、事件、Projection、Settings、编排、对账 |
+| `src/host` / `.` | Host Service、事件、Projection、Settings、编排、对账与 Preset Root Service |
 | `src/agent` / `./agent` | Agent tools、Prompt Section、Skill 和 Workflow Consumer |
 | `src/client` / `./client` | Remote mount、标题区入口、Overlay、Store、Locale 和 UI |
 | 生成产物 `./typert` / `./remote` | Host Typert Manifest 和 Client Remote 贡献 |
-| `presets/pactflow` / `./preset-root` | 零脉 Agent Preset 组合和 Package-owned root provider |
+| `presets/pactflow` | 零脉 Agent Preset 组合；同一 Host row 提供 Package-owned root 路径 |
 | `cordis.patch.yml` | Host row、root provider、`agent-presets` 配置和 Client row 的 Bundle layer |
 
 只有在细粒度依赖、构建执行面或独立发布证据证明一个 Package 已无法清晰拥有上述职责时，才拆分多 Package；不为预测的未来需求增加发行面。
@@ -96,7 +96,7 @@ DSH `PersistenceCoordinator` 对每个读取事件执行 `KNOWN_SESSION_EVENT_TY
 这一里程碑只证明外部扩展机制，不实现零脉业务。构建一个最小预构建 Bundle，包含：
 
 - 一个 Host Service Loader row；
-- 一个提供 Package-owned Preset 路径的 Root Provider；
+- 同一 Host row 提供的 Package-owned Preset Root Service，避免同一 `dsh.client` Package 因多 Loader 来源被拒绝；
 - 对 `agent-presets` 的完整配置替换和 `pactflowPresetRoot` 注入；
 - 一个只显示名称和说明的 `pactflow` Preset；
 - 一个有单一 Remote Method 的 `TypertRemoteService`；
@@ -107,7 +107,7 @@ DSH `PersistenceCoordinator` 对每个读取事件执行 `KNOWN_SESSION_EVENT_TY
 必须在独立临时 `DSH_HOME` 中验证：
 
 1. 从预构建 tarball 单命令安装，不执行源码 `prepare`。
-2. `dsh --profile web --dump-config` 显示 PactFlow Bundle layer、Host row、Root Provider 和完整 `agent-presets` 配置。
+2. `dsh --profile web --dump-config` 显示 PactFlow Bundle layer、单一 Host/Client row、其提供的 Root Service 和完整 `agent-presets` 配置。
 3. 启动 Web 后 Preset Roster 同时包含随附模式和 `pactflow`。
 4. Typert Loader 自动注册外部 `./typert`，Client 加载 `./client` 并挂载 `./remote`。
 5. PactFlow Session 显示入口并打开 Overlay；其他 Preset Session 不显示入口。

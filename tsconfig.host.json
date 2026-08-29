@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/dsh-pactflow/tsconfig.host.json" },
+    { "path": "../deepseek-harness-pactflow-p0/packages/typert/protocol" }
+  ]
+}

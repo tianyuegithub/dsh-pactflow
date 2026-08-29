@@ -1,0 +1,6 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/dsh-pactflow/tsconfig.client.json" }
+  ]
+}
