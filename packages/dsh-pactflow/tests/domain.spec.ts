@@ -13,6 +13,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
 import PactFlowService from '../lib/index.js'
+import { PACTFLOW_EVENT_TYPES_V0_2 } from '../src/domain.ts'
 import * as PactFlowAgentTools from '../presets/pactflow/plugin/index.js'
 import { createGitFixture, serveAuthenticatedGit, type AuthenticatedGitServer } from './git-fixture.ts'
 
@@ -44,7 +45,7 @@ describe('PactFlow domain foundation', () => {
     ])
     expect(session.events[0]?.data).toMatchObject({
       producer: 'dsh-pactflow',
-      version: '0.2.0',
+      version: '0.2.1',
     })
     expect(ctx.pactflow.project(session.id)).toEqual({ project })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowProject).toEqual({ project })
@@ -95,6 +96,42 @@ describe('PactFlow domain foundation', () => {
       await expect(reader.pactflow.snapshot(session.id)).resolves.toMatchObject({
         project: { project },
       })
+      const restored = reader.sessions.prepare(session.id, {
+        seed: structuredClone([...stored.events]),
+        meta: structuredClone(stored.meta),
+        seedSource: 'persistence',
+      })
+      expect(reader.sessionProjections.snapshot(restored).values.pactflowProject)
+        .toEqual({ project })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('cold-restores the exact 0.2.0 producer tuple after upgrading to 0.2.1', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-v0-2-upgrade-'))
+    try {
+      const writer = new Context()
+      await writer.plugin(SessionStore)
+      await writer.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+      const events = writer.sessions.externalEventProducers.register({
+        producer: 'dsh-pactflow',
+        version: '0.2.0',
+        eventTypes: PACTFLOW_EVENT_TYPES_V0_2,
+      })
+      const session = writer.sessions.create(SessionId('v0-2-project'), {
+        meta: { agentPreset: 'pactflow' },
+      })
+      const project = {
+        id: 'v0-2-project', name: '0.2.0 project', revision: 1,
+        createdAt: 1_788_056_000_000, updatedAt: 1_788_056_000_000,
+      }
+      events.append(session, 'pactflow/project-initialized', { v: 1, project })
+      await writer.sessions.flush(session)
+
+      const reader = await harness()
+      await reader.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+      const stored = await reader.sessionPersistence.load(session.id)
       const restored = reader.sessions.prepare(session.id, {
         seed: structuredClone([...stored.events]),
         meta: structuredClone(stored.meta),
@@ -234,6 +271,110 @@ describe('PactFlow domain foundation', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('reconciles an expired local Run once, restores the node to ready, and increments the next attempt', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T00:00:00Z'))
+    try {
+      const ctx = await harness()
+      const session = ctx.sessions.create(SessionId('expired-local-project'), { meta: { agentPreset: 'pactflow' } })
+      ctx.pactflow.initialize(session.id, { name: 'Expired local' })
+      ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+      const ready = ctx.pactflow.createNode(session.id, {
+        id: 'node', needId: 'need', title: 'Node', dependencies: [],
+      })
+      const claimed = ctx.pactflow.claimNode(session.id, {
+        nodeId: ready.id, expectedRevision: ready.revision, provider: 'spawn', leaseDurationMs: 1_000,
+      })
+      const running = ctx.pactflow.renewRun(session.id, {
+        runId: claimed.run.id, claimId: claimed.run.claimId, leaseDurationMs: 1_000,
+      })
+
+      vi.advanceTimersByTime(1_000)
+      const first = await ctx.pactflow.reconcileRuns(session.id)
+      expect(first.runs.byId[running.run.id]).toMatchObject({
+        state: 'failed',
+        outcome: 'Local Worker lease expired after Host restart; prior outcome is unknown',
+      })
+      expect(first.dag.byId.node).toMatchObject({ state: 'ready', revision: 4 })
+
+      const eventCount = session.events.length
+      const repeated = await ctx.pactflow.reconcileRuns(session.id)
+      expect(repeated.dag.byId.node).toMatchObject({ state: 'ready', revision: 4 })
+      expect(session.events).toHaveLength(eventCount)
+
+      const attempt2 = ctx.pactflow.claimNode(session.id, {
+        nodeId: 'node', expectedRevision: 4, provider: 'k3s:dsh', leaseDurationMs: 60_000,
+      })
+      expect(attempt2).toMatchObject({
+        node: { state: 'claimed', revision: 5 },
+        run: { state: 'claimed', attempt: 2 },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('schedules active local Run expiry when the PactFlow Agent is recreated', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T00:00:00Z'))
+    try {
+      const ctx = await harness()
+      const session = ctx.sessions.create(SessionId('scheduled-local-recovery'), { meta: { agentPreset: 'pactflow' } })
+      ctx.pactflow.initialize(session.id, { name: 'Scheduled local recovery' })
+      ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+      const ready = ctx.pactflow.createNode(session.id, {
+        id: 'node', needId: 'need', title: 'Node', dependencies: [],
+      })
+      const claimed = ctx.pactflow.claimNode(session.id, {
+        nodeId: ready.id, expectedRevision: ready.revision, provider: 'spawn', leaseDurationMs: 1_000,
+      })
+      const running = ctx.pactflow.renewRun(session.id, {
+        runId: claimed.run.id, claimId: claimed.run.claimId, leaseDurationMs: 1_000,
+      })
+
+      ctx.emit('agent/created', { agent: { id: session.id, session } as Agent })
+      expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[running.run.id]?.state).toBe('running')
+      vi.advanceTimersByTime(999)
+      expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[running.run.id]?.state).toBe('running')
+      vi.advanceTimersByTime(1)
+      expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[running.run.id]).toMatchObject({ state: 'failed' })
+      expect(ctx.pactflow.dag(session.id).byId.node).toMatchObject({ state: 'ready', revision: 4 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('safely retries only terminal failed or cancelled nodes with no active Run', async () => {
+    const ctx = await harness()
+    const session = ctx.sessions.create(SessionId('retry-project'), { meta: { agentPreset: 'pactflow' } })
+    ctx.pactflow.initialize(session.id, { name: 'Retry' })
+    ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
+    const ready = ctx.pactflow.createNode(session.id, {
+      id: 'node', needId: 'need', title: 'Node', dependencies: [],
+    })
+    const claimed = ctx.pactflow.claimNode(session.id, {
+      nodeId: ready.id, expectedRevision: ready.revision, provider: 'spawn', leaseDurationMs: 60_000,
+    })
+    expect(() => ctx.pactflow.retryNode(session.id, {
+      nodeId: ready.id, expectedRevision: claimed.node.revision,
+    })).toThrow(/still owns an active Run/)
+
+    const failed = ctx.pactflow.settleRun(session.id, {
+      runId: claimed.run.id,
+      claimId: claimed.run.claimId,
+      expectedNodeRevision: claimed.node.revision,
+      state: 'failed',
+      outcome: 'worker failed',
+    })
+    const retryable = ctx.pactflow.retryNode(session.id, {
+      nodeId: ready.id, expectedRevision: failed.node.revision,
+    })
+    expect(retryable).toMatchObject({ state: 'ready', revision: 4 })
+    expect(() => ctx.pactflow.retryNode(session.id, {
+      nodeId: ready.id, expectedRevision: failed.node.revision,
+    })).toThrow(/revision conflict/)
   })
 
   it('discovers projects only from Session headers and reads live projections', async () => {
@@ -482,6 +623,7 @@ describe('PactFlow domain foundation', () => {
         giteaOwner: 'owner',
         giteaRepo: 'repo',
         giteaTokenCredentialRef: 'PACTFLOW_GITEA_API_TOKEN',
+        giteaUsername: 'pactflow-worker',
       }
       await expect(ctx.pactflow.bindGit(session.id, request))
         .rejects.toThrow(/requires the Credentials service/)
@@ -499,6 +641,7 @@ describe('PactFlow domain foundation', () => {
       expect(bound.git?.gitea).toEqual({
         baseUrl: gitServer.url,
         owner: 'owner', repo: 'repo', tokenCredentialRef: 'PACTFLOW_GITEA_API_TOKEN',
+        username: 'pactflow-worker',
       })
       expect(resolveCredential).not.toHaveBeenCalled()
 
@@ -536,12 +679,57 @@ describe('PactFlow domain foundation', () => {
     }
   })
 
+  it('preserves an auto-matched Gitea Basic Auth username through event validation and projection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-gitea-username-'))
+    const priorDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = join(root, '.dsh')
+    try {
+      const { workspace } = createGitFixture(root)
+      execFileSync('git', [
+        '-C', workspace, 'remote', 'set-url', 'origin', 'ssh://git@git.example:22/owner/repo.git',
+      ])
+      const ctx = new Context()
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(PactFlowService, {
+        infrastructure: {
+          clusters: [], registries: [], templates: [], modelConnections: [], workerPools: [],
+          gitProviders: [{
+            id: 'gitea', displayName: 'Gitea', kind: 'gitea', baseUrl: 'https://git.example',
+            tokenCredentialRef: 'PACTFLOW_GITEA_PASSWORD', username: 'alice',
+          }],
+        },
+      })
+      ctx.provide('credentials', {
+        describe: () => Promise.resolve({ configured: true, source: 'memory', writable: true }),
+      } as never)
+      const session = ctx.sessions.create(SessionId('gitea-basic-auth'), {
+        meta: { agentPreset: 'pactflow', cwd: workspace },
+      })
+      const project = ctx.pactflow.initialize(session.id, { name: 'Gitea Basic Auth' })
+      const bound = await ctx.pactflow.bindGit(session.id, {
+        expectedRevision: project.revision, remote: 'origin', defaultBranch: 'main',
+      })
+      expect(bound.git?.gitea).toMatchObject({
+        baseUrl: 'https://git.example', owner: 'owner', repo: 'repo',
+        tokenCredentialRef: 'PACTFLOW_GITEA_PASSWORD', username: 'alice',
+      })
+      expect(ctx.sessionProjections.stateOf(session, 'pactflowProject')?.project?.git?.gitea?.username)
+        .toBe('alice')
+    } finally {
+      if (priorDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = priorDshHome
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('registers the PactFlow tools only in the PactFlow Agent scope', async () => {
     const ctx = await harness()
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
     const session = ctx.sessions.create(SessionId('tool-project'), { meta: { agentPreset: 'pactflow' } })
     ctx.pactflow.initialize(session.id, { name: 'Tools' })
+    ctx.pactflow.createNeed(session.id, { id: 'tool-need', title: 'Tool need', description: '' })
     const agent = { id: session.id, session } as Agent
     let scoped!: ReturnType<typeof createScope>
     await ctx.plugin(Object.assign((inner: Context) => {
@@ -558,6 +746,8 @@ describe('PactFlow domain foundation', () => {
       'pactflow_dispatch_k3s',
       'pactflow_dispatch_local',
       'pactflow_initialize',
+      'pactflow_record_review',
+      'pactflow_retry_node',
       'pactflow_transition_need',
       'pactflow_view',
     ])
@@ -571,5 +761,19 @@ describe('PactFlow domain foundation', () => {
     })
     expect(result.isError).toBe(false)
     expect(result.content[0]).toMatchObject({ type: 'text' })
+    const reviewResult = await ctx.tools.execute({
+      callId: ToolCallId('pactflow-record-review'),
+      name: 'pactflow_record_review',
+      arguments: {
+        need_id: 'tool-need', kind: 'requirement', decision: 'approved', note: 'requirements verified',
+      },
+      agent,
+      signal: new AbortController().signal,
+    })
+    expect(reviewResult.isError).toBe(false)
+    expect(Object.values(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {}))
+      .toContainEqual(expect.objectContaining({
+        needId: 'tool-need', kind: 'requirement', decision: 'approved', note: 'requirements verified',
+      }))
   })
 })

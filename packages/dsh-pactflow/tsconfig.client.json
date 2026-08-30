@@ -8,6 +8,9 @@
   },
   "files": [
     "src/client/index.tsx",
+    "src/client/action-feedback.tsx",
+    "src/client/project-panel.tsx",
+    "src/harness-discovery.ts",
     "src/types.ts"
   ]
 }

@@ -6,20 +6,20 @@ DSH PactFlow 是独立的 DeepSeek Harness Profile Bundle。安装到 DSH `web` 
 
 ## 当前状态
 
-0.2.0 已完成外部 Bundle、事件/Projection、十阶段/DAG、原生 Web、Settings、Git worktree、真实 Gitea admission/closing、K3s、多 Harness/API、恢复和安装卸载实现。公开稳定发布仍取决于三项 DSH 通用能力进入官方发行版；当前版本按 Pre-release（预发布版）交付。
+0.2.1 已完成外部 Bundle、事件/Projection、十阶段/DAG、原生 Web、Settings、Git worktree、真实 Gitea admission/closing、K3s、多 Harness/API、恢复和安装卸载实现。公开稳定发布仍取决于三项 DSH 通用能力进入官方发行版；当前版本按 Pre-release（预发布版）交付。
 
 ## 安装
 
 ```bash
-dsh plugin --profile web add dsh-pactflow@0.2.0
+dsh plugin --profile web add dsh-pactflow@0.2.1
 ```
 
-该命令由 DSH 将 Package 安装到 `web` Profile，并自动把 `dsh.bundle` 加入配置层。0.2.0 仍等待上游通用能力进入官方 DSH，因此当前只面向使用已验证 fork 的开发者预发布；插件本身不修改 DSH 源码，也不使用隐式 `postinstall`。
+该命令由 DSH 将 Package 安装到 `web` Profile，并自动把 `dsh.bundle` 加入配置层。0.2.1 仍等待上游通用能力进入官方 DSH，因此当前只面向使用已验证 fork 的开发者预发布；插件本身不修改 DSH 源码，也不使用隐式 `postinstall`。
 
 GitHub Release 同时提供可校验 tarball 安装入口：
 
 ```bash
-dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.0/dsh-pactflow-0.2.0.tgz
+dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.1/dsh-pactflow-0.2.1.tgz
 ```
 
 - [最终开发计划](docs/development-plan-开发计划.md)

@@ -8,6 +8,16 @@ interface RepositoryResponse {
   readonly private?: unknown
   readonly archived?: unknown
   readonly default_merge_style?: unknown
+  readonly clone_url?: unknown
+  readonly ssh_url?: unknown
+}
+
+export interface PactFlowCreatedGiteaRepository {
+  readonly fullName: string
+  readonly cloneUrl: string
+  readonly sshUrl?: string
+  readonly defaultBranch: string
+  readonly private: boolean
 }
 
 interface BranchProtectionResponse {
@@ -39,6 +49,54 @@ class GiteaRequestError extends Error {
 }
 
 export class PactFlowGiteaClient {
+  /** Create one user/org repository after the caller has presented and confirmed its preview. */
+  async createRepository(
+    baseUrl: string,
+    username: string | undefined,
+    token: string,
+    input: { readonly owner: string; readonly repo: string; readonly private: boolean; readonly defaultBranch: string },
+  ): Promise<PactFlowCreatedGiteaRepository> {
+    const endpoint = username !== undefined && input.owner === username
+      ? `${baseUrl.replace(/\/+$/, '')}/api/v1/user/repos`
+      : `${baseUrl.replace(/\/+$/, '')}/api/v1/orgs/${encodeURIComponent(input.owner)}/repos`
+    let response: Response
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST', signal: AbortSignal.timeout(10_000),
+        headers: {
+          accept: 'application/json', 'content-type': 'application/json',
+          authorization: username === undefined
+            ? `token ${token}`
+            : `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}`,
+        },
+        body: JSON.stringify({
+          name: input.repo, private: input.private, default_branch: input.defaultBranch,
+          auto_init: false, description: 'Managed by dsh-pactflow',
+        }),
+      })
+    } catch {
+      throw new Error('PactFlow could not connect to the configured Gitea API')
+    }
+    if (response.status !== 201) {
+      let detail = ''
+      try {
+        const body = await response.json() as { readonly message?: unknown }
+        if (typeof body.message === 'string') detail = body.message.slice(0, 300)
+      } catch {}
+      throw new GiteaRequestError(response.status, detail)
+    }
+    const repository = await response.json() as RepositoryResponse
+    if (repository.full_name !== `${input.owner}/${input.repo}` || typeof repository.clone_url !== 'string'
+      || typeof repository.default_branch !== 'string' || typeof repository.private !== 'boolean') {
+      throw new Error('PactFlow Gitea create repository response is invalid')
+    }
+    return {
+      fullName: repository.full_name, cloneUrl: repository.clone_url,
+      defaultBranch: repository.default_branch, private: repository.private,
+      ...typeof repository.ssh_url === 'string' ? { sshUrl: repository.ssh_url } : {},
+    }
+  }
+
   /** Verify repository identity, default branch, and protection without changing Gitea. */
   async verify(
     binding: PactFlowGiteaBinding,
@@ -151,7 +209,10 @@ export class PactFlowGiteaClient {
       response = await fetch(`${binding.baseUrl}/api/v1/repos/${owner}/${repo}${suffix}`, {
         method: options.method ?? 'GET',
         headers: {
-          accept: 'application/json', authorization: `token ${token}`,
+          accept: 'application/json',
+          authorization: binding.username === undefined
+            ? `token ${token}`
+            : `Basic ${Buffer.from(`${binding.username}:${token}`).toString('base64')}`,
           ...options.body === undefined ? {} : { 'content-type': 'application/json' },
         },
         ...options.body === undefined ? {} : { body: JSON.stringify(options.body) },

@@ -90,6 +90,30 @@ export interface PactFlowHarnessTemplateView {
   readonly memoryLimit: string
 }
 
+/** User-facing Harness image and resource profile, independent of any model. */
+export interface PactFlowHarnessProfileSettings {
+  readonly id: string
+  readonly displayName: string
+  readonly harness: PactFlowHarness
+  readonly registryId: string
+  readonly repository: string
+  readonly artifactDigest: string
+  readonly cpuRequest: string
+  readonly memoryRequest: string
+  readonly cpuLimit: string
+  readonly memoryLimit: string
+}
+
+/** Model endpoint combined with a compatible Harness only when a Run starts. */
+export interface PactFlowModelConnectionSettings {
+  readonly id: string
+  readonly displayName: string
+  readonly apiMode: PactFlowApiMode
+  readonly model: string
+  readonly baseUrl: string
+  readonly apiKeyCredentialRef: string
+}
+
 export interface PactFlowK3sSettings {
   readonly namespace: string
   readonly kubeconfig?: string
@@ -100,8 +124,228 @@ export interface PactFlowK3sSettings {
   readonly finishedJobTtlSeconds?: number
 }
 
+export interface PactFlowK3sClusterSettings {
+  readonly id: string
+  readonly displayName: string
+  readonly namespace: string
+  readonly kubeconfig?: string
+  readonly context?: string
+  readonly pollIntervalMs: number
+  readonly finishedJobTtlSeconds?: number
+}
+
+export interface PactFlowRegistrySettings {
+  readonly id: string
+  readonly displayName: string
+  readonly kind: 'harbor'
+  readonly endpoint: string
+  readonly project?: string
+  /** Project-relative Harbor repository that owns the four Harness images. */
+  readonly harnessRepository?: string
+  readonly tlsVerify: boolean
+  readonly imagePullSecret?: string
+  readonly username?: string
+  readonly usernameCredentialRef?: string
+  readonly passwordCredentialRef?: string
+}
+
+export interface PactFlowGitProviderSettings {
+  readonly id: string
+  readonly displayName: string
+  readonly kind: 'gitea'
+  readonly baseUrl: string
+  readonly tokenCredentialRef: string
+  readonly username?: string
+}
+
+export interface PactFlowWorkerPoolSettings {
+  readonly id: string
+  readonly displayName: string
+  readonly clusterId: string
+  readonly registryId: string
+  readonly templateIds: readonly string[]
+  readonly maxConcurrency: number
+  readonly queuePolicy: 'fifo'
+  readonly imagePullSecret?: string
+}
+
+export interface PactFlowInfrastructureSettings {
+  readonly clusters: readonly PactFlowK3sClusterSettings[]
+  readonly registries: readonly PactFlowRegistrySettings[]
+  readonly gitProviders: readonly PactFlowGitProviderSettings[]
+  readonly templates: readonly (PactFlowHarnessTemplateView | PactFlowHarnessProfileSettings)[]
+  readonly modelConnections?: readonly PactFlowModelConnectionSettings[]
+  readonly workerPools: readonly PactFlowWorkerPoolSettings[]
+}
+
+export interface PactFlowWorkerPoolStatus extends PactFlowWorkerPoolSettings {
+  readonly running: number
+  readonly waiting: number
+}
+
+export type PactFlowInfrastructureResourceKind =
+  | 'cluster' | 'registry' | 'git-provider' | 'harness' | 'model-connection' | 'worker-pool'
+
+export interface PactFlowInfrastructureProbeRequest {
+  readonly kind: PactFlowInfrastructureResourceKind
+  readonly id: string
+  readonly draft?: PactFlowInfrastructureSettings
+}
+
+export interface PactFlowInfrastructureProbeStage {
+  readonly name: string
+  readonly state: 'succeeded' | 'failed'
+  readonly detail: string
+}
+
+export interface PactFlowInfrastructureProbeResult {
+  readonly kind: PactFlowInfrastructureProbeRequest['kind']
+  readonly id: string
+  readonly success: boolean
+  readonly durationMs: number
+  readonly stages: readonly PactFlowInfrastructureProbeStage[]
+}
+
+export interface PactFlowInfrastructureHealthRecord {
+  readonly probeContractVersion: 2
+  readonly kind: PactFlowInfrastructureResourceKind
+  readonly id: string
+  readonly fingerprint: string
+  readonly state: 'succeeded' | 'failed'
+  readonly testedAt: string
+  readonly durationMs: number
+  readonly stages: readonly PactFlowInfrastructureProbeStage[]
+}
+
+export interface PactFlowInfrastructureDeletionImpact {
+  readonly kind: PactFlowInfrastructureResourceKind
+  readonly id: string
+  readonly blockers: readonly string[]
+  readonly credentialRefs: readonly string[]
+}
+
+export interface PactFlowKubeconfigView {
+  readonly path: string
+  readonly contexts: readonly string[]
+  readonly currentContext?: string
+}
+
+export interface PactFlowHarborArtifactOption {
+  readonly registryId: string
+  readonly repository: string
+  readonly digest: string
+  readonly tags: readonly string[]
+  readonly label: string
+}
+
+export interface PactFlowDiscoveredModel {
+  readonly id: string
+  readonly name?: string
+}
+
+export interface PactFlowWorkspaceGitStatus {
+  readonly initialized: boolean
+  readonly branch?: string
+  readonly remoteUrl?: string
+  readonly hasCommit: boolean
+  readonly clean: boolean
+  readonly changedFiles: number
+  readonly untrackedFiles: number
+  readonly hasGitignore: boolean
+}
+
+export interface PactFlowAgentProfile {
+  readonly id: string
+  readonly displayName: string
+  readonly templateId: string
+  readonly maxConcurrency: number
+  readonly modelConnectionId: string
+}
+
+export interface PactFlowProjectWorkerPolicy {
+  readonly clusterId: string
+  readonly workerPoolId: string
+  /** Derived from Agent Profile quantities; retained for persisted-schema compatibility. */
+  readonly maxConcurrency: number
+  readonly agentProfiles: readonly PactFlowAgentProfile[]
+}
+
+export interface PactFlowWorkspaceGitBinding {
+  readonly remote: string
+  readonly remoteUrl: string
+  readonly defaultBranch: string
+  readonly k3sGitSecretName?: string
+  readonly giteaProviderId?: string
+  readonly owner?: string
+  readonly repo?: string
+  readonly boundAt: number
+}
+
+export interface PactFlowWorkspaceProjectConfig {
+  readonly schema: 'dsh_pactflow_workspace_project/v1'
+  readonly workspaceId: string
+  readonly workspacePath: string
+  readonly workspaceTitle: string
+  readonly revision: number
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly git?: PactFlowWorkspaceGitBinding
+  readonly worker?: PactFlowProjectWorkerPolicy
+  readonly validationCommands: readonly PactFlowValidationCommand[]
+}
+
+export interface PactFlowWorkspaceProjectView {
+  readonly workspaceId: string
+  readonly path: string
+  readonly title: string
+  readonly gitStatus: PactFlowWorkspaceGitStatus
+  readonly config?: PactFlowWorkspaceProjectConfig
+  readonly migrationCandidates: readonly {
+    readonly sessionId: string
+    readonly projectName: string
+    readonly revision: number
+  }[]
+}
+
+export interface PactFlowInitializeWorkspaceGitRequest {
+  readonly workspaceId: string
+  readonly expectedPath: string
+  readonly confirm: 'initialize-local-git'
+}
+
+export interface PactFlowSaveWorkspaceWorkerPolicyRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  readonly worker: PactFlowProjectWorkerPolicy
+  readonly k3sGitSecretName: string
+}
+
+export interface PactFlowCreateWorkspaceRemoteRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  readonly providerId: string
+  readonly owner: string
+  readonly repo: string
+  readonly private: boolean
+  readonly defaultBranch: string
+  readonly confirm: 'create-gitea-repository'
+}
+
+export interface PactFlowAdoptWorkspaceGitRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+}
+
+export interface PactFlowMigrateWorkspaceProjectRequest {
+  readonly workspaceId: string
+  readonly sessionId: string
+  readonly expectedRevision: number
+  readonly confirm: 'migrate-session-project'
+}
+
 export interface PactFlowSettingsView {
   readonly k3s: false | PactFlowK3sSettings
+  readonly infrastructure: false | PactFlowInfrastructureSettings
 }
 
 export interface PactFlowProject {
@@ -111,6 +355,7 @@ export interface PactFlowProject {
   readonly createdAt: number
   readonly updatedAt: number
   readonly git?: PactFlowGitBinding
+  readonly workerPoolId?: string
 }
 
 /** Credential-free Git identity bound to the root Session workspace. */
@@ -131,6 +376,7 @@ export interface PactFlowGiteaBinding {
   readonly owner: string
   readonly repo: string
   readonly tokenCredentialRef: string
+  readonly username?: string
 }
 
 export interface PactFlowGiteaStatus {
@@ -229,6 +475,9 @@ export interface PactFlowRun {
 }
 
 export interface PactFlowK3sRunSpec {
+  readonly workerPoolId?: string
+  readonly projectConfigRevision?: number
+  readonly agentProfileId?: string
   readonly templateId: string
   readonly namespace: string
   readonly jobName: string
@@ -240,6 +489,8 @@ export interface PactFlowK3sRunSpec {
   readonly model: string
   readonly baseUrl: string
   readonly modelSecretName: string
+  readonly modelConnectionId?: string
+  readonly ephemeralModelSecret?: boolean
   readonly gitSecretName: string
   readonly cpuRequest: string
   readonly memoryRequest: string
@@ -300,6 +551,8 @@ export interface BindPactFlowGitRequest {
   readonly giteaOwner?: string
   readonly giteaRepo?: string
   readonly giteaTokenCredentialRef?: string
+  readonly giteaUsername?: string
+  readonly workerPoolId?: string
 }
 
 export interface CreatePactFlowNeedRequest {
@@ -332,6 +585,11 @@ export interface UpdatePactFlowNodeDependenciesRequest {
   readonly nodeId: string
   readonly expectedRevision: number
   readonly dependencies: readonly string[]
+}
+
+export interface RetryPactFlowNodeRequest {
+  readonly nodeId: string
+  readonly expectedRevision: number
 }
 
 export interface ClaimPactFlowNodeRequest {
@@ -370,6 +628,9 @@ export interface DispatchPactFlowK3sNodeRequest {
   readonly nodeId: string
   readonly expectedRevision: number
   readonly templateId: string
+  readonly workerPoolId?: string
+  readonly modelConnectionId?: string
+  readonly agentProfileId?: string
   readonly prompt: string
   readonly leaseDurationMs: number
 }
@@ -391,14 +652,22 @@ export interface ClosePactFlowNeedResult {
 
 export interface PactFlowHarnessProbeRequest {
   readonly templateId: string
+  readonly modelConnectionId?: string
   readonly prompt: string
   readonly timeoutMs: number
 }
 
 export interface PactFlowHarnessProbeStage {
-  readonly name: 'validate' | 'create-job' | 'model-response' | 'api-response' | 'cleanup'
+  readonly name: 'validate' | 'create-job' | 'model-response' | 'api-response' | 'cli-response' | 'cleanup'
   readonly state: 'succeeded' | 'failed'
   readonly detail: string
+}
+
+export interface PactFlowHarnessImageProbeResult {
+  readonly success: boolean
+  readonly durationMs: number
+  readonly output: string
+  readonly stages: readonly PactFlowHarnessProbeStage[]
 }
 
 export interface PactFlowHarnessProbeResult {

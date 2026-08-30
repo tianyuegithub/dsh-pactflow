@@ -59,6 +59,8 @@ describe('PactFlow packaged Agent Preset', () => {
       'pactflow_dispatch_k3s',
       'pactflow_dispatch_local',
       'pactflow_initialize',
+      'pactflow_record_review',
+      'pactflow_retry_node',
       'pactflow_transition_need',
       'pactflow_view',
       'read',

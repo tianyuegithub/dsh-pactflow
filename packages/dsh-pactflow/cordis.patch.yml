@@ -3,7 +3,7 @@
 # the package-owned directory without loading this dsh.client package twice.
 - insert:
     - id: pactflow
-      name: ./lib/index.js
+      name: dsh-pactflow
 
 - id: agent-presets
   inject: [pactflowPresetRoot]

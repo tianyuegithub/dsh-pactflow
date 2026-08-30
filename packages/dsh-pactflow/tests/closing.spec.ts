@@ -31,7 +31,8 @@ describe('PactFlow Gitea closing', () => {
       })
     })
     async function handleGitea(request: IncomingMessage, response: ServerResponse): Promise<void> {
-      expect(request.headers.authorization).toBe('token gitea-test-token')
+      expect(request.headers.authorization)
+        .toBe(`Basic ${Buffer.from('alice:gitea-test-token').toString('base64')}`)
       response.setHeader('content-type', 'application/json')
       if (request.method === 'GET' && request.url?.endsWith('/branch_protections/main') === true) {
         response.end(JSON.stringify({ required_approvals: 0, status_check_contexts: [] }))
@@ -87,7 +88,15 @@ describe('PactFlow Gitea closing', () => {
       const ctx = new Context()
       await ctx.plugin(SessionStore)
       await ctx.plugin(SessionProjectionRegistry)
-      await ctx.plugin(PactFlowService)
+      await ctx.plugin(PactFlowService, {
+        infrastructure: {
+          clusters: [], registries: [], templates: [], modelConnections: [], workerPools: [],
+          gitProviders: [{
+            id: 'gitea', displayName: 'Gitea', kind: 'gitea', baseUrl,
+            tokenCredentialRef: 'GITEA_TEST_TOKEN', username: 'alice',
+          }],
+        },
+      })
       ctx.provide('credentials', {
         describe: () => Promise.resolve({ configured: true, source: 'memory', writable: true }),
         resolve: () => Promise.resolve({ value: 'gitea-test-token', source: 'memory' }),
@@ -101,6 +110,7 @@ describe('PactFlow Gitea closing', () => {
         giteaBaseUrl: baseUrl, giteaOwner: 'owner', giteaRepo: 'repo',
         giteaTokenCredentialRef: 'GITEA_TEST_TOKEN', validationCommands: [],
       })
+      expect(ctx.pactflow.project(session.id).project?.git?.gitea?.username).toBeUndefined()
       const need = ctx.pactflow.createNeed(session.id, {
         id: 'need', title: 'Close this need', description: 'closing acceptance',
       })

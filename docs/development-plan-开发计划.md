@@ -59,6 +59,19 @@
 - Harness 与模型协议是独立 Template 字段；保留 Claude Code、Codex、OpenCode、DSH 及 Anthropic/OpenAI 协议选择。
 - 每任务一分支一 worktree。Worker 只提交任务分支；Host 更新本地 worktree、执行验证，只在 closing 阶段合并受保护的默认分支。
 - DSH Settings 保存集群、仓库、Template 和策略的非密钥元数据；Credentials/Authorization/Kubernetes Secret 持有原始凭证。
+- 基础设施设置拆分为 K3s Cluster、Registry、Git Provider、Harness Template 和 Worker Pool 五类可引用资源；资源以稳定 ID 关联，删除被引用资源必须失败关闭。
+- Worker Pool 首版是逻辑容量池，不是常驻 Pod 池：每个 Run 仍创建全新 K3s Job，Pool 只拥有集群路由、允许的 Template、并发上限、FIFO 排队和容量释放。
+- 项目绑定优先从本地 `git remote` 读取无凭证 URL，按 host/path 与 Git Provider 匹配；只有唯一匹配时自动生效，零匹配或多匹配都返回可操作的明确错误。
+- Registry 首版支持 Harbor 元数据、TLS 校验策略、Project 和 Kubernetes imagePullSecret 引用；Host 和 Client 不读取、返回或记录 Secret 内容。
+- 为兼容 0.2.x，旧的单 `k3s` 设置可读但不扩展；新写入使用资源化 `infrastructure` 合同，运行时禁止同时混用两套调度来源。
+- Kubeconfig 通过 DSH 通用 Host 文件选择能力定位，Client 只获得绝对路径；Host 解析并只返回 Context 名称。本轮不上传 kubeconfig 内容，未来远程企业平台的上传、留存和租户隔离单独设计。
+- Harness 只保存工具类型、Harbor 镜像引用和资源规格；Model Connection 独立保存协议、endpoint、model id 和 DSH Credential 引用，Run 选择 Harness + Model Connection，禁止用组合名称复制模板。
+- 密码和 API key 只通过 DSH Credentials Remote 写入，Settings、PactFlow Remote、Session Event 和日志只保留内部引用或已配置状态；Client 显示账号/密码而不显示 Credential Ref。
+- Harbor 镜像从 Project/Repository/Artifact 列表选择；Kubernetes imagePullSecret 是 Cluster + Registry 绑定属性，从 Namespace 中已有 `kubernetes.io/dockerconfigjson` Secret 选择，不属于 Harbor 全局元数据。
+- Worker Pool 的用户名为「执行资源池」；普通流程自动创建默认池，只显示 Cluster、最大并发和允许的 Harness。内部 ID、Registry 引用和固定 FIFO 策略不向普通用户展示。
+- 六类资源共享同一卡片生命周期：新增或编辑时只有一张活动草稿；当前草稿测试成功后才能卡片级保存；保存后收缩为摘要；编辑回显已保存非密钥值，密码保持写后不可读；取消丢弃草稿。字段变更使旧测试结果失效。
+- 删除仅作用于已保存资源，必须先显示确认对话框并由 Host 返回引用影响。Cluster/Registry/Harness/Pool/Git Provider 被其它资源或项目引用时失败关闭并列出引用者；无引用时先提交 Settings 删除，再清理该资源专用 DSH Credential。凭证清理失败不回滚已提交的配置删除，但必须返回可治理的引用和错误。
+- 每张卡片就地显示测试与保存/删除阶段日志。测试对象是当前未保存草稿；保存对象是完整 infrastructure 文档中的该资源替换，不得捎带其它未保存草稿。Settings revision 冲突拒绝覆盖。
 
 ## 3. P0 前置：DSH 通用外部事件词汇机制
 
@@ -140,6 +153,8 @@ DSH 上游分支已实现一个非 PactFlow 私有的外部事件词汇能力，
 
 `listSessions()` 只提供候选 Session 和创建时 Header。项目发现必须读取 Session 事件并恢复当前 `agentPreset` Projection；这是因为 DSH 允许空白 Session 在第一次执行前通过 `agent-preset/selected` 改变模式。对非终态项目，恢复 Projection Cache 加日志尾部，然后与 Git、K3s 和活动 Subagent 对账。禁止 Settings 项目注册表。
 
+本地 Subagent Run 与 K3s Run 遵循不同的冷恢复语义：K3s Job 具有可重连的外部身份，Host 重启后按 Job 真实状态续租或结算；本地 `spawn`/`fork` 的执行句柄只存在原 Host 内存中，冷重启后禁止伪造续传。Host 对此类非终态 Run 按持久租约对账：租约内保留所有权以防止双跑，租约到期后幂等追加“过期失败”终态，并将同 revision 节点恢复为 `ready`。旧 Run、claim、outcome 和 attempt 必须保留；新派发创建 attempt+1，不覆盖旧记录。
+
 ## 6. 里程碑 3：十阶段、DAG 与人工门禁
 
 实现阶段：
@@ -154,6 +169,8 @@ DAG 节点状态为 `pending/ready/claimed/running/blocked/review/succeeded/fail
 
 每个 Run 拥有精确 node revision、attempt、provider、claim token、lease deadline、branch、worktree/external job 引用和 outcome。第一个有效终态结果获胜；重复或过期结果不改变状态。
 
+安全重试不复用 claim：只有旧 Run 已终态且节点仍是 `failed/cancelled`，或本地非终态 Run 已完成过期回收时，才能用节点当前 revision CAS 恢复 `ready`。存在任何未过期的 `claimed/running/blocked` Run 时失败关闭，不允许并发重派。
+
 ## 7. 里程碑 4：Agent Tool、Workflow 与本地 Worker
 
 实现 `pactflow` Preset 的完整 Agent-plane 组合，以当前 DSH standard Preset 为行为参考而非运行时继承。包含零脉 Persona、稳定 System Prompt Section、产品 Skill、有界模型工具和 Workflow Consumer。
@@ -161,6 +178,8 @@ DAG 节点状态为 `pending/ready/claimed/running/blocked/review/succeeded/fail
 工具面保持窄：查询当前项目/需求/DAG，创建或调整需求，提交人工决策请求，派发/重试/中断 Worker，报告结果和发起验证。完整详情通过 Skill 和 Remote 查询，不用大量核心 Tool Schema 重复。
 
 本地开发使用 DSH Subagent/Workflow 注册的 Provider，不直接创建非所有的 Agent。子 Session 与根项目会话的权限、取消、续作和结果关系可持久追溯。
+
+当本地 Worker 因 Host 重启失去内存句柄时，恢复器只能根据持久 Run 和租约做决策，不将“会话已恢复”冒充“Worker 已恢复”。过期回收与显式重试都必须可幂等、受 revision CAS 保护，并在 Session Event 中留下可审计的旧 Run 终态和新 attempt。
 
 ## 8. 里程碑 5：DSH 原生 Web 控制台
 
@@ -191,6 +210,14 @@ UI 包含：
 定义独立 Remote Worker Provider，不让 Pod 直接访问 DSH Session Log 或浏览器 Remote。Host 在 claim 后创建不可变 Run Spec，将凭证放入 Kubernetes Secret，记录 Job ID 和 lease，并通过 K3s API、Git 和结果文件对账。
 
 支持 Harness 与模型协议任意合法组合，但每个 Harness 只接受它真实支持的协议。连接测试显示实际请求、命令、参数、阶段日志和脱敏错误，禁止固定追加隐藏内容。
+
+### 9.3 逻辑 Worker Pool 调度合同
+
+- 每次 K3s 派发先解析 Pool、Cluster、Template 和 Registry 的不可变快照，再进入 Pool 调度器；排队后的运行不因 Settings 热更而更换资源。
+- 每池最多同时运行 `maxConcurrency` 个 Job；其余请求按 Host 接收顺序 FIFO 等待，取消的等待者不消耗容量。
+- 获得容量后才创建 K3s Job；Job 成功、失败、取消、超时或创建异常都必须在 `finally` 边界释放容量并唤醒下一个等待者。
+- 调度状态对 UI 提供只读快照：Pool ID、上限、运行数、等待数和策略；不包含 prompt、凭证、Git URL 或 Worker 输出。
+- Profile 重启后 Host 从 Session Run 事件和 K3s Job 真实状态重建正在运行的容量占用；纯内存等待者不冒充已持久任务，必须由可持久调度事件恢复后才能声称完整冷恢复。
 
 ## 10. 里程碑 7：持续运行、升级、卸载与发布
 
@@ -245,5 +272,5 @@ UI 包含：
 公开稳定发布只剩三项外部状态：
 
 1. DSH 通用前置分支通过上游评审、合并并进入受支持发行版；插件不得要求用户使用源码 worktree。
-2. npm 发布与包名安装已完成：`dsh-pactflow@0.2.0` 采用 Apache-2.0，在全新 Profile 中通过官方命令安装、启动、卸载与清洁启动；版本带 deprecation 警告明确上游前提。
-3. 插件正式 Gitea 远端、0.2.0 预发布资产、真实受保护 Pull Request 创建/合并、默认分支更新和临时资源清理均已完成；它们不再是发布 blocker。
+2. npm 发布与包名安装已完成：0.2.0 的真实用户验收发现 Typert 404 并 deprecate；0.2.1 使用裸 package identity 修复 Host Remote 注册，在全新 Profile 中验证安装、真实 health、启动、卸载后 404 与清洁启动。
+3. 插件正式 Gitea 远端、0.2.1 预发布资产、真实受保护 Pull Request 创建/合并、默认分支更新和临时资源清理均已完成；它们不再是发布 blocker。

@@ -11,7 +11,13 @@
     "src/domain.ts",
     "src/git-workspace.ts",
     "src/gitea.ts",
+    "src/harness-discovery.ts",
+    "src/infrastructure-health.ts",
+    "src/infrastructure.ts",
+    "src/infrastructure-probe.ts",
     "src/k3s-worker.ts",
-    "src/types.ts"
+    "src/project-capacity.ts",
+    "src/types.ts",
+    "src/workspace-project.ts"
   ]
 }

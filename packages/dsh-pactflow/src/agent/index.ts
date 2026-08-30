@@ -18,6 +18,8 @@ const PHASES = [
   'backlog', 'discussion', 'confirmed', 'design', 'planning',
   'executing', 'code_review', 'verification', 'closing', 'deployed',
 ] as const
+const REVIEW_KINDS = ['requirement', 'design', 'plan', 'verification', 'code'] as const
+const REVIEW_DECISIONS = ['approved', 'rejected', 'changes-requested'] as const
 
 /** Register PactFlow-only tools into the preset's standing Agent scope. */
 export function apply(ctx: Context): void {
@@ -35,6 +37,7 @@ export function apply(ctx: Context): void {
       gitea_owner: { type: 'string', description: 'Gitea repository owner.' },
       gitea_repo: { type: 'string', description: 'Gitea repository name.' },
       gitea_token_credential_ref: { type: 'string', description: 'DSH Credentials reference containing a Gitea API token.' },
+      gitea_username: { type: 'string', description: 'Optional Gitea account name when the Credential stores a password instead of an API token.' },
       validation_commands: {
         type: 'array',
         description: 'Host-side validation commands executed without a shell after the Worker commits and before push.',
@@ -64,6 +67,7 @@ export function apply(ctx: Context): void {
         ...args.gitea_token_credential_ref === undefined
           ? {}
           : { giteaTokenCredentialRef: args.gitea_token_credential_ref },
+        ...args.gitea_username === undefined ? {} : { giteaUsername: args.gitea_username },
         ...args.validation_commands === undefined ? {} : {
           validationCommands: args.validation_commands.map(command => ({
             command: command.command,
@@ -153,6 +157,24 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'pactflow_record_review',
+    description: 'Record one explicit human review decision for a Need. Use the current Need id and a truthful evidence note before a review-gated phase transition.',
+    parameters: {
+      need_id: { type: 'string', required: true },
+      kind: { type: 'string', required: true, enum: REVIEW_KINDS },
+      decision: { type: 'string', required: true, enum: REVIEW_DECISIONS },
+      note: { type: 'string', required: true, description: 'Evidence-backed review note; never a credential or raw secret.' },
+    },
+    output: OUTPUT,
+    execute(args, exec) {
+      return Promise.resolve(jsonObject(ctx.pactflow.recordReview(
+        requireSessionId(exec.agent?.session.id),
+        { needId: args.need_id, kind: args.kind, decision: args.decision, note: args.note },
+      )))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_create_node',
     description: 'Create one DAG node under an existing Need. Dependencies must name existing nodes in the same Need.',
     parameters: {
@@ -176,6 +198,22 @@ export function apply(ctx: Context): void {
           title: args.title,
           dependencies: args.dependencies,
         },
+      )))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'pactflow_retry_node',
+    description: 'Restore one failed or cancelled DAG node to ready after verifying that no nonterminal Run still owns it. Prior Run history remains immutable and the next dispatch creates a new attempt.',
+    parameters: {
+      node_id: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+    },
+    output: OUTPUT,
+    execute(args, exec) {
+      return Promise.resolve(jsonObject(ctx.pactflow.retryNode(
+        requireSessionId(exec.agent?.session.id),
+        { nodeId: args.node_id, expectedRevision: args.expected_revision },
       )))
     },
   }))
@@ -205,11 +243,13 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'pactflow_dispatch_k3s',
-    description: 'Execute one Git-backed node through a Host-configured K3s Harness template. Each template fixes its supported API mode; Secret values stay in Kubernetes.',
+    description: 'Execute one Git-backed node through a Workspace Agent Profile (Harness + model + project quota) or an explicit backward-compatible Harness selection.',
     parameters: {
       node_id: { type: 'string', required: true },
       expected_revision: { type: 'integer', required: true },
       template_id: { type: 'string', required: true, description: 'Configured K3s Harness template id.' },
+      agent_profile_id: { type: 'string', description: 'Workspace Agent Profile id; required when the project config has multiple profiles for one Harness.' },
+      model_connection_id: { type: 'string', description: 'Explicit compatible model override; must resolve to one allowed Agent Profile.' },
       prompt: { type: 'string', required: true, description: 'Complete bounded Worker instruction requiring tests and a task-branch commit.' },
       lease_duration_ms: { type: 'integer', required: true },
     },
@@ -220,6 +260,8 @@ export function apply(ctx: Context): void {
         nodeId: args.node_id,
         expectedRevision: args.expected_revision,
         templateId: args.template_id,
+        ...(args.agent_profile_id === undefined ? {} : { agentProfileId: args.agent_profile_id }),
+        ...(args.model_connection_id === undefined ? {} : { modelConnectionId: args.model_connection_id }),
         prompt: args.prompt,
         leaseDurationMs: args.lease_duration_ms,
       }))

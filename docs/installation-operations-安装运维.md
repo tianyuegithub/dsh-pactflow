@@ -2,7 +2,7 @@
 
 ## 1. 适用范围
 
-本文是 `dsh-pactflow` 0.2.0 的安装与运维手册。插件是 DSH Profile Bundle，不修改官方 DSH 产品源码，不启动第二个控制面 daemon；Host、Agent Preset、Web Client、Settings、Git/Gitea 和 K3s Provider 都随一个 Package 安装或卸载。
+本文是 `dsh-pactflow` 0.2.1 的安装与运维手册。插件是 DSH Profile Bundle，不修改官方 DSH 产品源码，不启动第二个控制面 daemon；Host、Agent Preset、Web Client、Settings、Git/Gitea 和 K3s Provider 都随一个 Package 安装或卸载。
 
 当前公开安装有一个硬前提：DSH 发行版必须包含外部持久 Session Event producer、外部 Typert package recognition 和 per-run Subagent cwd 三项通用能力。本地验收使用 `/Users/ty/Codes/deepseek-harness-pactflow-upstream-pr` 的 `codex/external-session-event-producers-clean` 分支，最后验证提交为 `aa888ad0fb`；这些提交进入官方发行版之前，不得把源码 worktree 验收宣传成普通 npm 用户可安装版本。
 
@@ -11,17 +11,17 @@
 公共 Package 发布后，使用 DSH 官方命令管理完整生命周期：
 
 ```bash
-dsh plugin --profile web add dsh-pactflow@0.2.0
+dsh plugin --profile web add dsh-pactflow@0.2.1
 dsh plugin --profile web update dsh-pactflow
 dsh plugin --profile web remove dsh-pactflow
 ```
 
-0.2.0 仍等待上游通用能力进入官方 DSH，目前只面向使用已验证 fork 的开发者预发布。本地构建与 tarball 安装方式如下。
+0.2.1 仍等待上游通用能力进入官方 DSH，目前只面向使用已验证 fork 的开发者预发布。本地构建与 tarball 安装方式如下。
 
 公开 GitHub Release 也提供同一 tarball：
 
 ```bash
-dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.0/dsh-pactflow-0.2.0.tgz
+dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.1/dsh-pactflow-0.2.1.tgz
 ```
 
 在插件仓库执行：
@@ -30,14 +30,14 @@ dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/relea
 pnpm install
 pnpm run check
 pnpm run pack
-dsh plugin --profile web add ./dist/dsh-pactflow-0.2.0.tgz
+dsh plugin --profile web add ./dist/dsh-pactflow-0.2.1.tgz
 dsh --profile web --dump-config
 dsh --profile web
 ```
 
 `dump-config` 必须出现 `# == dsh-pactflow`、`pactflowPresetRoot`、一个 `pactflow` Host row 和现有 `agent-presets` row。启动后，新会话模式列表必须出现 PactFlow；Standard 等其它模式不应出现 PactFlow 工具或控制台入口。
 
-离线交付目录还包含 `dsh-pactflow-0.2.0-source.bundle` 和 `deepseek-harness-pactflow-prerequisites-aa888ad0fb.bundle`：前者保存插件截至发布提交的完整 Git 历史，后者保存尚未进入官方 DSH 的三提交上游前置分支。安装或恢复前，在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`；安装包或任一源码包校验失败都必须停止。
+离线交付目录还包含 `dsh-pactflow-0.2.1-source.bundle` 和 `deepseek-harness-pactflow-prerequisites-aa888ad0fb.bundle`：前者保存插件截至发布提交的完整 Git 历史，后者保存尚未进入官方 DSH 的三提交上游前置分支。安装或恢复前，在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`；安装包或任一源码包校验失败都必须停止。
 
 ## 3. 非密钥 Settings
 
@@ -110,7 +110,7 @@ pnpm run service:generate -- --platform systemd --dsh /absolute/path/to/dsh --pr
 
 ## 7. 升级、卸载与恢复
 
-升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.0 当前写入 13 类外部事件，同时以 read-only registration 读取 0.1.0 的 12 类事件；升级不重写历史日志。
+升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 当前写入 13 类外部事件，同时以 read-only registration 读取 0.1.0 的 12 类词汇和 0.2.0 的 13 类词汇；升级不重写历史日志。
 
 卸载：
 
@@ -128,4 +128,4 @@ Host 重启期间 K3s Job 可以继续。PactFlow Agent 重新成为 live 后，
 
 本地代码、Package、浏览器、Git、K3s、四 Harness/API、恢复，以及真实 Gitea 1.22 受保护 PR/merge 均已验证。真实验收发现并修复了 PR 创建后 merge endpoint 暂时返回 405 的异步竞态；Client 只对 Gitea 明确报告的 transient mergeability 状态有界重试，永久错误立即失败。公开稳定发布仍受一个外部条件约束：三项 DSH 通用能力进入受支持发行版。未满足前，发布结论只能是 `CONDITIONAL_GO（有条件可发布）`。
 
-`dsh-pactflow@0.2.0` 已发布到 npm。首次发布自动生成的 `next/latest` 都指向 0.2.0，npm 不允许移除唯一 `latest`，因此该版本带可逆 deprecation 提示，明确要求验证 fork 与上游 Discussion #5067；版本仍可显式安装测试。上游能力进入官方发行版后清空提示并发布稳定版本。
+`dsh-pactflow@0.2.0` 已发布但存在外部 Typert 未注册导致 Remote 404 的缺陷，保留 deprecation 提示并升级到 0.2.1。0.2.1 使用裸 npm package identity 注册 Host，使 Typert Loader、Gateway 与 Client 共享同一身份；上游能力进入官方发行版后再发布稳定版本。

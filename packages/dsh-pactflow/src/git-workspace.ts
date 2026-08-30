@@ -403,14 +403,17 @@ export class PactFlowGitWorkspace {
     }
     const owner = rawOwner.trim()
     const repo = rawRepo.trim()
+    const username = request.giteaUsername?.trim()
     if (!/^[A-Za-z0-9_.-]{1,100}$/.test(owner) || !/^[A-Za-z0-9_.-]{1,100}$/.test(repo)) {
       throw new Error('PactFlow Gitea owner and repo are invalid')
     }
+    if (username === '') throw new Error('PactFlow Gitea username must be non-empty when configured')
     return {
       baseUrl: parsed.toString().replace(/\/$/, ''),
       owner,
       repo,
       tokenCredentialRef: rawRef.trim(),
+      ...username === undefined ? {} : { username },
     }
   }
 

@@ -22,8 +22,8 @@ try {
   requireText(installed, '# == dsh-pactflow')
   requireText(installed, 'pactflowPresetRoot')
   requireText(installed, 'id: pactflow')
-  requireText(installed, '/lib/index.js')
-  await bootWeb()
+  requireText(installed, 'name: dsh-pactflow')
+  await bootWeb(true)
 
   // Re-adding the same complete artifact exercises the profile upgrade path:
   // pnpm may replace or retain it, but Bundle order and activation must stay singular.
@@ -33,13 +33,13 @@ try {
   if (upgraded.split('# == dsh-pactflow').length !== 2) {
     throw new Error('profile upgrade duplicated the dsh-pactflow Bundle layer')
   }
-  await bootWeb()
+  await bootWeb(true)
 
   runDsh(['plugin', '--profile', 'web', 'remove', 'dsh-pactflow'])
   const removed = runDsh(['--profile', 'web', '--dump-config'])
   rejectText(removed, 'dsh-pactflow')
   rejectText(removed, 'pactflowPresetRoot')
-  await bootWeb()
+  await bootWeb(false)
   console.log('verify-profile: install, boot, remove, and clean boot passed')
 } finally {
   rmSync(testHome, { recursive: true, force: true })
@@ -66,7 +66,7 @@ function rejectText(value, rejected) {
   if (value.includes(rejected)) throw new Error(`removed profile still contains ${JSON.stringify(rejected)}`)
 }
 
-async function bootWeb() {
+async function bootWeb(expectPactFlow) {
   const child = spawn(process.execPath, [
     '--import', 'tsx/esm', dshEntry, '--profile', 'web', '--no-open', '--port', '0',
   ], {
@@ -82,9 +82,10 @@ async function bootWeb() {
     }, 30_000)
     child.stdout.on('data', (chunk) => {
       stdout += String(chunk)
-      if (!stdout.includes('dsh web:')) return
+      const match = /dsh web: (http:\/\/[^\s]+)/u.exec(stdout)
+      if (match?.[1] === undefined) return
       clearTimeout(timeout)
-      resolveReady()
+      resolveReady(match[1])
     })
     child.stderr.on('data', (chunk) => { stderr += String(chunk) })
     child.once('error', (error) => {
@@ -98,9 +99,42 @@ async function bootWeb() {
     })
   })
   try {
-    await ready
+    const launchUrl = await ready
+    await verifyPactFlowRemote(launchUrl, expectPactFlow)
   } finally {
     child.kill('SIGINT')
     await new Promise(resolveExit => child.once('exit', resolveExit))
+  }
+}
+
+async function verifyPactFlowRemote(launchUrl, expected) {
+  const authenticated = await fetch(launchUrl, { redirect: 'manual' })
+  const setCookie = authenticated.headers.get('set-cookie')
+  if (authenticated.status !== 303 || setCookie === null) {
+    throw new Error(`profile authentication returned HTTP ${String(authenticated.status)}`)
+  }
+  const response = await fetch(`${new URL(launchUrl).origin}/api/pactflow/health`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: setCookie.split(';', 1)[0] },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'dsh-pactflow-profile-health',
+      method: 'pactflow/health',
+      payload: { args: {} },
+    }),
+  })
+  if (!expected) {
+    if (response.status !== 404) {
+      throw new Error(`removed profile still serves pactflow/health over HTTP ${String(response.status)}`)
+    }
+    return
+  }
+  if (!response.ok) {
+    throw new Error(`installed profile pactflow/health returned HTTP ${String(response.status)}`)
+  }
+  const result = await response.json()
+  if (result?.result?.ok !== true || result.result.value?.plugin !== 'dsh-pactflow'
+    || result.result.value?.mode !== 'pactflow') {
+    throw new Error('installed profile pactflow/health returned an invalid Remote result')
   }
 }

@@ -33,11 +33,14 @@ importers:
         specifier: link:../deepseek-harness-pactflow-p0/packages/preset/agent-presets
         version: link:../deepseek-harness-pactflow-p0/packages/preset/agent-presets
       '@deepseek-ai/dsh-api-remotes':
-        specifier: link:../deepseek-harness-pactflow-p0/packages/api/remotes
-        version: link:../deepseek-harness-pactflow-p0/packages/api/remotes
+        specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/api/remotes
+        version: link:../deepseek-harness-pactflow-upstream-pr/packages/api/remotes
       '@deepseek-ai/dsh-api-session-controller':
         specifier: link:../deepseek-harness-pactflow-p0/packages/api/session-controller
         version: link:../deepseek-harness-pactflow-p0/packages/api/session-controller
+      '@deepseek-ai/dsh-api-workspace-controller':
+        specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/api/workspace-controller
+        version: link:../deepseek-harness-pactflow-upstream-pr/packages/api/workspace-controller
       '@deepseek-ai/dsh-client-locale':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/locale
         version: link:../deepseek-harness-pactflow-p0/packages/client/locale
@@ -50,6 +53,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-layout':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-layout
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-layout
+      '@deepseek-ai/dsh-client-ui-primitives':
+        specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/client/ui-primitives
+        version: link:../deepseek-harness-pactflow-upstream-pr/packages/client/ui-primitives
       '@deepseek-ai/dsh-client-ui-renderer':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-renderer
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-renderer
@@ -62,9 +68,15 @@ importers:
       '@deepseek-ai/dsh-client-ui-settings-plugins':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-settings-plugins
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-settings-plugins
+      '@deepseek-ai/dsh-client-ui-sidebar':
+        specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/client/ui-sidebar
+        version: link:../deepseek-harness-pactflow-upstream-pr/packages/client/ui-sidebar
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
         version: link:../deepseek-harness-pactflow-p0/packages/client/ui-slots
+      '@deepseek-ai/dsh-client-ui-workspace':
+        specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/client/ui-workspace
+        version: link:../deepseek-harness-pactflow-upstream-pr/packages/client/ui-workspace
       '@deepseek-ai/dsh-credentials':
         specifier: link:../deepseek-harness-pactflow-p0/packages/credentials/credentials
         version: link:../deepseek-harness-pactflow-p0/packages/credentials/credentials
@@ -123,8 +135,8 @@ importers:
         specifier: link:../deepseek-harness-pactflow-p0/packages/typert/generator
         version: link:../deepseek-harness-pactflow-p0/packages/typert/generator
       '@deepseek-ai/dsh-typert-protocol':
-        specifier: link:../deepseek-harness-pactflow-p0/packages/typert/protocol
-        version: link:../deepseek-harness-pactflow-p0/packages/typert/protocol
+        specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/typert/protocol
+        version: link:../deepseek-harness-pactflow-upstream-pr/packages/typert/protocol
       '@deepseek-ai/schemastery':
         specifier: link:../deepseek-harness-pactflow-p0/vendor/schemastery
         version: link:../deepseek-harness-pactflow-p0/vendor/schemastery

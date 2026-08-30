@@ -10,12 +10,14 @@ import {
   type V1EnvVar,
   type V1Job,
   type V1Pod,
+  type V1Secret,
 } from '@kubernetes/client-node'
 import type {
   PactFlowApiMode,
   PactFlowApiProbeResult,
   PactFlowGitRunSpec,
   PactFlowHarness,
+  PactFlowHarnessImageProbeResult,
   PactFlowHarnessProbeResult,
   PactFlowHarnessProbeStage,
   PactFlowHarnessTemplateView,
@@ -34,6 +36,10 @@ export const PACTFLOW_HARNESS_API_MODE: Readonly<Record<PactFlowHarness, PactFlo
   codex: 'openai-responses',
   opencode: 'openai-chat-completions',
   dsh: 'openai-chat-completions',
+}
+
+export function harnessVersionCommand(harness: PactFlowHarness): readonly string[] {
+  return [harness === 'claude' ? 'claude' : harness, '--version']
 }
 
 export type PactFlowHarnessTemplateConfig = PactFlowHarnessTemplateView
@@ -97,6 +103,26 @@ export class PactFlowK3sWorker {
     }
   }
 
+  /** List image-pull Secret names without reading their payloads. */
+  async listImagePullSecrets(): Promise<readonly string[]> {
+    const response = await this.core.listNamespacedSecret({ namespace: this.config.namespace })
+    return (response.items ?? [])
+      .filter(secret => secret.type === 'kubernetes.io/dockerconfigjson')
+      .map(secret => secret.metadata?.name)
+      .filter((name): name is string => typeof name === 'string' && name.length > 0)
+      .sort((left, right) => left.localeCompare(right))
+  }
+
+  /** List project Git Secret names without reading Secret payloads. */
+  async listGitSecrets(): Promise<readonly string[]> {
+    const response = await this.core.listNamespacedSecret({ namespace: this.config.namespace })
+    return (response.items ?? [])
+      .filter(secret => secret.type === 'Opaque')
+      .map(secret => secret.metadata?.name)
+      .filter((name): name is string => typeof name === 'string' && name.startsWith('pactflow-git-'))
+      .sort((left, right) => left.localeCompare(right))
+  }
+
   /** Validate the task inputs that would enter the ConfigMap before claim. */
   preflightRun(git: PactFlowGitRunSpec, prompt: string): void {
     if (!/^(?:ssh:\/\/|[^\s@]+@[^\s:]+:)/.test(git.remoteUrl)) {
@@ -148,12 +174,25 @@ export class PactFlowK3sWorker {
     git: PactFlowGitRunSpec,
     prompt: string,
     signal: AbortSignal,
+    modelApiKey?: string,
   ): Promise<PactFlowK3sResult> {
+    let createdModelSecret: V1Secret | undefined
+    if (spec.ephemeralModelSecret === true) {
+      if (modelApiKey === undefined || modelApiKey === '') throw new Error('PactFlow model API key is not configured')
+      try {
+        createdModelSecret = await this.core.createNamespacedSecret({
+          namespace: spec.namespace, body: this.modelSecret(spec.modelSecretName, spec.namespace, spec.apiMode, modelApiKey),
+        })
+      } catch {
+        throw new Error(`PactFlow failed to create model Secret "${spec.modelSecretName}"`)
+      }
+    }
     const configMap = this.configMap(spec, git, prompt)
     let createdConfigMap: V1ConfigMap
     try {
       createdConfigMap = await this.core.createNamespacedConfigMap({ namespace: spec.namespace, body: configMap })
     } catch {
+      if (createdModelSecret !== undefined) await this.deleteModelSecret(spec)
       throw new Error(`PactFlow failed to create K3s ConfigMap "${spec.configMapName}"`)
     }
     let createdJob: V1Job
@@ -161,6 +200,7 @@ export class PactFlowK3sWorker {
       createdJob = await this.batch.createNamespacedJob({ namespace: spec.namespace, body: this.job(spec) })
     } catch {
       await this.deleteConfigMap(spec)
+      if (createdModelSecret !== undefined) await this.deleteModelSecret(spec)
       throw new Error(`PactFlow failed to create K3s Job "${spec.jobName}"`)
     }
     const jobUid = createdJob.metadata?.uid
@@ -179,6 +219,18 @@ export class PactFlowK3sWorker {
       await this.core.replaceNamespacedConfigMap({
         name: spec.configMapName, namespace: spec.namespace, body: createdConfigMap,
       })
+      if (createdModelSecret !== undefined) {
+        createdModelSecret.metadata = {
+          ...createdModelSecret.metadata,
+          ownerReferences: [{
+            apiVersion: 'batch/v1', kind: 'Job', name: spec.jobName, uid: jobUid,
+            controller: true, blockOwnerDeletion: true,
+          }],
+        }
+        await this.core.replaceNamespacedSecret({
+          name: spec.modelSecretName, namespace: spec.namespace, body: createdModelSecret,
+        })
+      }
     } catch {
       await this.cancel(spec)
       throw new Error(`PactFlow failed to bind ConfigMap "${spec.configMapName}" to its Job`)
@@ -187,7 +239,9 @@ export class PactFlowK3sWorker {
   }
 
   /** Run the real Harness CLI in a short-lived Job and return bounded step logs. */
-  async probe(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowHarnessProbeResult> {
+  async probe(
+    templateId: string, prompt: string, timeoutMs: number, modelApiKey?: string,
+  ): Promise<PactFlowHarnessProbeResult> {
     const startedAt = Date.now()
     const stages: PactFlowHarnessProbeStage[] = []
     const template = this.templates.get(templateId)
@@ -199,12 +253,21 @@ export class PactFlowK3sWorker {
     }
     stages.push({ name: 'validate', state: 'succeeded', detail: 'template, protocol, prompt, and timeout accepted' })
     const jobName = `dsh-pf-probe-${randomUUID().slice(0, 20)}`
+    const runtimeTemplate = modelApiKey === undefined
+      ? template
+      : { ...template, modelSecretName: `${jobName}-model` }
     let output = ''
     let success = false
     try {
+      if (modelApiKey !== undefined) {
+        await this.core.createNamespacedSecret({
+          namespace: this.config.namespace,
+          body: this.modelSecret(runtimeTemplate.modelSecretName, this.config.namespace, runtimeTemplate.apiMode, modelApiKey),
+        })
+      }
       await this.batch.createNamespacedJob({
         namespace: this.config.namespace,
-        body: this.probeJob(jobName, template, prompt, timeoutMs),
+        body: this.probeJob(jobName, runtimeTemplate, prompt, timeoutMs),
       })
       stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
       for (;;) {
@@ -237,6 +300,13 @@ export class PactFlowK3sWorker {
       } catch {
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
       }
+      if (modelApiKey !== undefined) {
+        try {
+          await this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace })
+        } catch {
+          stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
+        }
+      }
     }
     return {
       kind: 'harness',
@@ -246,7 +316,7 @@ export class PactFlowK3sWorker {
       model: template.model,
       baseUrl: template.baseUrl,
       image: template.image,
-      modelSecretName: template.modelSecretName,
+      modelSecretName: runtimeTemplate.modelSecretName,
       prompt,
       timeoutMs,
       success,
@@ -256,8 +326,59 @@ export class PactFlowK3sWorker {
     }
   }
 
+  /** Pull and start one Harness image, then verify its CLI without any model or Worker Pool. */
+  async probeImage(templateId: string, timeoutMs: number): Promise<PactFlowHarnessImageProbeResult> {
+    const startedAt = Date.now()
+    const stages: PactFlowHarnessProbeStage[] = []
+    const template = this.templates.get(templateId)
+    if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 10_000 || timeoutMs > 600_000) {
+      throw new Error('PactFlow Harness image probe requires timeoutMs 10000-600000')
+    }
+    stages.push({ name: 'validate', state: 'succeeded', detail: 'image digest, resources, and CLI command accepted' })
+    const jobName = `dsh-pf-image-${randomUUID().slice(0, 20)}`
+    let output = ''
+    let success = false
+    try {
+      await this.batch.createNamespacedJob({
+        namespace: this.config.namespace,
+        body: this.imageProbeJob(jobName, template, timeoutMs),
+      })
+      stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
+      for (;;) {
+        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace })
+        if ((job.status?.succeeded ?? 0) > 0 || (job.status?.failed ?? 0) > 0) {
+          output = await this.probeLog(jobName)
+          success = (job.status?.succeeded ?? 0) > 0
+          stages.push({
+            name: 'cli-response', state: success ? 'succeeded' : 'failed',
+            detail: success ? 'Harness CLI returned successfully' : 'Harness CLI Job failed',
+          })
+          break
+        }
+        await new Promise(resolveDelay => setTimeout(resolveDelay, this.config.pollIntervalMs))
+      }
+    } catch (error) {
+      output = error instanceof Error ? error.message.slice(0, 4_096) : 'Harness image probe failed'
+      stages.push({ name: 'cli-response', state: 'failed', detail: 'Harness image probe failed before a result' })
+    } finally {
+      try {
+        await this.batch.deleteNamespacedJob({
+          name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
+          propagationPolicy: 'Background', body: {},
+        })
+        stages.push({ name: 'cleanup', state: 'succeeded', detail: `Job ${jobName} deleted` })
+      } catch {
+        stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
+      }
+    }
+    return { success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages }
+  }
+
   /** Send one direct protocol request in a short-lived Job without invoking the Harness CLI. */
-  async probeApi(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowApiProbeResult> {
+  async probeApi(
+    templateId: string, prompt: string, timeoutMs: number, modelApiKey?: string,
+  ): Promise<PactFlowApiProbeResult> {
     const startedAt = Date.now()
     const stages: PactFlowHarnessProbeStage[] = []
     const template = this.templates.get(templateId)
@@ -270,12 +391,21 @@ export class PactFlowK3sWorker {
     const request = this.apiRequest(template, prompt)
     stages.push({ name: 'validate', state: 'succeeded', detail: 'protocol, URL, payload, and timeout accepted' })
     const jobName = `dsh-pf-api-${randomUUID().slice(0, 20)}`
+    const runtimeTemplate = modelApiKey === undefined
+      ? template
+      : { ...template, modelSecretName: `${jobName}-model` }
     let output = ''
     let success = false
     try {
+      if (modelApiKey !== undefined) {
+        await this.core.createNamespacedSecret({
+          namespace: this.config.namespace,
+          body: this.modelSecret(runtimeTemplate.modelSecretName, this.config.namespace, runtimeTemplate.apiMode, modelApiKey),
+        })
+      }
       await this.batch.createNamespacedJob({
         namespace: this.config.namespace,
-        body: this.apiProbeJob(jobName, template, request.url, request.payload, timeoutMs),
+        body: this.apiProbeJob(jobName, runtimeTemplate, request.url, request.payload, timeoutMs),
       })
       stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
       for (;;) {
@@ -304,11 +434,18 @@ export class PactFlowK3sWorker {
       } catch {
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
       }
+      if (modelApiKey !== undefined) {
+        try {
+          await this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace })
+        } catch {
+          stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
+        }
+      }
     }
     return {
       kind: 'api', templateId: template.id, harness: template.harness, apiMode: template.apiMode,
       model: template.model, baseUrl: template.baseUrl, image: template.image,
-      modelSecretName: template.modelSecretName, prompt, timeoutMs,
+      modelSecretName: runtimeTemplate.modelSecretName, prompt, timeoutMs,
       requestPath: request.path, requestPayload: request.payload,
       success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages,
     }
@@ -343,15 +480,29 @@ export class PactFlowK3sWorker {
 
   /** Delete completed resources owned by one Run; missing resources count as clean. */
   async cleanupRun(spec: PactFlowK3sRunSpec): Promise<void> {
-    const operations = await Promise.allSettled([
-      this.batch.deleteNamespacedJob({
+    // ConfigMap/model Secret carry an ownerReference to the Job. Deleting all
+    // three concurrently races the garbage collector and can return 409 for a
+    // child already entering owner-driven deletion. Remove dependants first,
+    // then the Job; 404 remains an idempotent clean result at both boundaries.
+    const childOperations = await Promise.allSettled([
+      this.core.deleteNamespacedConfigMap({ name: spec.configMapName, namespace: spec.namespace }),
+      ...(spec.ephemeralModelSecret === true
+        ? [this.core.deleteNamespacedSecret({ name: spec.modelSecretName, namespace: spec.namespace })]
+        : []),
+    ])
+    const childFailed = childOperations
+      .filter(result => result.status === 'rejected' && !this.isNotFound(result.reason))
+    if (childFailed.length > 0) {
+      throw new Error(`PactFlow failed to clean K3s child resources for Job "${spec.jobName}"`)
+    }
+    try {
+      await this.batch.deleteNamespacedJob({
         name: spec.jobName, namespace: spec.namespace, gracePeriodSeconds: 0,
         propagationPolicy: 'Background', body: {},
-      }),
-      this.core.deleteNamespacedConfigMap({ name: spec.configMapName, namespace: spec.namespace }),
-    ])
-    const failed = operations.filter(result => result.status === 'rejected' && !this.isNotFound(result.reason))
-    if (failed.length > 0) throw new Error(`PactFlow failed to clean K3s resources for Job "${spec.jobName}"`)
+      })
+    } catch (error) {
+      if (!this.isNotFound(error)) throw new Error(`PactFlow failed to clean K3s Job "${spec.jobName}"`)
+    }
   }
 
   private configMap(spec: PactFlowK3sRunSpec, git: PactFlowGitRunSpec, prompt: string): V1ConfigMap {
@@ -519,6 +670,43 @@ export class PactFlowK3sWorker {
     }
   }
 
+  private imageProbeJob(
+    jobName: string,
+    template: PactFlowHarnessTemplateConfig,
+    timeoutMs: number,
+  ): V1Job {
+    return {
+      apiVersion: 'batch/v1', kind: 'Job',
+      metadata: {
+        name: jobName, namespace: this.config.namespace,
+        labels: { 'app.kubernetes.io/name': 'dsh-pactflow-image-probe', 'app.kubernetes.io/managed-by': 'dsh-pactflow' },
+      },
+      spec: {
+        activeDeadlineSeconds: Math.ceil(timeoutMs / 1_000), backoffLimit: 0,
+        template: {
+          metadata: { labels: { 'app.kubernetes.io/name': 'dsh-pactflow-image-probe' } },
+          spec: {
+            automountServiceAccountToken: false, restartPolicy: 'Never',
+            nodeSelector: { 'kubernetes.io/arch': 'amd64' },
+            imagePullSecrets: [{ name: this.config.imagePullSecret }],
+            containers: [{
+              name: 'probe', image: template.image, imagePullPolicy: 'IfNotPresent',
+              command: [...harnessVersionCommand(template.harness)],
+              resources: {
+                requests: { cpu: template.cpuRequest, memory: template.memoryRequest },
+                limits: { cpu: template.cpuLimit, memory: template.memoryLimit },
+              },
+              securityContext: {
+                allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] },
+                runAsNonRoot: true, runAsUser: 1_001, runAsGroup: 1_001,
+              },
+            }],
+          },
+        },
+      },
+    }
+  }
+
   private apiRequest(
     template: PactFlowHarnessTemplateConfig,
     prompt: string,
@@ -657,6 +845,7 @@ export class PactFlowK3sWorker {
         body: {},
       }),
       this.deleteConfigMap(spec),
+      ...(spec.ephemeralModelSecret === true ? [this.deleteModelSecret(spec)] : []),
     ])
   }
 
@@ -665,6 +854,32 @@ export class PactFlowK3sWorker {
       await this.core.deleteNamespacedConfigMap({ name: spec.configMapName, namespace: spec.namespace })
     } catch {
       // Best-effort rollback owns only the exact ConfigMap created for this Run.
+    }
+  }
+
+  private async deleteModelSecret(spec: PactFlowK3sRunSpec): Promise<void> {
+    try {
+      await this.core.deleteNamespacedSecret({ name: spec.modelSecretName, namespace: spec.namespace })
+    } catch {
+      // Best-effort rollback owns only the exact ephemeral Secret created for this Run.
+    }
+  }
+
+  private modelSecret(
+    name: string,
+    namespace: string,
+    apiMode: PactFlowApiMode,
+    value: string,
+  ): V1Secret {
+    const key = apiMode === 'anthropic-messages' ? 'ANTHROPIC_AUTH_TOKEN' : 'OPENAI_API_KEY'
+    return {
+      apiVersion: 'v1', kind: 'Secret', immutable: true,
+      metadata: {
+        name, namespace,
+        labels: { 'app.kubernetes.io/name': 'dsh-pactflow-model', 'app.kubernetes.io/managed-by': 'dsh-pactflow' },
+      },
+      stringData: { [key]: value },
+      type: 'Opaque',
     }
   }
 

@@ -43,6 +43,23 @@ export const PACTFLOW_EVENT_TYPES_V0_1 = [
   'pactflow/run-settled',
 ] as const
 
+/** Exact vocabulary written by dsh-pactflow 0.2.0. Never derive this historical tuple. */
+export const PACTFLOW_EVENT_TYPES_V0_2 = [
+  'pactflow/document-linked',
+  'pactflow/need-created',
+  'pactflow/need-updated',
+  'pactflow/node-created',
+  'pactflow/node-updated',
+  'pactflow/phase-transitioned',
+  'pactflow/project-configured',
+  'pactflow/project-initialized',
+  'pactflow/release-recorded',
+  'pactflow/review-recorded',
+  'pactflow/run-claimed',
+  'pactflow/run-renewed',
+  'pactflow/run-settled',
+] as const
+
 export const PACTFLOW_EVENT_TYPES = [
   'pactflow/document-linked',
   'pactflow/need-created',
@@ -65,7 +82,7 @@ const gitAuthSchema = z.object({
 
 const giteaBindingSchema = z.object({
   baseUrl: z.string().min(1), owner: z.string().min(1), repo: z.string().min(1),
-  tokenCredentialRef: z.string().min(1),
+  tokenCredentialRef: z.string().min(1), username: z.string().min(1).optional(),
 }) as unknown as ZodType<PactFlowGiteaBinding>
 
 const validationCommandSchema = z.object({

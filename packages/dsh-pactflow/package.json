@@ -1,6 +1,6 @@
 {
   "name": "dsh-pactflow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "零脉 · PactFlow — installable project workflow mode for DeepSeek Harness",
   "repository": {
     "type": "git",
@@ -57,12 +57,15 @@
       "inject": [
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-settings-plugins"
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
   },
@@ -92,15 +95,19 @@
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-api-remotes": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-api-session-controller": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-agent": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-agent-instructions": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-locale": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-store": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-session": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-settings-plugins": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-credentials": "0.1.2-alpha.1",
@@ -128,6 +135,9 @@
     "@deepseek-ai/dsh-api-session-controller": {
       "optional": true
     },
+    "@deepseek-ai/dsh-api-workspace-controller": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-agent": {
       "optional": true
     },
@@ -146,7 +156,13 @@
     "@deepseek-ai/dsh-client-ui-layout": {
       "optional": true
     },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-client-ui-renderer": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-sidebar": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-session": {
@@ -156,6 +172,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-settings-plugins": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-workspace": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-slots": {
