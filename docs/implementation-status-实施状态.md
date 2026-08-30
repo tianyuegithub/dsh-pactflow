@@ -24,6 +24,7 @@
 - `pnpm run test:real-worker`：真实浏览器选择零脉模式，真实 DeepSeek 父 Agent 调用初始化、Git 绑定、Need/Node 创建与 Git 派发工具；DSH `spawn` 子 Agent 在独立 worktree 创建文件、验证、`git add/commit`，Host 校验 branch、clean tree、base ancestry 和 commit 后记录成功 `pactflow/run-settled`。
 - `pnpm run test:real-k3s`：真实 DSH K3s Pod 基于 `tianyue/zeromai-demo` base commit 创建证明文件并提交/push 随机任务分支，Host fetch 到对应本地 worktree、运行 `/bin/test` 并成功结算；测试 Job、ConfigMap 和远端分支已全部删除。
 - `pnpm run test:real-gitea`：在受保护的 `tianyue/pactflow-acceptance/main` 上，由零脉 Host 创建任务与 integration 分支、真实 PR、等待异步 mergeability、合并、更新 main、记录 release/deployed，并清理全部临时分支和 worktree。
+- npm 包名安装：在全新 `DSH_HOME` 中执行 `dsh plugin --profile web add dsh-pactflow@0.2.0`，验证 Package 下载、Bundle/Preset 激活、真实 Web 启动、卸载与清洁启动全部通过。
 - 凭证只由测试启动器从 DSH Credentials 读取并作为子进程环境传入；原值未进入 argv、URL、Session Log、Tool result、测试输出或 Git。
 - 调试修复了两个真实边界：活动模式必须读 Projection，而非不可变 Header；Preset 内部 Package 必须包含 name/version，才能通过 DeepSeek request extension inventory 校验。
 
@@ -32,6 +33,7 @@
 - 完整任务矩阵：Claude Code、Codex、OpenCode、DSH 均已在真实 K3s Pod 中修改 `zeromai-demo`、测试、commit/push，Host fetch 到独立 worktree 并运行 `git diff --check` 后成功结算；三条新增矩阵与既有 DSH case 均已删除 Job、ConfigMap 和远端测试分支。
 - 离线恢复：`dist/` 包含 0.2.0 npm tarball、插件完整 Git Bundle、DSH 三提交通用前置分支完整 Git Bundle 和 `SHA256SUMS`；三项校验与两份 Bundle 完整历史验证均通过。
 - npm 分发：Package 采用 Apache-2.0，所有未发布的 DSH/Cordis/React in-box peer 保留版本声明并标为 optional，由 DSH 安装本身解析；用户通过官方 `dsh plugin --profile web add dsh-pactflow@0.2.0` 安装。
-- 公共发现：源码同步到 `https://github.com/tianyuegithub/dsh-pactflow`，带 `dsh-plugin`、`deepseek-harness`、`pactflow`、`multi-agent` topics；npm 发布前可用 GitHub Release tarball 走同一 DSH 官方安装命令。
-- 尚未完成：DSH 三项通用能力尚未进入官方发行版；npm 官方注册表尚未建立登录态。设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
-- 下一安全动作：发布 npm `next` 预发布并在 README 明示上游前提；上游能力进入正式 DSH 后发布稳定 tag。
+- 公共发现：源码同步到 `https://github.com/tianyuegithub/dsh-pactflow`，带 `dsh-plugin`、`deepseek-harness`、`pactflow`、`multi-agent` topics；GitHub Release tarball 与 npm 包名都走 DSH 官方安装命令。
+- npm 发布：`dsh-pactflow@0.2.0` 已发布，`next/latest` 指向该版本；唯一 `latest` 无法由 npm 删除，因此设置可逆 deprecation 警告，明确上游前提。7 天 granular publish token 按产品 Owner 要求暂时保留，便于测试期修复重发。
+- 尚未完成：DSH 三项通用能力尚未进入官方发行版。设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
+- 下一安全动作：完成产品 Owner 实际验收；上游能力进入正式 DSH 后解除 0.2.0 deprecation 或发布新的稳定版本。

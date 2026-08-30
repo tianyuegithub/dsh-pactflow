@@ -242,8 +242,8 @@ UI 包含：
 
 里程碑 1—7 的本地实现与验证均已完成：Bundle 安装/卸载、领域事件与冷恢复、十阶段/DAG、Agent Tool、本地 Worker、原生 Web 控制台、Git/Gitea 合同、真实 K3s 四 Harness、升级恢复和服务生成器均有证据。当前实现提交、命令结果和真实环境边界由 `implementation-status-实施状态.md` 持有。
 
-公开发布只剩三项外部进入条件：
+公开稳定发布只剩三项外部状态：
 
 1. DSH 通用前置分支通过上游评审、合并并进入受支持发行版；插件不得要求用户使用源码 worktree。
-2. npm 官方注册表建立发布登录态；`dsh-pactflow` 包名已确认可用，Package 已采用 Apache-2.0，并通过官方 `dsh plugin --profile web add dsh-pactflow@0.2.0` 安装。0.2.0 只以 `next` tag 预发布并明确上游前提。
+2. npm 发布与包名安装已完成：`dsh-pactflow@0.2.0` 采用 Apache-2.0，在全新 Profile 中通过官方命令安装、启动、卸载与清洁启动；版本带 deprecation 警告明确上游前提。
 3. 插件正式 Gitea 远端、0.2.0 预发布资产、真实受保护 Pull Request 创建/合并、默认分支更新和临时资源清理均已完成；它们不再是发布 blocker。

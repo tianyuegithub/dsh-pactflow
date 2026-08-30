@@ -18,7 +18,7 @@ dsh plugin --profile web remove dsh-pactflow
 
 0.2.0 仍等待上游通用能力进入官方 DSH，目前只面向使用已验证 fork 的开发者预发布。本地构建与 tarball 安装方式如下。
 
-npm 发布前，公开 GitHub Release 提供同一 tarball：
+公开 GitHub Release 也提供同一 tarball：
 
 ```bash
 dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.0/dsh-pactflow-0.2.0.tgz
@@ -127,3 +127,5 @@ Host 重启期间 K3s Job 可以继续。PactFlow Agent 重新成为 live 后，
 ## 8. 当前外部阻塞
 
 本地代码、Package、浏览器、Git、K3s、四 Harness/API、恢复，以及真实 Gitea 1.22 受保护 PR/merge 均已验证。真实验收发现并修复了 PR 创建后 merge endpoint 暂时返回 405 的异步竞态；Client 只对 Gitea 明确报告的 transient mergeability 状态有界重试，永久错误立即失败。公开稳定发布仍受一个外部条件约束：三项 DSH 通用能力进入受支持发行版。未满足前，发布结论只能是 `CONDITIONAL_GO（有条件可发布）`。
+
+`dsh-pactflow@0.2.0` 已发布到 npm。首次发布自动生成的 `next/latest` 都指向 0.2.0，npm 不允许移除唯一 `latest`，因此该版本带可逆 deprecation 提示，明确要求验证 fork 与上游 Discussion #5067；版本仍可显式安装测试。上游能力进入官方发行版后清空提示并发布稳定版本。
