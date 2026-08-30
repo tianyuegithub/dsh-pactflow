@@ -20,6 +20,7 @@ interface PullRequestResponse {
   readonly html_url?: unknown
   readonly merge_commit_sha?: unknown
   readonly merged?: unknown
+  readonly mergeable?: unknown
   readonly head?: { readonly ref?: unknown; readonly sha?: unknown }
   readonly base?: { readonly ref?: unknown }
 }
@@ -29,6 +30,12 @@ export interface PactFlowGiteaPullRequest {
   readonly htmlUrl: string
   readonly mergeCommit?: string
   readonly merged: boolean
+}
+
+class GiteaRequestError extends Error {
+  constructor(readonly status: number, readonly detail: string) {
+    super(`PactFlow Gitea API returned HTTP ${String(status)}${detail.length === 0 ? '' : `: ${detail}`}`)
+  }
 }
 
 export class PactFlowGiteaClient {
@@ -95,14 +102,34 @@ export class PactFlowGiteaClient {
     number: number,
     headCommit: string,
   ): Promise<PactFlowGiteaPullRequest> {
-    await this.request<undefined>(binding, token, `/pulls/${String(number)}/merge`, {
-      method: 'POST',
-      body: { Do: 'merge', head_commit_id: headCommit, delete_branch_after_merge: true, force_merge: false },
-      expectedStatus: 200,
-      noContent: true,
-    })
-    const response = await this.request<PullRequestResponse>(binding, token, `/pulls/${String(number)}`)
-    return this.pullRequest(response)
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const response = await this.request<PullRequestResponse>(
+        binding, token, `/pulls/${String(number)}`,
+      )
+      if (response.head?.sha !== headCommit) {
+        throw new Error('PactFlow Gitea PR head changed before merge')
+      }
+      if (response.merged === true) return this.pullRequest(response)
+      if (response.mergeable === true) {
+        try {
+          await this.request<undefined>(binding, token, `/pulls/${String(number)}/merge`, {
+            method: 'POST',
+            body: { Do: 'merge', head_commit_id: headCommit, delete_branch_after_merge: true, force_merge: false },
+            expectedStatus: 200,
+            noContent: true,
+          })
+          const merged = await this.request<PullRequestResponse>(
+            binding, token, `/pulls/${String(number)}`,
+          )
+          return this.pullRequest(merged)
+        } catch (error) {
+          if (!(error instanceof GiteaRequestError) || error.status !== 405
+            || !/not in mergeable state|not ready to be merged/i.test(error.detail)) throw error
+        }
+      }
+      if (attempt < 39) await new Promise(resolveDelay => setTimeout(resolveDelay, 250))
+    }
+    throw new Error('PactFlow Gitea PR did not become mergeable')
   }
 
   private async request<T>(
@@ -135,7 +162,12 @@ export class PactFlowGiteaClient {
     }
     if (options.allowNotFound === true && response.status === 404) return undefined as T
     if (response.status !== (options.expectedStatus ?? 200)) {
-      throw new Error(`PactFlow Gitea API returned HTTP ${String(response.status)}`)
+      let detail = ''
+      try {
+        const body = await response.json() as { readonly message?: unknown }
+        if (typeof body.message === 'string') detail = body.message.slice(0, 300)
+      } catch {}
+      throw new GiteaRequestError(response.status, detail)
     }
     if (options.noContent === true) return undefined as T
     try {

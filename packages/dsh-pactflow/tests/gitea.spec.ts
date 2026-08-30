@@ -57,4 +57,54 @@ describe('PactFlow Gitea admission', () => {
     await expect(client.verify(await fixture(true), 'test-token', 'develop'))
       .rejects.toThrow(/does not match/)
   })
+
+  it('waits for asynchronous mergeability before posting a merge', async () => {
+    let reads = 0
+    let mergeAttempts = 0
+    let merged = false
+    const server = createServer((request, response) => {
+      expect(request.headers.authorization).toBe('token test-token')
+      response.setHeader('content-type', 'application/json')
+      if (request.method === 'POST' && request.url?.endsWith('/pulls/3/merge') === true) {
+        mergeAttempts += 1
+        if (mergeAttempts < 3) {
+          response.statusCode = 405
+          response.end(JSON.stringify({ message: 'PR not in mergeable state' }))
+          return
+        }
+        merged = true
+        response.end('{}')
+        return
+      }
+      if (request.method === 'GET' && request.url?.endsWith('/pulls/3') === true) {
+        reads += 1
+        response.end(JSON.stringify({
+          number: 3,
+          html_url: 'http://gitea.invalid/owner/repo/pulls/3',
+          merged,
+          mergeable: true,
+          merge_commit_sha: merged ? 'merge-commit' : '',
+          head: { ref: 'integration', sha: 'head-commit' },
+          base: { ref: 'main' },
+        }))
+        return
+      }
+      response.statusCode = 404
+      response.end('{}')
+    })
+    servers.push(server)
+    await new Promise<void>((resolveListen, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolveListen)
+    })
+    const address = server.address() as AddressInfo
+    const client = new PactFlowGiteaClient()
+    await expect(client.mergePullRequest({
+      baseUrl: `http://127.0.0.1:${String(address.port)}`,
+      owner: 'owner', repo: 'repo', tokenCredentialRef: 'GITEA_TOKEN',
+    }, 'test-token', 3, 'head-commit')).resolves.toMatchObject({
+      number: 3, merged: true, mergeCommit: 'merge-commit',
+    })
+    expect(mergeAttempts).toBe(3)
+  })
 })

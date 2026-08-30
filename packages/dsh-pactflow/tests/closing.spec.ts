@@ -22,6 +22,7 @@ describe('PactFlow Gitea closing', () => {
     git(['-C', merger, 'config', 'user.name', 'Gitea Merge'])
     git(['-C', merger, 'config', 'user.email', 'gitea@example.invalid'])
     let pullHead = ''
+    let pullHeadCommit = ''
     let mergeCommit = ''
     const server = createServer((request, response) => {
       void handleGitea(request, response).catch(() => {
@@ -38,8 +39,11 @@ describe('PactFlow Gitea closing', () => {
       }
       if (request.method === 'GET' && request.url?.endsWith('/pulls/1') === true) {
         response.end(JSON.stringify({
-          number: 1, html_url: `${baseUrl}/owner/repo/pulls/1`, merged: true,
+          number: 1, html_url: `${baseUrl}/owner/repo/pulls/1`, merged: mergeCommit.length > 0,
           merge_commit_sha: mergeCommit,
+          mergeable: true,
+          head: { ref: pullHead, sha: pullHeadCommit },
+          base: { ref: 'main' },
         }))
         return
       }
@@ -60,6 +64,8 @@ describe('PactFlow Gitea closing', () => {
       if (request.method === 'POST' && request.url?.endsWith('/pulls') === true) {
         const body = JSON.parse(await readBody(request)) as { head: string }
         pullHead = body.head
+        git(['-C', merger, 'fetch', 'origin', pullHead])
+        pullHeadCommit = git(['-C', merger, 'rev-parse', 'FETCH_HEAD^{commit}'])
         response.statusCode = 201
         response.end(JSON.stringify({
           number: 1, html_url: `${baseUrl}/owner/repo/pulls/1`, merged: false,

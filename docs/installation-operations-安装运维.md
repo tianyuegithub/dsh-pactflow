@@ -8,6 +8,16 @@
 
 ## 2. 构建与安装
 
+公共 Package 发布后，使用 DSH 官方命令管理完整生命周期：
+
+```bash
+dsh plugin --profile web add dsh-pactflow@0.2.0
+dsh plugin --profile web update dsh-pactflow
+dsh plugin --profile web remove dsh-pactflow
+```
+
+0.2.0 仍等待上游通用能力进入官方 DSH，目前只面向使用已验证 fork 的开发者预发布。本地构建与 tarball 安装方式如下。
+
 在插件仓库执行：
 
 ```bash
@@ -110,4 +120,4 @@ Host 重启期间 K3s Job 可以继续。PactFlow Agent 重新成为 live 后，
 
 ## 8. 当前外部阻塞
 
-本地代码、Package、浏览器、Git、K3s、四 Harness/API、恢复和假 Gitea 1.22 PR/merge 契约均已验证。公开发布仍受两个外部条件约束：三项 DSH 通用提交进入受支持发行版；配置真实 Gitea API token 后，在明确授权的测试仓库完成一次受保护 PR/merge。未满足前，发布结论只能是 `CONDITIONAL_GO（有条件可发布）`。
+本地代码、Package、浏览器、Git、K3s、四 Harness/API、恢复，以及真实 Gitea 1.22 受保护 PR/merge 均已验证。真实验收发现并修复了 PR 创建后 merge endpoint 暂时返回 405 的异步竞态；Client 只对 Gitea 明确报告的 transient mergeability 状态有界重试，永久错误立即失败。公开稳定发布仍受一个外部条件约束：三项 DSH 通用能力进入受支持发行版。未满足前，发布结论只能是 `CONDITIONAL_GO（有条件可发布）`。

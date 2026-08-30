@@ -245,5 +245,5 @@ UI 包含：
 公开发布只剩三项外部进入条件：
 
 1. DSH 通用前置分支通过上游评审、合并并进入受支持发行版；插件不得要求用户使用源码 worktree。
-2. 为插件仓配置正式远端并发布可校验的 0.2.0 安装包；当前 `dist/` 已提供 npm tarball、插件源码 Bundle、DSH 前置分支 Bundle 和 SHA-256 校验清单作为离线恢复载体。
-3. 在明确授权的测试仓库配置真实 Gitea API token，完成一次受保护 Pull Request（合并请求）创建、审批状态读取、合并、默认分支更新和清理；在此之前保持 `CONDITIONAL_GO（有条件可发布）`。
+2. npm 官方注册表建立发布登录态；`dsh-pactflow` 包名已确认可用，Package 已采用 Apache-2.0，并通过官方 `dsh plugin --profile web add dsh-pactflow@0.2.0` 安装。0.2.0 只以 `next` tag 预发布并明确上游前提。
+3. 插件正式 Gitea 远端、0.2.0 预发布资产、真实受保护 Pull Request 创建/合并、默认分支更新和临时资源清理均已完成；它们不再是发布 blocker。

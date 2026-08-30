@@ -17,6 +17,7 @@ const required = [
   'presets/pactflow/preset.yml',
   'presets/pactflow/plugin/index.js',
   'presets/pactflow/plugin/package.json',
+  'LICENSE',
   'bin/generate-service.mjs',
 ]
 
@@ -28,5 +29,16 @@ if (manifest.dsh?.bundle?.patch !== './cordis.patch.yml') {
 }
 if (manifest.dsh?.client?.platform !== 'web') {
   throw new Error('dsh.client.platform must be web')
+}
+if (manifest.license !== 'Apache-2.0') {
+  throw new Error('public package must use Apache-2.0')
+}
+for (const dependency of Object.keys(manifest.peerDependencies ?? {})) {
+  if (manifest.peerDependenciesMeta?.[dependency]?.optional !== true) {
+    throw new Error(`in-box peer ${dependency} must remain optional for public DSH installation`)
+  }
+}
+if (readFileSync(resolve(packageRoot, 'LICENSE'), 'utf8') !== readFileSync(resolve(root, 'LICENSE'), 'utf8')) {
+  throw new Error('package and repository Apache-2.0 license files must match')
 }
 console.log(`check-package: ${required.length} required artifact(s) present`)

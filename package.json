@@ -13,6 +13,7 @@
     "test:web": "vitest run --config vitest.e2e.config.ts",
     "test:real-worker": "node scripts/run-real-worker-e2e.mjs",
     "test:real-k3s": "node scripts/run-real-k3s-e2e.mjs",
+    "test:real-gitea": "node scripts/run-real-gitea-e2e.mjs",
     "typecheck": "node scripts/build.mjs",
     "verify:profile": "node scripts/verify-profile.mjs",
     "service:generate": "node packages/dsh-pactflow/bin/generate-service.mjs"

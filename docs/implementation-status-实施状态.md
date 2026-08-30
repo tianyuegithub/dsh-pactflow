@@ -15,14 +15,15 @@
 - K3s Provider：使用 Kubernetes Client、不可变 ConfigMap/Job、digest 镜像、无 ServiceAccount token、非 root UID/GID 1001、SecretKeyRef、严格 SSH known_hosts 和 0 backoff；Pod 只 push 任务分支并通过 termination document 报告，Host fetch/快进本地 worktree、执行验证后才结算。Agent 恢复时会按持久 Job/spec 对账，接受租约内已完成结果、继续等待活动 Job、取消过期 Job或失败关闭缺失 Job。
 - Harness/协议矩阵：Harbor 实际项目为 `datavdl`，治理后镜像精确为 Claude Code、Codex、OpenCode、DSH 四个 digest；协议分别固定为 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions、OpenAI Chat Completions。`probeHarness` Remote 与原生模板表会显示 template/image/model/baseUrl/API mode/真实 prompt、逐步状态和有界输出；四个真实 K3s Harness 探针均返回 `hi` 并自动清理 Job。
 - Settings 与测试 UI：`pactflow` Settings namespace 持久化非密钥 K3s/Harness 元数据并声明 restart-applied；原生 Plugins 配置卡可查看模板、透明编辑/禁用并持久保存。控制台模板表提供 API/Harness 双测试，默认真实内容 `say hi to me`，显示 path/payload、阶段和滚动输出；四种协议的直接 API 探针与四个 Harness 探针均通过。
-- Gitea admission：Git 绑定可保存 credential-free API base/owner/repo/token Credential Ref；Host 只读核验仓库 full name、默认分支、归档状态、branch protection、required approvals、status checks 和 merge style，Remote/UI 不返回 token。Gitea 1.22 Swagger 与本地真实 HTTP 契约测试通过；当前 DSH Credentials 尚无 Gitea API token，因此未对真实仓库调用受保护接口。
-- Closing：只有 Need 位于 closing、最新 verification review 批准、全部 DAG 节点成功、Gitea 默认分支受保护且没有未满足 approvals/status checks 时，Host 才在隔离 worktree 合并任务 refs、复验、push integration branch、创建并合并 PR、核验默认分支 ancestry、记录 release event 并推进 deployed。完成后精确删除 integration/task worktree、本地/远端任务分支及 K3s Job/ConfigMap；清理失败单独返回，不反转已完成 merge。
+- Gitea admission：Git 绑定保存 credential-free API base/owner/repo/token Credential Ref；Host 只读核验仓库 full name、默认分支、归档状态、branch protection、required approvals、status checks 和 merge style，Remote/UI 不返回 token。专用 `PACTFLOW_GITEA_API_TOKEN` 以最小 `write:repository + write:user` scope 保存于权限受控 DSH Credentials。
+- Closing：只有 Need 位于 closing、最新 verification review 批准、全部 DAG 节点成功、Gitea 默认分支受保护且没有未满足 approvals/status checks 时，Host 才在隔离 worktree 合并任务 refs、复验、push integration branch、创建并合并 PR、核验默认分支 ancestry、记录 release event 并推进 deployed。真实 Gitea 1.22 验收发现 PR 创建后的异步 405 窗口，Client 现等待精确 head 可合并并只重试 transient 状态；永久错误失败关闭。完成后精确删除 integration/task worktree、本地/远端任务分支及 K3s Job/ConfigMap。
 - 原生 Web：外部 Client Module 的条件 Header Action 与 `shell.overlay` 读取真实 Projection/Remote；冷 Session 可恢复并显示 Project、Need、DAG 和 Run，不存在 iframe、第二 Web 壳或 mock 数据。
 
 ## 最新真实验收
 
 - `pnpm run test:real-worker`：真实浏览器选择零脉模式，真实 DeepSeek 父 Agent 调用初始化、Git 绑定、Need/Node 创建与 Git 派发工具；DSH `spawn` 子 Agent 在独立 worktree 创建文件、验证、`git add/commit`，Host 校验 branch、clean tree、base ancestry 和 commit 后记录成功 `pactflow/run-settled`。
 - `pnpm run test:real-k3s`：真实 DSH K3s Pod 基于 `tianyue/zeromai-demo` base commit 创建证明文件并提交/push 随机任务分支，Host fetch 到对应本地 worktree、运行 `/bin/test` 并成功结算；测试 Job、ConfigMap 和远端分支已全部删除。
+- `pnpm run test:real-gitea`：在受保护的 `tianyue/pactflow-acceptance/main` 上，由零脉 Host 创建任务与 integration 分支、真实 PR、等待异步 mergeability、合并、更新 main、记录 release/deployed，并清理全部临时分支和 worktree。
 - 凭证只由测试启动器从 DSH Credentials 读取并作为子进程环境传入；原值未进入 argv、URL、Session Log、Tool result、测试输出或 Git。
 - 调试修复了两个真实边界：活动模式必须读 Projection，而非不可变 Header；Preset 内部 Package 必须包含 name/version，才能通过 DeepSeek request extension inventory 校验。
 
@@ -30,5 +31,6 @@
 
 - 完整任务矩阵：Claude Code、Codex、OpenCode、DSH 均已在真实 K3s Pod 中修改 `zeromai-demo`、测试、commit/push，Host fetch 到独立 worktree 并运行 `git diff --check` 后成功结算；三条新增矩阵与既有 DSH case 均已删除 Job、ConfigMap 和远端测试分支。
 - 离线恢复：`dist/` 包含 0.2.0 npm tarball、插件完整 Git Bundle、DSH 三提交通用前置分支完整 Git Bundle 和 `SHA256SUMS`；三项校验与两份 Bundle 完整历史验证均通过。
-- 尚未完成：真实 Gitea API token 配置与一次真实受保护 PR/merge 验收；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力；DSH 三项通用能力尚未进入官方发行版；插件仓尚未配置正式远端。
-- 下一安全动作：获得精确外部写授权后，先推送 DSH 通用分支并发起上游评审，再创建/配置插件正式远端并发布校验过的 0.2.0 产物；真实 Gitea main 合并仅在指定测试仓库与凭证就绪后执行。
+- npm 分发：Package 采用 Apache-2.0，所有未发布的 DSH/Cordis/React in-box peer 保留版本声明并标为 optional，由 DSH 安装本身解析；用户通过官方 `dsh plugin --profile web add dsh-pactflow@0.2.0` 安装。
+- 尚未完成：DSH 三项通用能力尚未进入官方发行版；npm 官方注册表尚未建立登录态。设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
+- 下一安全动作：发布 npm `next` 预发布并在 README 明示上游前提；上游能力进入正式 DSH 后发布稳定 tag。

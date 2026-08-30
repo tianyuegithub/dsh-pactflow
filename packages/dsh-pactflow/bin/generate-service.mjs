@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
+import { realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 
 export function launchdUnit({ dsh, profile, logDir }) {
   const label = `ai.deepseek.dsh.pactflow.${profile}`
@@ -71,7 +72,8 @@ function systemdArg(value) {
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] !== undefined
+  && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
   const options = argumentsFrom(process.argv.slice(2))
   process.stdout.write(options.platform === 'launchd'
     ? launchdUnit({ dsh: options.dsh, profile: options.profile, logDir: options.logDir })
