@@ -2,7 +2,7 @@
 
 - 当前里程碑：7 —— 安装升级、持续运行与发布总审计
 - 状态：`CONDITIONAL_GO（有条件可发布）`；里程碑 1—7 的本地与已授权真实环境范围已完成
-- 最后已验证提交：DSH 通用能力分支 `cbfb4f4782`；Bundle 仓库以当前 `main` HEAD 为准
+- 最后已验证提交：DSH 通用能力分支 `aa888ad0fb`；Bundle 仓库以当前 `main` HEAD 为准
 
 ## 已完成合同
 
@@ -29,6 +29,6 @@
 ## 当前边界与下一安全动作
 
 - 完整任务矩阵：Claude Code、Codex、OpenCode、DSH 均已在真实 K3s Pod 中修改 `zeromai-demo`、测试、commit/push，Host fetch 到独立 worktree 并运行 `git diff --check` 后成功结算；三条新增矩阵与既有 DSH case 均已删除 Job、ConfigMap 和远端测试分支。
-- 离线恢复：`dist/` 包含 0.2.0 npm tarball、插件完整 Git Bundle、DSH 通用前置分支完整 Git Bundle 和 `SHA256SUMS`；三项校验与两份 Bundle 完整历史验证均通过。
+- 离线恢复：`dist/` 包含 0.2.0 npm tarball、插件完整 Git Bundle、DSH 三提交通用前置分支完整 Git Bundle 和 `SHA256SUMS`；三项校验与两份 Bundle 完整历史验证均通过。
 - 尚未完成：真实 Gitea API token 配置与一次真实受保护 PR/merge 验收；设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力；DSH 三项通用能力尚未进入官方发行版；插件仓尚未配置正式远端。
 - 下一安全动作：获得精确外部写授权后，先推送 DSH 通用分支并发起上游评审，再创建/配置插件正式远端并发布校验过的 0.2.0 产物；真实 Gitea main 合并仅在指定测试仓库与凭证就绪后执行。
