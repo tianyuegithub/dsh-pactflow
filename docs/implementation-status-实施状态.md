@@ -32,5 +32,6 @@
 - 完整任务矩阵：Claude Code、Codex、OpenCode、DSH 均已在真实 K3s Pod 中修改 `zeromai-demo`、测试、commit/push，Host fetch 到独立 worktree 并运行 `git diff --check` 后成功结算；三条新增矩阵与既有 DSH case 均已删除 Job、ConfigMap 和远端测试分支。
 - 离线恢复：`dist/` 包含 0.2.0 npm tarball、插件完整 Git Bundle、DSH 三提交通用前置分支完整 Git Bundle 和 `SHA256SUMS`；三项校验与两份 Bundle 完整历史验证均通过。
 - npm 分发：Package 采用 Apache-2.0，所有未发布的 DSH/Cordis/React in-box peer 保留版本声明并标为 optional，由 DSH 安装本身解析；用户通过官方 `dsh plugin --profile web add dsh-pactflow@0.2.0` 安装。
+- 公共发现：源码同步到 `https://github.com/tianyuegithub/dsh-pactflow`，带 `dsh-plugin`、`deepseek-harness`、`pactflow`、`multi-agent` topics；npm 发布前可用 GitHub Release tarball 走同一 DSH 官方安装命令。
 - 尚未完成：DSH 三项通用能力尚未进入官方发行版；npm 官方注册表尚未建立登录态。设置卡仍是透明 JSON 编辑器，后续可增强为逐字段表单但不阻塞配置能力。
 - 下一安全动作：发布 npm `next` 预发布并在 README 明示上游前提；上游能力进入正式 DSH 后发布稳定 tag。

@@ -11,3 +11,9 @@ dsh plugin --profile web add dsh-pactflow@0.2.0
 ```
 
 0.2.0 是等待 DSH 上游通用能力的 Pre-release（预发布版），当前只面向使用已验证 fork 的开发者。Package 不使用隐式 `postinstall`；安装、更新和卸载完全由 DSH 官方 `plugin` 命令拥有。
+
+npm 发布前可直接安装公开 GitHub Release tarball：
+
+```bash
+dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.0/dsh-pactflow-0.2.0.tgz
+```

@@ -18,6 +18,12 @@ dsh plugin --profile web remove dsh-pactflow
 
 0.2.0 仍等待上游通用能力进入官方 DSH，目前只面向使用已验证 fork 的开发者预发布。本地构建与 tarball 安装方式如下。
 
+npm 发布前，公开 GitHub Release 提供同一 tarball：
+
+```bash
+dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.0/dsh-pactflow-0.2.0.tgz
+```
+
 在插件仓库执行：
 
 ```bash

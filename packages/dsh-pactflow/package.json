@@ -2,6 +2,20 @@
   "name": "dsh-pactflow",
   "version": "0.2.0",
   "description": "零脉 · PactFlow — installable project workflow mode for DeepSeek Harness",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tianyuegithub/dsh-pactflow.git"
+  },
+  "homepage": "https://github.com/tianyuegithub/dsh-pactflow#readme",
+  "bugs": {
+    "url": "https://github.com/tianyuegithub/dsh-pactflow/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "pactflow",
+    "multi-agent"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

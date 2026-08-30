@@ -16,6 +16,12 @@ dsh plugin --profile web add dsh-pactflow@0.2.0
 
 该命令由 DSH 将 Package 安装到 `web` Profile，并自动把 `dsh.bundle` 加入配置层。0.2.0 仍等待上游通用能力进入官方 DSH，因此当前只面向使用已验证 fork 的开发者预发布；插件本身不修改 DSH 源码，也不使用隐式 `postinstall`。
 
+npm 发布前，外部用户可从公开 GitHub Release 安装同一校验 tarball：
+
+```bash
+dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/releases/download/v0.2.0/dsh-pactflow-0.2.0.tgz
+```
+
 - [最终开发计划](docs/development-plan-开发计划.md)
 - [当前实施状态](docs/implementation-status-实施状态.md)
 - [安装与运维](docs/installation-operations-安装运维.md)
