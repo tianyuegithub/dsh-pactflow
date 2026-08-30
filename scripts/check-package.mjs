@@ -33,6 +33,9 @@ if (manifest.dsh?.client?.platform !== 'web') {
 if (manifest.license !== 'Apache-2.0') {
   throw new Error('public package must use Apache-2.0')
 }
+if (manifest.bin?.['dsh-pactflow-service'] !== 'bin/generate-service.mjs') {
+  throw new Error('npm-normalized service bin target must remain bin/generate-service.mjs')
+}
 for (const dependency of Object.keys(manifest.peerDependencies ?? {})) {
   if (manifest.peerDependenciesMeta?.[dependency]?.optional !== true) {
     throw new Error(`in-box peer ${dependency} must remain optional for public DSH installation`)
