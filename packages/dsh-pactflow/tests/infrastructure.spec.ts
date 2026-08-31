@@ -298,4 +298,31 @@ describe('PactFlow infrastructure resources', () => {
       }],
     })).toThrow(/no compatible model connection/)
   })
+
+  it('rejects a Worker Pool that combines a Harness with another registry pull Secret', () => {
+    expect(() => new PactFlowInfrastructure({
+      clusters: [{ id: 'home', displayName: 'Home', namespace: 'pactflow', pollIntervalMs: 1_000 }],
+      registries: [{
+        id: 'harbor', displayName: 'Harbor', kind: 'harbor', endpoint: 'https://harbor.example',
+        tlsVerify: true, imagePullSecret: 'harbor-pull',
+      }, {
+        id: 'backup', displayName: 'Backup', kind: 'harbor', endpoint: 'https://backup.example',
+        tlsVerify: true, imagePullSecret: 'backup-pull',
+      }],
+      gitProviders: [],
+      templates: [{
+        id: 'claude', displayName: 'Claude Code', harness: 'claude', registryId: 'backup',
+        repository: 'worker', artifactDigest: `sha256:${'b'.repeat(64)}`,
+        cpuRequest: '500m', memoryRequest: '1Gi', cpuLimit: '2', memoryLimit: '4Gi',
+      }],
+      modelConnections: [{
+        id: 'anthropic', displayName: 'Anthropic', apiMode: 'anthropic-messages', model: 'model',
+        baseUrl: 'https://model.invalid', apiKeyCredentialRef: 'PACTFLOW_MODEL_API_KEY',
+      }],
+      workerPools: [{
+        id: 'default', displayName: 'Default', clusterId: 'home', registryId: 'harbor',
+        templateIds: ['claude'], maxConcurrency: 1, queuePolicy: 'fifo', imagePullSecret: 'harbor-pull',
+      }],
+    })).toThrow(/registry "backup" does not match Worker Pool "default" registry "harbor"/)
+  })
 })

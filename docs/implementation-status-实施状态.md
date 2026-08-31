@@ -58,7 +58,7 @@
 - 浏览器生命周期验收：9120 本地 UAT Profile 已真实完成 K3s 卡片“新增 → 测试日志成功 → 保存解锁 → 摘要收缩 → 编辑原值回显 → 修改后取消不污染 → 关闭再进入仍持久化 → 删除影响提示与二次确认 → 删除后重载为空”。测试前保存禁用、修改已测试字段后测试失效也已验证；磁盘 `settings.yaml` 最终恢复为 `clusters: []`。
 - Harbor 回归验收：真实 `datavdl/pactflow-worker` 通过完整测试并显示绿色联通状态，自动持久同步四个 Harness 模板；不再读取 Prometheus 等其它项目仓库。既有 `datavdl/` 配置自动规范化为 `datavdl`。关闭设置和重启 Host 后，绿色状态与模板仍恢复。
 - 模型发现验收：真实 Coding API 使用已保存 Credential 加载并去重为 130 个服务端模型，加上占位项和当前未返回的 `ark-code-latest` 共 132 个唯一下拉值；Anthropic Messages 不支持列表时显示原始兼容错误并出现“手动填写模型 ID”入口，取消编辑不污染保存配置。
-- Harness 状态回归：旧列表测试因没有 Worker Pool 误报红色；新合同将 Harness 镜像测试与模型 API 解耦，并使旧合同记录自动失效。已加入执行资源池的 Harness 会按每条资源池路由分别使用对应 K3s 集群和镜像拉取密钥测试；未加入资源池时才对全部配置集群执行独立镜像测试。Claude Code 真实创建临时 K3s Job、运行 `claude --version`、5.3 秒成功转绿且 Job 清理后集群无残留。
+- Harness 状态回归：旧列表测试因没有 Worker Pool 误报红色；新合同将 Harness 镜像测试与模型 API 解耦，并使旧合同记录自动失效。已加入执行资源池的 Harness 会按每条资源池路由分别使用对应 K3s 集群和镜像拉取密钥测试；未加入资源池时才对全部配置集群执行独立镜像测试。Harness 模板与执行资源池必须引用同一 Registry，禁止跨仓库混用镜像拉取密钥。Claude Code 真实创建临时 K3s Job、运行 `claude --version`、5.3 秒成功转绿且 Job 清理后集群无残留。
 - Worker 调度验收：默认草稿自动选择 K3s 集群、三个具有兼容模型的 Harness 和唯一 Harbor 拉取 Secret；Claude Code 因缺少 Anthropic 模型明确禁用。资源图测试成功，草稿随后取消，未写入用户配置。
 - 工作区项目与视觉验收：9120 本地 UAT 通过现有侧栏 Slot 打开项目面板，真实列出 `data-governance`、Git/工作树状态和会话迁移候选。选定视觉方案实现为模块化 Agent 组合器，在 1440×1024 下生成 DSH/Codex/OpenCode 三个规格，无横向溢出、无浏览器 warning/error；重复 Harness/模型组合被拒绝，编辑回填成功。设计对比见根目录 `design-qa.md`，最终结果 `passed`。
 - Agent 数量回归：删除可编辑的“项目总并发”，项目可用 Worker 总量改为各 Agent Profile 数量自动求和；旧版持久字段仅保留模式兼容，不再形成额外调度闸门。超过全局执行资源池的瞬时任务由 Pool 统一排队。

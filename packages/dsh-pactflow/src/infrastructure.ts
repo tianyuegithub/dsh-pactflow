@@ -97,6 +97,9 @@ export class PactFlowInfrastructure {
           this.executions.set(executionKey(pool.id, template.id, undefined), template.id)
           continue
         }
+        if (template.registryId !== pool.registryId) {
+          throw new Error(`Harness template "${template.id}" registry "${template.registryId}" does not match Worker Pool "${pool.id}" registry "${pool.registryId}"`)
+        }
         const registryForTemplate = registries.get(template.registryId)
         if (registryForTemplate === undefined) {
           throw new Error(`Harness template "${template.id}" references unknown registry "${template.registryId}"`)
