@@ -8,9 +8,9 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
 import PactFlowService from '../lib/index.js'
 import { PACTFLOW_EVENT_TYPES_V0_2 } from '../src/domain.ts'
@@ -744,7 +744,6 @@ describe('PactFlow domain foundation', () => {
       'pactflow_create_node',
       'pactflow_dispatch_git',
       'pactflow_dispatch_k3s',
-      'pactflow_dispatch_local',
       'pactflow_initialize',
       'pactflow_record_review',
       'pactflow_retry_node',
@@ -775,5 +774,82 @@ describe('PactFlow domain foundation', () => {
       .toContainEqual(expect.objectContaining({
         needId: 'tool-need', kind: 'requirement', decision: 'approved', note: 'requirements verified',
       }))
+  })
+
+  it('makes the PactFlow orchestrator read-only while preserving ordinary and Worker tools', async () => {
+    const ctx = await harness()
+    await ctx.plugin(SystemPrompt, {})
+    await ctx.plugin(ToolRuntime)
+    const output = {
+      schema: { type: 'string' as const },
+      render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
+    }
+    const tool = (name: string) => defineTool({
+      name, description: name, parameters: {}, output,
+      execute: () => Promise.resolve(`ran:${name}`),
+    })
+    const scopeUnder = async (
+      key: Parameters<typeof createScope>[1],
+      parent?: Parameters<typeof createScope>[2]['parent'],
+    ): Promise<ReturnType<typeof createScope>> => {
+      let scope!: ReturnType<typeof createScope>
+      await ctx.plugin(Object.assign((inner: Context) => {
+        scope = createScope(inner, key, parent === undefined ? {} : { parent })
+      }, { inject: ['tools', 'pactflow'] }))
+      return scope
+    }
+    for (const name of ['bash', 'write', 'read']) ctx.tools.register(tool(name))
+
+    const presetKey = { agentPreset: 'pactflow' }
+    const presetScope = await scopeUnder(presetKey)
+    presetScope.ctx.tools.register(tool('edit'))
+    await presetScope.ctx.plugin(PactFlowAgentTools)
+
+    const session = ctx.sessions.create(SessionId('readonly-orchestrator'), {
+      meta: { agentPreset: 'pactflow' },
+    })
+    const agent = { id: session.id, session } as Agent
+    const agentScope = await scopeUnder(agent, presetKey)
+    Reflect.set(agent, 'ctx', agentScope.ctx)
+    agentEvents(ctx, agent).emit('agent/session-start', { source: 'resume' })
+
+    const orchestratorTools = ctx.tools.schemas(agent).map(schema => schema.name)
+    expect(orchestratorTools).toContain('read')
+    expect(orchestratorTools).toContain('pactflow_dispatch_git')
+    expect(orchestratorTools).toContain('pactflow_dispatch_k3s')
+    expect(orchestratorTools).not.toContain('pactflow_dispatch_local')
+    expect(orchestratorTools).not.toContain('bash')
+    expect(orchestratorTools).not.toContain('write')
+    expect(orchestratorTools).not.toContain('edit')
+
+    const blocked = await ctx.tools.execute({
+      callId: ToolCallId('readonly-bash'), name: 'bash', arguments: {}, agent,
+      signal: new AbortController().signal,
+    })
+    expect(blocked).toMatchObject({ isError: true })
+
+    const ordinarySession = ctx.sessions.create(SessionId('ordinary-agent'), {
+      meta: { agentPreset: 'standard' },
+    })
+    const ordinary = { id: ordinarySession.id, session: ordinarySession } as Agent
+    const ordinaryScope = await scopeUnder(ordinary)
+    Reflect.set(ordinary, 'ctx', ordinaryScope.ctx)
+    expect(ctx.tools.schemas(ordinary).map(schema => schema.name).sort()).toEqual(['bash', 'read', 'write'])
+
+    const workerSession = ctx.sessions.create(SessionId('pactflow-worker'), {
+      meta: { agentPreset: 'standard' },
+    })
+    const worker = { id: workerSession.id, session: workerSession } as Agent
+    const workerScope = await scopeUnder(worker, agent)
+    Reflect.set(worker, 'ctx', workerScope.ctx)
+    for (const name of ['bash', 'write', 'edit']) workerScope.ctx.tools.register(tool(name))
+    expect(ctx.tools.schemas(worker).map(schema => schema.name)).toEqual(expect.arrayContaining([
+      'bash', 'write', 'edit',
+    ]))
+
+    await workerScope.dispose()
+    await ordinaryScope.dispose()
+    await agentScope.dispose()
+    await presetScope.dispose()
   })
 })

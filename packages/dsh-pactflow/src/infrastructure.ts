@@ -151,7 +151,12 @@ export class PactFlowInfrastructure {
       throw new Error(`PactFlow template "${templateId}" belongs to multiple Worker Pools; select one explicitly`)
     }
     const pool = poolId === undefined ? candidates[0] : this.resolved.get(poolId)
-    if (pool === undefined) throw new Error(`PactFlow Worker Pool "${poolId ?? ''}" is not configured`)
+    if (pool === undefined && poolId === undefined) {
+      const template = this.settings.templates.find(candidate => candidate.id === templateId)
+      if (template === undefined) throw new Error(`PactFlow Harness "${templateId}" is not configured`)
+      throw new Error(`PactFlow Harness "${templateId}" is not enabled in any Worker Pool`)
+    }
+    if (pool === undefined) throw new Error(`PactFlow Worker Pool "${poolId}" is not configured`)
     if (!pool.pool.templateIds.includes(templateId)) {
       throw new Error(`Worker Pool "${pool.pool.id}" does not allow template "${templateId}"`)
     }

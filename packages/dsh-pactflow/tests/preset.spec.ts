@@ -47,8 +47,6 @@ describe('PactFlow packaged Agent Preset', () => {
     })
     const names = ctx.tools.schemas(handle.agent).map(schema => schema.name).sort()
     expect(names).toEqual([
-      'bash',
-      'edit',
       'glob',
       'grep',
       'pactflow_bind_git',
@@ -57,14 +55,12 @@ describe('PactFlow packaged Agent Preset', () => {
       'pactflow_create_node',
       'pactflow_dispatch_git',
       'pactflow_dispatch_k3s',
-      'pactflow_dispatch_local',
       'pactflow_initialize',
       'pactflow_record_review',
       'pactflow_retry_node',
       'pactflow_transition_need',
       'pactflow_view',
       'read',
-      'write',
     ])
     expect(ctx.tools.schemas()).toEqual([])
     await handle.dispose()

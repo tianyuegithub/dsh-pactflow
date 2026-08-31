@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PactFlowInfrastructure } from '../src/infrastructure.ts'
 import { harborProjectName, harborRepositoryPathSegment, probeHttp } from '../src/infrastructure-probe.ts'
-import { synchronizeHarnessTemplates } from '../src/harness-discovery.ts'
+import { harnessProbeAvailability, synchronizeHarnessTemplates } from '../src/harness-discovery.ts'
 import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -116,6 +116,43 @@ describe('PactFlow infrastructure resources', () => {
     expect(infrastructure.matchGitea('ssh://git@git.example:22/data/data-governance.git')).toMatchObject({
       provider: { id: 'gitea' }, owner: 'data', repo: 'data-governance',
     })
+  })
+
+  it('reports an unscheduled Harness instead of an empty Worker Pool id', () => {
+    const codex = {
+      ...template, id: 'codex', harness: 'codex' as const, apiMode: 'openai-responses' as const,
+    }
+    const infrastructure = new PactFlowInfrastructure(settings({
+      templates: [template, codex],
+      workerPools: [{
+        id: 'default', displayName: 'Default', clusterId: 'home', registryId: 'harbor',
+        templateIds: ['codex'], maxConcurrency: 1, queuePolicy: 'fifo',
+      }],
+    }))
+
+    expect(() => infrastructure.resolveExecution(undefined, 'claude'))
+      .toThrow('PactFlow Harness "claude" is not enabled in any Worker Pool')
+  })
+
+  it('explains why a Harness API test is unavailable without hiding its image test', () => {
+    const claude = {
+      id: 'claude', displayName: 'Claude Code', harness: 'claude' as const, registryId: 'harbor',
+      repository: 'pactflow-worker', artifactDigest: `sha256:${'b'.repeat(64)}`,
+      cpuRequest: '500m', memoryRequest: '1Gi', cpuLimit: '2', memoryLimit: '4Gi',
+    }
+    const unavailable = harnessProbeAvailability(claude, [{
+      id: 'default', displayName: 'Default', clusterId: 'home', registryId: 'harbor',
+      templateIds: ['codex'], maxConcurrency: 1, queuePolicy: 'fifo',
+    }], [{
+      id: 'model', displayName: 'Model', apiMode: 'openai-responses', model: 'model',
+      baseUrl: 'https://model.invalid', apiKeyCredentialRef: 'PACTFLOW_MODEL_KEY',
+    }])
+
+    expect(unavailable).toMatchObject({
+      apiMode: 'anthropic-messages', apiReady: false,
+      reason: expect.stringContaining('Anthropic 消息协议'),
+    })
+    expect(unavailable.reason).toContain('尚未在执行资源池中启用')
   })
 
   it('fails closed for broken references, mutable images, and ambiguous providers', () => {

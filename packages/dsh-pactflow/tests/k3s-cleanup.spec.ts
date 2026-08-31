@@ -48,4 +48,23 @@ describe('PactFlow K3s cleanup', () => {
 
     await expect(instance.cleanupRun(spec)).resolves.toBeUndefined()
   })
+
+  it('deletes terminal probe Pods after deleting their short-lived Job', async () => {
+    const instance = worker()
+    const order: string[] = []
+    Reflect.set(instance, 'batch', {
+      deleteNamespacedJob: vi.fn(async () => { order.push('job') }),
+    })
+    Reflect.set(instance, 'core', {
+      listNamespacedPod: vi.fn(async () => ({
+        items: [{ metadata: { name: 'dsh-pf-image-test-pod' } }],
+      })),
+      deleteNamespacedPod: vi.fn(async ({ name }: { readonly name: string }) => { order.push(`pod:${name}`) }),
+    })
+    const cleanup = Reflect.get(instance, 'cleanupProbeResources') as undefined | ((jobName: string) => Promise<void>)
+
+    expect(cleanup).toBeTypeOf('function')
+    await cleanup?.call(instance, 'dsh-pf-image-test')
+    expect(order).toEqual(['job', 'pod:dsh-pf-image-test-pod'])
+  })
 })

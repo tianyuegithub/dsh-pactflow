@@ -20,9 +20,27 @@ const PHASES = [
 ] as const
 const REVIEW_KINDS = ['requirement', 'design', 'plan', 'verification', 'code'] as const
 const REVIEW_DECISIONS = ['approved', 'rejected', 'changes-requested'] as const
+const ORCHESTRATOR_DIRECT_TOOLS = ['bash', 'pwsh', 'write', 'edit'] as const
 
 /** Register PactFlow-only tools into the preset's standing Agent scope. */
 export function apply(ctx: Context): void {
+  const restrictions = new Map<string, () => void>()
+  ctx.on('agent/session-start', ({ agent }) => {
+    if (restrictions.has(agent.id)) return
+    const visible = new Set(agent.ctx.tools.schemas(agent).map(tool => tool.name))
+    const deny = ORCHESTRATOR_DIRECT_TOOLS.filter(tool => visible.has(tool))
+    if (deny.length === 0) return
+    restrictions.set(agent.id, agent.ctx.tools.restrict({ deny }))
+  })
+  ctx.on('agent/disposed', ({ agent }) => {
+    restrictions.get(agent.id)?.()
+    restrictions.delete(agent.id)
+  })
+  ctx.effect(() => () => {
+    for (const dispose of restrictions.values()) dispose()
+    restrictions.clear()
+  })
+
   ctx.tools.register(defineTool({
     name: 'pactflow_bind_git',
     description: 'Bind the current Session workspace to an existing credential-free Git remote and remote-tracking default branch.',
@@ -268,29 +286,6 @@ export function apply(ctx: Context): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'pactflow_dispatch_local',
-    description: 'Claim one ready DAG node and execute it through an installed DSH Subagent provider. Returns only after the Run settles.',
-    parameters: {
-      node_id: { type: 'string', required: true },
-      expected_revision: { type: 'integer', required: true },
-      provider: { type: 'string', required: true, description: 'Installed provider name such as spawn or fork.' },
-      prompt: { type: 'string', required: true, description: 'Complete bounded Worker instruction.' },
-      lease_duration_ms: { type: 'integer', required: true, description: 'Lease duration from 1000 through 86400000.' },
-    },
-    output: OUTPUT,
-    timeoutMs: 86_400_000,
-    async execute(args, exec) {
-      const value = await ctx.pactflow.dispatchLocalNode(requireSessionId(exec.agent?.session.id), {
-        nodeId: args.node_id,
-        expectedRevision: args.expected_revision,
-        provider: args.provider,
-        prompt: args.prompt,
-        leaseDurationMs: args.lease_duration_ms,
-      })
-      return jsonObject(value)
-    },
-  }))
 }
 
 function requireSessionId(value: string | undefined): string {

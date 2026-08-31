@@ -6,12 +6,16 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import pactflowRemote from 'dsh-pactflow/remote'
-import { synchronizeHarnessTemplates } from '../harness-discovery.ts'
+import {
+  harnessProbeAvailability,
+  PACTFLOW_HARNESS_PROTOCOL,
+  synchronizeHarnessTemplates,
+} from '../harness-discovery.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
+import { PactFlowDagGraph } from './dag-graph.tsx'
 import { PactFlowProjectPanel, type PactFlowProjectPanelFace } from './project-panel.tsx'
 import type {
   PactFlowHarnessProbeResult,
-  PactFlowApiMode,
   PactFlowApiProbeResult,
   PactFlowHarnessTemplateView,
   PactFlowHarnessProfileSettings,
@@ -108,7 +112,7 @@ const zh: Record<PactFlowLocaleKey, string> = {
   k3sTemplates: 'K3s Harness 模板',
   workerPools: 'Worker Pool 容量',
   apiMode: 'API 模式',
-  harnessTest: 'Harness 测试',
+  harnessTest: 'Harness 镜像测试',
   apiTest: 'API 测试',
   testing: '测试中…',
   settingsTitle: '零脉基础设施',
@@ -145,7 +149,7 @@ const en: Record<PactFlowLocaleKey, string> = {
   k3sTemplates: 'K3s Harness templates',
   workerPools: 'Worker Pool capacity',
   apiMode: 'API mode',
-  harnessTest: 'Harness test',
+  harnessTest: 'Harness image test',
   apiTest: 'API test',
   testing: 'Testing…',
   settingsTitle: 'PactFlow infrastructure',
@@ -175,9 +179,10 @@ interface OverlayState {
   readonly snapshot: PactFlowSnapshot | null
   readonly error: string | null
   readonly templates: readonly (PactFlowHarnessTemplateView | PactFlowHarnessProfileSettings)[]
+  readonly modelConnections: readonly PactFlowModelConnectionSettings[]
   readonly workerPools: readonly PactFlowWorkerPoolStatus[]
   readonly probingTemplateId: string | null
-  readonly probe: PactFlowHarnessProbeResult | PactFlowApiProbeResult | null
+  readonly probe: PactFlowHarnessProbeResult | PactFlowApiProbeResult | PactFlowInfrastructureProbeResult | null
   readonly giteaStatus: PactFlowGiteaStatus | null
   readonly workspaceProject: PactFlowWorkspaceProjectConfig | null
 }
@@ -190,6 +195,7 @@ const overlay = createSnapshotStore<OverlayState>({
   snapshot: null,
   error: null,
   templates: [],
+  modelConnections: [],
   workerPools: [],
   probingTemplateId: null,
   probe: null,
@@ -206,11 +212,14 @@ interface OverlayInjected {
     readonly health: PactFlowHealth
     readonly snapshot: PactFlowSnapshot
     readonly templates: readonly (PactFlowHarnessTemplateView | PactFlowHarnessProfileSettings)[]
+    readonly modelConnections: readonly PactFlowModelConnectionSettings[]
     readonly workerPools: readonly PactFlowWorkerPoolStatus[]
     readonly workspaceProject: PactFlowWorkspaceProjectConfig | null
   }>
-  probeHarness(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowHarnessProbeResult>
-  probeApi(templateId: string, prompt: string, timeoutMs: number): Promise<PactFlowApiProbeResult>
+  probeHarnessImage(templateId: string): Promise<PactFlowInfrastructureProbeResult>
+  probeApi(
+    templateId: string, modelConnectionId: string, prompt: string, timeoutMs: number,
+  ): Promise<PactFlowApiProbeResult>
   verifyGitea(sessionId: string): Promise<PactFlowGiteaStatus>
 }
 
@@ -282,7 +291,7 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
       onClick={() => {
         overlay.set({
           open: true, sessionId, phase: 'idle', health: null, snapshot: null, error: null,
-          templates: [], workerPools: [], probingTemplateId: null, probe: null,
+          templates: [], modelConnections: [], workerPools: [], probingTemplateId: null, probe: null,
           giteaStatus: null, workspaceProject: null,
         })
       }}
@@ -294,7 +303,7 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-function PactFlowOverlay({ load, probeApi, probeHarness, verifyGitea, t }: OverlayProps) {
+function PactFlowOverlay({ load, probeApi, probeHarnessImage, verifyGitea, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
 
   useEffect(() => {
@@ -355,22 +364,23 @@ function PactFlowOverlay({ load, probeApi, probeHarness, verifyGitea, t }: Overl
             <PactFlowProjectionTables
               snapshot={state.snapshot}
               templates={state.templates}
+              modelConnections={state.modelConnections}
               workerPools={state.workerPools}
               probingTemplateId={state.probingTemplateId}
               onProbe={(templateId) => {
-                overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null })
-                void probeHarness(templateId, 'say hi to me', 180_000).then(
-                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe }),
+                overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null, error: null })
+                void probeHarnessImage(templateId).then(
+                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe, error: null }),
                   error => overlay.set({
                     ...overlay.getSnapshot(), probingTemplateId: null,
                     error: error instanceof Error ? error.message : String(error),
                   }),
                 )
               }}
-              onApiProbe={(templateId) => {
-                overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null })
-                void probeApi(templateId, 'say hi to me', 180_000).then(
-                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe }),
+              onApiProbe={(templateId, modelConnectionId) => {
+                overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null, error: null })
+                void probeApi(templateId, modelConnectionId, 'say hi to me', 180_000).then(
+                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe, error: null }),
                   error => overlay.set({
                     ...overlay.getSnapshot(), probingTemplateId: null,
                     error: error instanceof Error ? error.message : String(error),
@@ -403,17 +413,12 @@ const EMPTY_INFRASTRUCTURE: PactFlowInfrastructureSettings = {
   clusters: [], registries: [], gitProviders: [], templates: [], modelConnections: [], workerPools: [],
 }
 
-const HARNESS_PROTOCOL: Readonly<Record<PactFlowHarnessProfileSettings['harness'], PactFlowApiMode>> = {
-  claude: 'anthropic-messages', codex: 'openai-responses',
-  opencode: 'openai-chat-completions', dsh: 'openai-chat-completions',
-}
-
 function compatibleHarnessTemplateIds(
   templates: readonly PactFlowHarnessProfileSettings[],
   models: readonly PactFlowModelConnectionSettings[],
 ): readonly string[] {
   const modes = new Set(models.map(model => model.apiMode))
-  return templates.filter(template => modes.has(HARNESS_PROTOCOL[template.harness])).map(template => template.id)
+  return templates.filter(template => modes.has(PACTFLOW_HARNESS_PROTOCOL[template.harness])).map(template => template.id)
 }
 
 const clusterColumns: readonly EditorColumn<PactFlowK3sClusterSettings>[] = [
@@ -966,10 +971,10 @@ function HarnessSelectionField({ templates, models, value, onChange }: {
   return <div role="group" aria-label="允许调度的 Harness" style={choiceGridStyle}>
     {templates.map(template => {
       const selected = value.includes(template.id)
-      const compatible = models.some(model => model.apiMode === HARNESS_PROTOCOL[template.harness])
+      const compatible = models.some(model => model.apiMode === PACTFLOW_HARNESS_PROTOCOL[template.harness])
       return <button
         key={template.id} type="button" aria-pressed={selected} disabled={!compatible}
-        title={compatible ? undefined : `缺少 ${friendlyOption(HARNESS_PROTOCOL[template.harness])} 模型连接`}
+        title={compatible ? undefined : `缺少 ${friendlyOption(PACTFLOW_HARNESS_PROTOCOL[template.harness])} 模型连接`}
         onClick={() => onChange(selected ? value.filter(id => id !== template.id) : [...value, template.id])}
         style={compatible ? selected ? selectedChoiceStyle : choiceStyle : disabledChoiceStyle}
       >{template.displayName}{compatible ? '' : '（缺少兼容模型）'}</button>
@@ -1836,31 +1841,33 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     locale: NS,
     inject: (): OverlayInjected => ({
       load: async (sessionId) => {
-        const [health, snapshot, templates, workerPools, workspaceProject] = await Promise.all([
+        const [health, snapshot, templates, modelConnections, workerPools, workspaceProject] = await Promise.all([
           pactflow.health(),
           pactflow.snapshot(sessionId),
           pactflow.listK3sTemplates(),
+          pactflow.listModelConnections(),
           pactflow.listWorkerPools(),
           pactflow.workspaceProjectForSession(sessionId),
         ])
         if (!health.ok) throw new Error(health.error.message)
         if (!snapshot.ok) throw new Error(snapshot.error.message)
         if (!templates.ok) throw new Error(templates.error.message)
+        if (!modelConnections.ok) throw new Error(modelConnections.error.message)
         if (!workerPools.ok) throw new Error(workerPools.error.message)
         if (!workspaceProject.ok) throw new Error(workspaceProject.error.message)
         return {
           health: health.value, snapshot: snapshot.value,
-          templates: templates.value, workerPools: workerPools.value,
+          templates: templates.value, modelConnections: modelConnections.value, workerPools: workerPools.value,
           workspaceProject: workspaceProject.value,
         }
       },
-      probeHarness: async (templateId, prompt, timeoutMs) => {
-        const result = await pactflow.probeHarness({ templateId, prompt, timeoutMs })
+      probeHarnessImage: async (templateId) => {
+        const result = await pactflow.probeInfrastructure({ kind: 'harness', id: templateId })
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
-      probeApi: async (templateId, prompt, timeoutMs) => {
-        const result = await pactflow.probeApi({ templateId, prompt, timeoutMs })
+      probeApi: async (templateId, modelConnectionId, prompt, timeoutMs) => {
+        const result = await pactflow.probeApi({ templateId, modelConnectionId, prompt, timeoutMs })
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
@@ -1875,14 +1882,16 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
 }
 
 function PactFlowProjectionTables({
-  snapshot, templates, workerPools, probingTemplateId, giteaStatus, onApiProbe, onProbe, onVerifyGitea, t,
+  snapshot, templates, modelConnections, workerPools, probingTemplateId,
+  giteaStatus, onApiProbe, onProbe, onVerifyGitea, t,
 }: {
   readonly snapshot: PactFlowSnapshot
   readonly templates: readonly (PactFlowHarnessTemplateView | PactFlowHarnessProfileSettings)[]
+  readonly modelConnections: readonly PactFlowModelConnectionSettings[]
   readonly workerPools: readonly PactFlowWorkerPoolStatus[]
   readonly probingTemplateId: string | null
   readonly onProbe: (templateId: string) => void
-  readonly onApiProbe: (templateId: string) => void
+  readonly onApiProbe: (templateId: string, modelConnectionId: string) => void
   readonly giteaStatus: PactFlowGiteaStatus | null
   readonly onVerifyGitea: () => void
   readonly t: (key: PactFlowLocaleKey) => string
@@ -1923,7 +1932,7 @@ function PactFlowProjectionTables({
         )}
       </section>
       <ProjectionTable title={t('needs')} rows={needs.map(need => [need.id, need.title, need.phase, `r${need.revision}`])} empty={t('empty')} />
-      <ProjectionTable title={t('dag')} rows={nodes.map(node => [node.id, node.title, node.state, node.dependencies.join(', ') || '—'])} empty={t('empty')} />
+      <PactFlowDagGraph nodes={nodes} empty={t('empty')} />
       <ProjectionTable title={t('runs')} rows={runs.map(run => [
         run.id,
         run.provider,
@@ -1944,8 +1953,9 @@ function PactFlowProjectionTables({
         <h2 style={sectionTitleStyle}>{t('k3sTemplates')}</h2>
         {templates.length === 0 ? <p>{t('empty')}</p> : (
           <table style={tableStyle}>
-            <tbody>{templates.map(template => (
-              <tr key={template.id}>
+            <tbody>{templates.map(template => {
+              const availability = harnessProbeAvailability(template, workerPools, modelConnections)
+              return <tr key={template.id}>
                 <td style={cellStyle}>{isHarnessProfile(template) ? template.displayName : template.id}</td>
                 <td style={cellStyle}>{template.harness}</td>
                 <td style={cellStyle}>{isHarnessProfile(template) ? template.registryId : template.apiMode}</td>
@@ -1954,9 +1964,14 @@ function PactFlowProjectionTables({
                   <div style={probeActionsStyle}>
                     <button
                       type="button"
-                      disabled={probingTemplateId !== null}
-                      onClick={() => onApiProbe(template.id)}
-                      style={buttonStyle}
+                      disabled={probingTemplateId !== null || !availability.apiReady}
+                      title={availability.reason}
+                      onClick={() => {
+                        if (availability.modelConnectionId !== undefined) {
+                          onApiProbe(template.id, availability.modelConnectionId)
+                        }
+                      }}
+                      style={availability.apiReady ? buttonStyle : disabledProbeButtonStyle}
                     >
                       {probingTemplateId === template.id ? t('testing') : t('apiTest')}
                     </button>
@@ -1968,10 +1983,13 @@ function PactFlowProjectionTables({
                     >
                       {probingTemplateId === template.id ? t('testing') : t('harnessTest')}
                     </button>
+                    {availability.reason === undefined ? null : (
+                      <span style={probeReasonStyle}>{availability.reason}</span>
+                    )}
                   </div>
                 </td>
               </tr>
-            ))}</tbody>
+            })}</tbody>
           </table>
         )}
       </section>
@@ -2044,7 +2062,9 @@ const headerStyle: CSSProperties = {
 
 const titleStyle: CSSProperties = { margin: 0, fontSize: 28 }
 const subtitleStyle: CSSProperties = { margin: '6px 0 0', opacity: 0.72 }
-const bodyStyle: CSSProperties = { padding: 28, overflowY: 'auto' }
+const bodyStyle: CSSProperties = {
+  width: '100%', minWidth: 0, boxSizing: 'border-box', padding: 28, overflowY: 'auto', overflowX: 'hidden',
+}
 const preStyle: CSSProperties = { padding: 16, overflow: 'auto', background: '#03100f' }
 const diagnosticStyle: CSSProperties = {
   border: '1px solid var(--border, #263d39)', borderRadius: 8, padding: 12, marginBottom: 16,
@@ -2186,9 +2206,23 @@ const confirmDialogStyle: CSSProperties = {
 const confirmTitleStyle: CSSProperties = { margin: 0, fontSize: 17 }
 const confirmActionsStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8 }
 const errorTextStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-error)' }
-const probeActionsStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 }
-const gridStyle: CSSProperties = { display: 'grid', gap: 16, marginTop: 20 }
-const cardStyle: CSSProperties = { border: '1px solid #263d39', borderRadius: 8, padding: 16 }
+const probeActionsStyle: CSSProperties = {
+  display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, minWidth: 0,
+}
+const disabledProbeButtonStyle: CSSProperties = { ...buttonStyle, cursor: 'not-allowed', opacity: 0.45 }
+const probeReasonStyle: CSSProperties = {
+  flex: '1 0 100%', fontSize: 12, lineHeight: 1.45, color: '#e9b949', overflowWrap: 'anywhere',
+}
+const gridStyle: CSSProperties = {
+  width: '100%', minWidth: 0, display: 'grid', gap: 16, marginTop: 20, overflow: 'hidden',
+}
+const cardStyle: CSSProperties = {
+  minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', overflow: 'hidden', overflowWrap: 'anywhere',
+  border: '1px solid #263d39', borderRadius: 8, padding: 16,
+}
 const sectionTitleStyle: CSSProperties = { margin: '0 0 12px', fontSize: 16 }
-const tableStyle: CSSProperties = { width: '100%', borderCollapse: 'collapse' }
-const cellStyle: CSSProperties = { padding: '8px 10px', borderTop: '1px solid #263d39', textAlign: 'left' }
+const tableStyle: CSSProperties = { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' }
+const cellStyle: CSSProperties = {
+  padding: '8px 10px', borderTop: '1px solid #263d39', textAlign: 'left', verticalAlign: 'top',
+  whiteSpace: 'normal', overflowWrap: 'anywhere', wordBreak: 'break-word',
+}

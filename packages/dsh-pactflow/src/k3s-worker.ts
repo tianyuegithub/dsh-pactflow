@@ -289,16 +289,13 @@ export class PactFlowK3sWorker {
       stages.push({ name: 'model-response', state: 'failed', detail: 'Harness probe failed before a result' })
     } finally {
       try {
-        await this.batch.deleteNamespacedJob({
-          name: jobName,
-          namespace: this.config.namespace,
-          gracePeriodSeconds: 0,
-          propagationPolicy: 'Background',
-          body: {},
+        const deletedPods = await this.cleanupProbeResources(jobName)
+        stages.push({
+          name: 'cleanup', state: 'succeeded',
+          detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
-        stages.push({ name: 'cleanup', state: 'succeeded', detail: `Job ${jobName} deleted` })
       } catch {
-        stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
+        stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
       if (modelApiKey !== undefined) {
         try {
@@ -363,13 +360,13 @@ export class PactFlowK3sWorker {
       stages.push({ name: 'cli-response', state: 'failed', detail: 'Harness image probe failed before a result' })
     } finally {
       try {
-        await this.batch.deleteNamespacedJob({
-          name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
-          propagationPolicy: 'Background', body: {},
+        const deletedPods = await this.cleanupProbeResources(jobName)
+        stages.push({
+          name: 'cleanup', state: 'succeeded',
+          detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
-        stages.push({ name: 'cleanup', state: 'succeeded', detail: `Job ${jobName} deleted` })
       } catch {
-        stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
+        stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
     }
     return { success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages }
@@ -426,13 +423,13 @@ export class PactFlowK3sWorker {
       stages.push({ name: 'api-response', state: 'failed', detail: 'API probe failed before a response' })
     } finally {
       try {
-        await this.batch.deleteNamespacedJob({
-          name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
-          propagationPolicy: 'Background', body: {},
+        const deletedPods = await this.cleanupProbeResources(jobName)
+        stages.push({
+          name: 'cleanup', state: 'succeeded',
+          detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
-        stages.push({ name: 'cleanup', state: 'succeeded', detail: `Job ${jobName} deleted` })
       } catch {
-        stages.push({ name: 'cleanup', state: 'failed', detail: `Job ${jobName} cleanup failed` })
+        stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
       if (modelApiKey !== undefined) {
         try {
@@ -765,6 +762,32 @@ export class PactFlowK3sWorker {
       name: podName, namespace: this.config.namespace, container: 'probe',
       limitBytes: 32_768, tailLines: 200,
     })
+  }
+
+  private async cleanupProbeResources(jobName: string): Promise<number> {
+    let jobFailure: unknown
+    try {
+      await this.batch.deleteNamespacedJob({
+        name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
+        propagationPolicy: 'Background', body: {},
+      })
+    } catch (error) {
+      if (!this.isNotFound(error)) jobFailure = error
+    }
+    const list = await this.core.listNamespacedPod({
+      namespace: this.config.namespace, labelSelector: `job-name=${jobName}`,
+    })
+    const names = list.items.map(pod => pod.metadata?.name)
+      .filter((name): name is string => name !== undefined)
+    const deletions = await Promise.allSettled(names.map(name => this.core.deleteNamespacedPod({
+      name, namespace: this.config.namespace, gracePeriodSeconds: 0,
+      propagationPolicy: 'Background', body: {},
+    })))
+    const podFailed = deletions.some(result => result.status === 'rejected' && !this.isNotFound(result.reason))
+    if (jobFailure !== undefined || podFailed) {
+      throw new Error(`PactFlow failed to clean probe resources for Job "${jobName}"`)
+    }
+    return names.length
   }
 
   private async waitForResult(spec: PactFlowK3sRunSpec, signal: AbortSignal): Promise<PactFlowK3sResult> {
