@@ -9,6 +9,7 @@
   "files": [
     "src/client/index.tsx",
     "src/client/action-feedback.tsx",
+    "src/client/credential-probe.ts",
     "src/client/dag-graph-model.ts",
     "src/client/dag-graph.tsx",
     "src/client/project-panel.tsx",

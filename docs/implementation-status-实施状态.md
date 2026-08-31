@@ -26,6 +26,7 @@
 - 逻辑容量池：每个 Pool 绑定 Cluster/Registry/Templates，以 FIFO 管理 `maxConcurrency`；排队、等待取消、幂等释放、重启时对活动 Job 恢复容量占用均有代码边界。
 - 自动 Gitea 匹配：Git 绑定从本地 remote 读取无凭证 URL，按 host 匹配全局 Provider 并提取 owner/repo；多匹配失败关闭。
 - 连接测试：Cluster 读取真实 Namespace；Harbor 调用 v2 ping/project API、只访问配置的 `pactflow-worker` 仓库并识别四类 Harness 镜像；Gitea 调用 version API；Harness 已保存卡片在 K3s 中拉取镜像、运行独立 CLI `--version` 临时 Pod，不再错误依赖 Worker Pool 或模型；Model 发送真实消息；Pool 验证资源图。Remote 只返回分阶段脱敏证据。
+- 测试凭证事务：未保存的 Harbor/Gitea/模型凭证只写入随机 `_PROBE_` 临时 Credential Ref，测试草稿引用临时 Ref；保存成功时才写正式 Ref，取消编辑与组件卸载均清理临时 Ref。真实浏览器验收确认模型发现期间临时 Ref 数量从 0→1，取消后回到 0，正式 Ref 未被覆盖。
 - 设置 UI：六类基础设施资源均为 DSH 原生风格的多行响应式卡片；一次只编辑一张卡片，成功测试且表单未变化时才允许保存。保存后收缩为摘要，支持编辑回显、取消、删除影响检查和二次确认；高级 JSON 仅用于只读排障，容量快照在控制台显示运行/等待数。
 - 易用性收口：Kubeconfig 使用 DSH Host 原生文件选择并从文件解析 Context 下拉；Harbor/Gitea/模型页面显示账号和写后不可读的密码框，内部 Credential Ref 隐藏；Harbor 连接成功后从 `pactflow-worker` 自动同步 Claude Code、Codex、OpenCode、DSH 四个模板的不可变 digest，保留人工资源规格；K3s imagePullSecret 由真实服务列表选择。
 - 测试可观测：K3s、Harbor、Gitea 和执行资源池的测试直接使用当前未保存卡片草稿；每张卡片就地显示准备、凭证、配置校验、连接、资源发现和详细失败日志，不再把错误写到设置卡底部或浏览器控制台。

@@ -12,6 +12,7 @@ import {
   synchronizeHarnessTemplates,
 } from '../harness-discovery.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
+import { replaceInfrastructureCredentialRefs, temporaryCredentialRef } from './credential-probe.ts'
 import { PactFlowDagGraph } from './dag-graph.tsx'
 import { PactFlowProjectPanel, type PactFlowProjectPanelFace } from './project-panel.tsx'
 import type {
@@ -636,6 +637,20 @@ function resourceRows(
   return settings.workerPools
 }
 
+function resourceCredentialRefs(
+  kind: PactFlowInfrastructureResourceKind,
+  resource: InfrastructureResource,
+): readonly string[] {
+  if (kind === 'registry') {
+    const registry = resource as PactFlowRegistrySettings
+    return [registry.usernameCredentialRef, registry.passwordCredentialRef]
+      .filter((ref): ref is string => ref !== undefined)
+  }
+  if (kind === 'git-provider') return [(resource as PactFlowGitProviderSettings).tokenCredentialRef]
+  if (kind === 'model-connection') return [(resource as PactFlowModelConnectionSettings).apiKeyCredentialRef]
+  return []
+}
+
 function replaceResource(
   settings: PactFlowInfrastructureSettings,
   kind: PactFlowInfrastructureResourceKind,
@@ -1015,6 +1030,33 @@ function PactFlowSettingsCard({
     readonly draft: PactFlowInfrastructureSettings
     readonly active: ActiveResourceEditor | null
   } | null>(null)
+  const temporaryCredentialRefsRef = useRef(new Map<string, string>())
+  const unsetCredentialRef = useRef(unsetCredential)
+
+  useEffect(() => { unsetCredentialRef.current = unsetCredential }, [unsetCredential])
+  useEffect(() => () => {
+    const temporaryRefs = [...temporaryCredentialRefsRef.current.values()]
+    temporaryCredentialRefsRef.current.clear()
+    for (const ref of temporaryRefs) void unsetCredentialRef.current(ref)
+  }, [])
+
+  const probeCredentialRef = (reference: string): string => {
+    const existing = temporaryCredentialRefsRef.current.get(reference)
+    if (existing !== undefined) return existing
+    const created = temporaryCredentialRef(reference, crypto.randomUUID())
+    temporaryCredentialRefsRef.current.set(reference, created)
+    return created
+  }
+  const releaseTemporaryCredentials = async (references?: readonly string[]): Promise<void> => {
+    const realRefs = references ?? [...temporaryCredentialRefsRef.current.keys()]
+    const temporaryRefs = realRefs.flatMap(reference => {
+      const temporary = temporaryCredentialRefsRef.current.get(reference)
+      if (temporary === undefined) return []
+      temporaryCredentialRefsRef.current.delete(reference)
+      return [temporary]
+    })
+    await Promise.allSettled(temporaryRefs.map(ref => unsetCredential(ref)))
+  }
 
   useEffect(() => {
     if (snapshot.value === undefined) return
@@ -1113,6 +1155,19 @@ function PactFlowSettingsCard({
     if (kind === 'worker-pool') refreshPoolPullSecrets(resource as PactFlowWorkerPoolSettings)
   }
   const cancelEdit = (): void => {
+    const editor = activeEditor
+    if (editor !== null) {
+      const resource = resourceRows(draft, editor.kind).find(row => row.id === editor.id)
+      if (resource !== undefined) {
+        const refs = resourceCredentialRefs(editor.kind, resource)
+        void releaseTemporaryCredentials(refs)
+        setCredentialDrafts(current => {
+          const next = { ...current }
+          for (const ref of refs) delete next[ref]
+          return next
+        })
+      }
+    }
     setDraft(persisted)
     setAdvanced(JSON.stringify(persisted, null, 2))
     setActiveEditor(null)
@@ -1134,16 +1189,6 @@ function PactFlowSettingsCard({
       })
     }
   }
-  const credentialRefsOf = (kind: PactFlowInfrastructureResourceKind, resource: InfrastructureResource): readonly string[] => {
-    if (kind === 'registry') {
-      const registry = resource as PactFlowRegistrySettings
-      return [registry.usernameCredentialRef, registry.passwordCredentialRef]
-        .filter((ref): ref is string => ref !== undefined)
-    }
-    if (kind === 'git-provider') return [(resource as PactFlowGitProviderSettings).tokenCredentialRef]
-    if (kind === 'model-connection') return [(resource as PactFlowModelConnectionSettings).apiKeyCredentialRef]
-    return []
-  }
   const saveResource = (kind: PactFlowInfrastructureResourceKind, resource: InfrastructureResource): void => {
     if (!canSaveResource(kind, resource.id) || savingId !== null) return
     const nextPersisted = replaceResource(persisted, kind, resource)
@@ -1161,7 +1206,7 @@ function PactFlowSettingsCard({
       nextDraft = replaceResource(nextPersisted, 'worker-pool', pool)
       nextActive = { kind: 'worker-pool', id: pool.id, mode: 'new' }
     }
-    const refs = credentialRefsOf(kind, resource)
+    const refs = resourceCredentialRefs(kind, resource)
     const writes = refs.map(ref => [ref, credentialDrafts[ref] ?? ''] as const)
       .filter((entry): entry is [string, string] => entry[1].trim() !== '')
     setSavingId(resource.id)
@@ -1182,6 +1227,7 @@ function PactFlowSettingsCard({
           for (const ref of refs) delete next[ref]
           return next
         })
+        void releaseTemporaryCredentials(refs)
       })
       .catch((error) => {
         const detail = error instanceof Error ? error.message : String(error)
@@ -1252,7 +1298,11 @@ function PactFlowSettingsCard({
   }
   const loadModels = (model: PactFlowModelConnectionSettings): void => {
     setModelDiscovery(current => ({ ...current, [model.id]: { busy: true, manual: false } }))
-    void discoverModels(model, credentialDrafts[model.apiKeyCredentialRef] ?? '').then(
+    const apiKey = credentialDrafts[model.apiKeyCredentialRef] ?? ''
+    const discoveryModel = apiKey.trim() === '' ? model : {
+      ...model, apiKeyCredentialRef: probeCredentialRef(model.apiKeyCredentialRef),
+    }
+    void discoverModels(discoveryModel, apiKey).then(
       (models) => {
         if (models.length === 0) throw new Error('模型服务返回空列表')
         setModelOptions(current => ({ ...current, [model.id]: models }))
@@ -1331,20 +1381,27 @@ function PactFlowSettingsCard({
       },
     }))
     const credentialWrites = credentialsForProbe(kind, id)
-    void Promise.all(credentialWrites.map(([ref, secret]) => setCredential(ref, secret)))
+    const temporaryWrites = credentialWrites.map(([ref, secret]) => [
+      probeCredentialRef(ref), secret,
+    ] as const)
+    const replacements = new Map(credentialWrites.map(([ref], index) => [ref, temporaryWrites[index]![0]]))
+    const probeDraft = saved
+      ? undefined
+      : replaceInfrastructureCredentialRefs(draftForProbe(kind, id), replacements)
+    void Promise.all(temporaryWrites.map(([ref, secret]) => setCredential(ref, secret)))
       .then(() => {
         if (credentialWrites.length === 0) return
         setTestLogs(current => ({
           ...current,
           [key]: {
-            ...current[key]!,
-            entries: [...current[key]!.entries, {
-              state: 'succeeded', name: '凭证准备', detail: '新凭证已写入 DSH Credentials，日志不包含原值',
-            }],
+              ...current[key]!,
+              entries: [...current[key]!.entries, {
+                state: 'succeeded', name: '凭证准备', detail: '新凭证已写入隔离的临时 Credential Ref，日志不包含原值',
+              }],
           },
         }))
       })
-      .then(() => probeInfrastructure(kind, id, saved ? undefined : draftForProbe(kind, id))).then(
+      .then(() => probeInfrastructure(kind, id, probeDraft)).then(
       result => {
         setProbingId(null)
         setTestLogs(current => ({
@@ -1369,7 +1426,7 @@ function PactFlowSettingsCard({
         if (kind !== 'cluster' && kind !== 'registry') {
           setTestedFingerprints(current => ({ ...current, [key]: resourceFingerprint(kind, id) }))
         }
-        const discoveryDraft = draftForProbe(kind, id)
+        const discoveryDraft = probeDraft ?? draftForProbe(kind, id)
         if (kind === 'cluster') {
           void listImagePullSecrets(id, discoveryDraft).then(
             (values) => {
