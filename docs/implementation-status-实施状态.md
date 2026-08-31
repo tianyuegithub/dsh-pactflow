@@ -9,7 +9,7 @@
 - 外部 Bundle：单一 Loader 身份交付 Host、Agent Preset、Client、Typert 和 Remote；临时 Profile 的 tarball 安装、配置展开、启动、卸载和无插件重启已通过。
 - 持久事实：0.2.1 写入 13 类带 `v: 1` 的外部 Session Event，并以 read-only 注册兼容 0.1.0 的 12 类词汇与 0.2.0 的 13 类词汇；5 个 Projection、十阶段与四个人工门禁、DAG revision CAS、Run claim/renew/settle、租约边界和第一终态获胜已通过回归测试。
 - 当前模式权威：`SessionHeader.agentPreset` 只表示创建时模式；项目发现、授权和冷恢复以 `agentPreset` Projection 的当前值为准，裸 Host 嵌入才回退到 Header。会话 Need/DAG/Run 仍由 Session Projection 持有；工作区级 Git 与 Agent 策略由插件自己的 `workspace-projects.json` 按稳定 `workspaceId` 持有，不进入 Settings。
-- 只读编排器：零脉 Preset 在每个真实 Agent Scope 上限制继承工具，只暴露 `read/read_image/glob/grep` 与受控 PactFlow 工具；`bash/pwsh/write/edit` 和模型侧 `pactflow_dispatch_local` 不进入编排器请求头。所有代码施工必须通过 `pactflow_dispatch_git` 或 `pactflow_dispatch_k3s` 进入隔离任务分支；普通 DSH 会话与 Worker 子作用域自行注册的施工工具不受影响。
+- 只读编排器：零脉 Preset 在每个真实 Agent Scope 上限制继承工具，只暴露 `read/read_image/glob/grep` 与受控 PactFlow 工具；`bash/pwsh/write/edit` 和模型侧 `pactflow_dispatch_local` 不进入编排器请求头，强行构造调用也由同 Agent 的执行前门禁返回中文引导。所有代码施工必须通过 `pactflow_dispatch_git` 或 `pactflow_dispatch_k3s` 进入隔离任务分支；普通 DSH 会话与 Worker 子作用域自行注册的施工工具不受影响。
 - 本地 Run 恢复：Host 继续只读兼容历史 `dispatchLocalNode()` 事件与冷恢复，但当前零脉 Preset 不再向模型暴露同工作区本地派发工具。Host 冷重启后不伪造重连只存在旧进程内存中的 `spawn/fork` Worker；非终态历史本地 Run 在租约内保留所有权，到期后幂等追加过期失败并将同 revision 节点恢复 `ready`。`pactflow_retry_node` 只允许无活动 Run 的 `failed/cancelled` 节点通过 revision CAS 恢复，旧 Run/claim/outcome/attempt 不覆盖，新派发创建 attempt+1。
 - Agent 评审门：`pactflow_record_review` 将 requirement/design/plan/code/verification 的 approved/rejected/changes-requested 决策写入当前 Need Session Event，并与 `pactflow_transition_need` 组成可持久、可审计的人工门禁链；不再存在 Host Remote 可用但 Agent 无法记录决策的断路。
 - Git worktree：DSH 通用 `SubagentStartRequest.cwd` capability 已在独立上游分支完成；零脉可绑定无密钥远端身份，从远端跟踪分支冻结 base commit，由 Host 生成任务分支与 DSH Home 下的 worktree，并只接受该分支上干净、可追溯的后代 commit。
@@ -58,7 +58,7 @@
 - 浏览器生命周期验收：9120 本地 UAT Profile 已真实完成 K3s 卡片“新增 → 测试日志成功 → 保存解锁 → 摘要收缩 → 编辑原值回显 → 修改后取消不污染 → 关闭再进入仍持久化 → 删除影响提示与二次确认 → 删除后重载为空”。测试前保存禁用、修改已测试字段后测试失效也已验证；磁盘 `settings.yaml` 最终恢复为 `clusters: []`。
 - Harbor 回归验收：真实 `datavdl/pactflow-worker` 通过完整测试并显示绿色联通状态，自动持久同步四个 Harness 模板；不再读取 Prometheus 等其它项目仓库。既有 `datavdl/` 配置自动规范化为 `datavdl`。关闭设置和重启 Host 后，绿色状态与模板仍恢复。
 - 模型发现验收：真实 Coding API 使用已保存 Credential 加载并去重为 130 个服务端模型，加上占位项和当前未返回的 `ark-code-latest` 共 132 个唯一下拉值；Anthropic Messages 不支持列表时显示原始兼容错误并出现“手动填写模型 ID”入口，取消编辑不污染保存配置。
-- Harness 状态回归：旧列表测试因没有 Worker Pool 误报红色；新合同将 Harness 镜像测试与模型/调度解耦，并使旧合同记录自动失效。Claude Code 真实创建临时 K3s Job、运行 `claude --version`、5.3 秒成功转绿且 Job 清理后集群无残留。
+- Harness 状态回归：旧列表测试因没有 Worker Pool 误报红色；新合同将 Harness 镜像测试与模型 API 解耦，并使旧合同记录自动失效。已加入执行资源池的 Harness 会按每条资源池路由分别使用对应 K3s 集群和镜像拉取密钥测试；未加入资源池时才对全部配置集群执行独立镜像测试。Claude Code 真实创建临时 K3s Job、运行 `claude --version`、5.3 秒成功转绿且 Job 清理后集群无残留。
 - Worker 调度验收：默认草稿自动选择 K3s 集群、三个具有兼容模型的 Harness 和唯一 Harbor 拉取 Secret；Claude Code 因缺少 Anthropic 模型明确禁用。资源图测试成功，草稿随后取消，未写入用户配置。
 - 工作区项目与视觉验收：9120 本地 UAT 通过现有侧栏 Slot 打开项目面板，真实列出 `data-governance`、Git/工作树状态和会话迁移候选。选定视觉方案实现为模块化 Agent 组合器，在 1440×1024 下生成 DSH/Codex/OpenCode 三个规格，无横向溢出、无浏览器 warning/error；重复 Harness/模型组合被拒绝，编辑回填成功。设计对比见根目录 `design-qa.md`，最终结果 `passed`。
 - Agent 数量回归：删除可编辑的“项目总并发”，项目可用 Worker 总量改为各 Agent Profile 数量自动求和；旧版持久字段仅保留模式兼容，不再形成额外调度闸门。超过全局执行资源池的瞬时任务由 Pool 统一排队。

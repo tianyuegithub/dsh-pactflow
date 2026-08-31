@@ -1324,42 +1324,75 @@ export class PactFlowService extends TypertRemoteService {
         if (template === undefined) throw new Error(`PactFlow Harness "${request.id}" is not configured`)
         if (!('registryId' in template)) throw new Error('legacy Harness template must be migrated before card testing')
         if (request.draft === undefined) {
-          const cluster = infrastructure.settings.clusters[0]
-          if (cluster === undefined) throw new Error('Harness image test requires a configured K3s cluster')
           const registry = infrastructure.registry(template.registryId)
-          const inspector = new PactFlowK3sWorker({
-            namespace: cluster.namespace, pollIntervalMs: cluster.pollIntervalMs,
-            imagePullSecret: 'pactflow-probe', templates: [],
-            ...cluster.kubeconfig === undefined ? {} : { kubeconfig: cluster.kubeconfig },
-            ...cluster.context === undefined ? {} : { context: cluster.context },
-          })
-          const pullSecrets = await inspector.listImagePullSecrets()
-          const poolSecret = infrastructure.settings.workerPools
-            .find(pool => pool.templateIds.includes(template.id))?.imagePullSecret
-          const imagePullSecret = poolSecret ?? registry.imagePullSecret
-            ?? (pullSecrets.length === 1 ? pullSecrets[0] : undefined)
-          if (imagePullSecret === undefined) {
-            throw new Error('Harness image test requires one unambiguous image-pull Secret')
+          const routes = infrastructure.harnessProbeRoutes(template.id)
+          const targets: { readonly id: string; readonly label: string; readonly config: PactFlowK3sConfig }[] = []
+          if (routes.length > 0) {
+            for (const route of routes) {
+              targets.push({
+                id: route.pool.id,
+                label: `${route.pool.displayName}/${route.pool.clusterId}`,
+                config: route.k3s,
+              })
+            }
+          } else {
+            for (const cluster of infrastructure.settings.clusters) {
+              const inspector = new PactFlowK3sWorker({
+                namespace: cluster.namespace, pollIntervalMs: cluster.pollIntervalMs,
+                imagePullSecret: 'pactflow-probe', templates: [],
+                ...cluster.kubeconfig === undefined ? {} : { kubeconfig: cluster.kubeconfig },
+                ...cluster.context === undefined ? {} : { context: cluster.context },
+              })
+              const pullSecrets = await inspector.listImagePullSecrets()
+              const imagePullSecret = registry.imagePullSecret
+                ?? (pullSecrets.length === 1 ? pullSecrets[0] : undefined)
+              if (imagePullSecret === undefined) {
+                throw new Error(`Harness image test for cluster "${cluster.id}" requires one unambiguous image-pull Secret`)
+              }
+              targets.push({
+                id: cluster.id,
+                label: cluster.displayName,
+                config: {
+                  namespace: cluster.namespace, pollIntervalMs: cluster.pollIntervalMs,
+                  imagePullSecret, templates: [],
+                  ...cluster.kubeconfig === undefined ? {} : { kubeconfig: cluster.kubeconfig },
+                  ...cluster.context === undefined ? {} : { context: cluster.context },
+                },
+              })
+            }
           }
-          const worker = new PactFlowK3sWorker({
-            namespace: cluster.namespace, pollIntervalMs: cluster.pollIntervalMs, imagePullSecret,
-            templates: [{
-              id: template.id, harness: template.harness,
-              apiMode: PACTFLOW_HARNESS_API_MODE[template.harness],
-              image: pactFlowImageOf(registry, template), model: 'image-probe',
-              baseUrl: 'http://127.0.0.1', modelSecretName: 'pactflow-image-probe',
-              cpuRequest: template.cpuRequest, memoryRequest: template.memoryRequest,
-              cpuLimit: template.cpuLimit, memoryLimit: template.memoryLimit,
-            }],
-            ...cluster.kubeconfig === undefined ? {} : { kubeconfig: cluster.kubeconfig },
-            ...cluster.context === undefined ? {} : { context: cluster.context },
-          })
-          await worker.preflight()
-          const probe = await worker.probeImage(template.id, 180_000)
-          stages.push(...probe.stages.map(stage => ({
-            name: `harness-${stage.name}`, state: stage.state, detail: stage.detail,
-          })))
-          if (!probe.success) throw new Error('Harness image Pod probe failed')
+          if (targets.length === 0) throw new Error('Harness image test requires a configured K3s cluster')
+          let failed = false
+          for (const target of targets) {
+            const worker = new PactFlowK3sWorker({
+              ...target.config,
+              templates: [{
+                id: template.id, harness: template.harness,
+                apiMode: PACTFLOW_HARNESS_API_MODE[template.harness],
+                image: pactFlowImageOf(registry, template), model: 'image-probe',
+                baseUrl: 'http://127.0.0.1', modelSecretName: 'pactflow-image-probe',
+                cpuRequest: template.cpuRequest, memoryRequest: template.memoryRequest,
+                cpuLimit: template.cpuLimit, memoryLimit: template.memoryLimit,
+              }],
+            })
+            try {
+              await worker.preflight()
+              const probe = await worker.probeImage(template.id, 180_000)
+              stages.push(...probe.stages.map(stage => ({
+                name: `harness-${target.id}-${stage.name}`,
+                state: stage.state,
+                detail: `${target.label}: ${stage.detail}`,
+              })))
+              failed ||= !probe.success
+            } catch (error) {
+              failed = true
+              stages.push({
+                name: `harness-${target.id}-connection`, state: 'failed',
+                detail: `${target.label}: ${this.boundedOutcome(error)}`,
+              })
+            }
+          }
+          if (failed) throw new Error('Harness image Pod probe failed on one or more execution routes')
         } else {
           stages.push({
             name: 'harness-profile', state: 'succeeded',

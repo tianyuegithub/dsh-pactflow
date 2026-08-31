@@ -163,6 +163,12 @@ export class PactFlowInfrastructure {
     return pool
   }
 
+  harnessProbeRoutes(templateId: string): readonly PactFlowResolvedPool[] {
+    const template = this.settings.templates.find(candidate => candidate.id === templateId)
+    if (template === undefined) throw new Error(`PactFlow Harness "${templateId}" is not configured`)
+    return [...this.resolved.values()].filter(route => route.pool.templateIds.includes(templateId))
+  }
+
   resolveExecution(
     poolId: string | undefined,
     templateId: string,

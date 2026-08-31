@@ -21,24 +21,40 @@ const PHASES = [
 const REVIEW_KINDS = ['requirement', 'design', 'plan', 'verification', 'code'] as const
 const REVIEW_DECISIONS = ['approved', 'rejected', 'changes-requested'] as const
 const ORCHESTRATOR_DIRECT_TOOLS = ['bash', 'pwsh', 'write', 'edit'] as const
+const ORCHESTRATOR_FORBIDDEN_CALLS = new Set<string>([
+  ...ORCHESTRATOR_DIRECT_TOOLS,
+  'pactflow_dispatch_local',
+])
 
 /** Register PactFlow-only tools into the preset's standing Agent scope. */
 export function apply(ctx: Context): void {
-  const restrictions = new Map<string, () => void>()
+  const policies = new Map<string, () => void>()
   ctx.on('agent/session-start', ({ agent }) => {
-    if (restrictions.has(agent.id)) return
+    if (policies.has(agent.id)) return
     const visible = new Set(agent.ctx.tools.schemas(agent).map(tool => tool.name))
     const deny = ORCHESTRATOR_DIRECT_TOOLS.filter(tool => visible.has(tool))
-    if (deny.length === 0) return
-    restrictions.set(agent.id, agent.ctx.tools.restrict({ deny }))
+    const disposeRestriction = deny.length === 0
+      ? () => {}
+      : agent.ctx.tools.restrict({ deny })
+    const disposeGate = agent.ctx.on('tools/pre-execute', (exec, next) => {
+      if (exec.agent !== agent || !ORCHESTRATOR_FORBIDDEN_CALLS.has(exec.name)) return next()
+      return Promise.resolve({
+        kind: 'deny',
+        reason: `零脉编排器禁止直接调用 ${exec.name}；请通过 pactflow_dispatch_git 或 pactflow_dispatch_k3s 在隔离任务分支执行。`,
+      })
+    })
+    policies.set(agent.id, () => {
+      disposeGate()
+      disposeRestriction()
+    })
   })
   ctx.on('agent/disposed', ({ agent }) => {
-    restrictions.get(agent.id)?.()
-    restrictions.delete(agent.id)
+    policies.get(agent.id)?.()
+    policies.delete(agent.id)
   })
   ctx.effect(() => () => {
-    for (const dispose of restrictions.values()) dispose()
-    restrictions.clear()
+    for (const dispose of policies.values()) dispose()
+    policies.clear()
   })
 
   ctx.tools.register(defineTool({

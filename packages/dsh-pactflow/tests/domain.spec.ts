@@ -827,6 +827,10 @@ describe('PactFlow domain foundation', () => {
       signal: new AbortController().signal,
     })
     expect(blocked).toMatchObject({ isError: true })
+    expect(blocked.content[0]).toMatchObject({
+      type: 'text',
+      text: 'Error: 零脉编排器禁止直接调用 bash；请通过 pactflow_dispatch_git 或 pactflow_dispatch_k3s 在隔离任务分支执行。',
+    })
 
     const ordinarySession = ctx.sessions.create(SessionId('ordinary-agent'), {
       meta: { agentPreset: 'standard' },

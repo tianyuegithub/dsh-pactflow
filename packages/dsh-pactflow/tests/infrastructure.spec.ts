@@ -118,6 +118,32 @@ describe('PactFlow infrastructure resources', () => {
     })
   })
 
+  it('resolves every Harness image-test route without mixing clusters and pull Secrets', () => {
+    const base = settings()
+    const infrastructure = new PactFlowInfrastructure(settings({
+      clusters: [
+        base.clusters[0]!,
+        { id: 'backup', displayName: 'Backup K3s', namespace: 'pactflow-backup', pollIntervalMs: 2_000 },
+      ],
+      workerPools: [
+        { ...base.workerPools[0]!, imagePullSecret: 'home-pull' },
+        {
+          id: 'backup', displayName: 'Backup', clusterId: 'backup', registryId: 'harbor',
+          templateIds: ['claude'], maxConcurrency: 1, queuePolicy: 'fifo', imagePullSecret: 'backup-pull',
+        },
+      ],
+    }))
+
+    expect(infrastructure.harnessProbeRoutes('claude').map(route => ({
+      poolId: route.pool.id,
+      namespace: route.k3s.namespace,
+      imagePullSecret: route.k3s.imagePullSecret,
+    }))).toEqual([
+      { poolId: 'default', namespace: 'pactflow', imagePullSecret: 'home-pull' },
+      { poolId: 'backup', namespace: 'pactflow-backup', imagePullSecret: 'backup-pull' },
+    ])
+  })
+
   it('reports an unscheduled Harness instead of an empty Worker Pool id', () => {
     const codex = {
       ...template, id: 'codex', harness: 'codex' as const, apiMode: 'openai-responses' as const,
