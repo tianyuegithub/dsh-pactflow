@@ -1,5 +1,14 @@
 # DSH 零脉实施状态
 
+## 2026-09-04 PactFlow 安全与可靠性加固（执行中）
+
+- 当前分支：`codex/pactflow-hardening`（独立 Worktree `/Users/ty/Codes/dsh-pactflow-hardening`）；主目录 `main` 未修改。
+- 当前里程碑：阶段一至三源码实现已完成并提交；DSH 核心、Hermes 与旧 `data-governance` 工作区未改动。
+- 已落地：DSH Approval（审批）授权评审与旧事件只读门禁、Workspace Validation Profile（验证配置）/CAS（原子修订写入）、K3s nonce/spec/claim/Job UID 绑定与 Job-owned Secret（任务所有短命密钥）、统一双容量 FIFO（先进先出）准入、取消/重启恢复、cleanup ledger（清理账本）与显式重试、Git tip/任务集合校验、事件 fold schema（折叠模式）校验、Overlay generation/Abort（代际/中止）保护、Harbor/Gitea 分页和反向代理路径、语义探针、Web E2E scaffold 修复与 `check:release`。
+- 最后已验证提交：当前分支 `HEAD`（`加固 PactFlow 安全边界与运行可靠性`）。最近验证：`pnpm run check:release` 通过（`check`、14 个测试文件/71 项测试、包产物、Web suite 2 项测试、Profile 安装/启动/重复安装/卸载/清洁启动）。
+- 当前 blocker：尚未执行真实 K3s/Git 清理矩阵和主目录收口；不发布 npm、不删除历史 34 个无所有者 Pod，除非另行授权。
+- 下一动作：若要进行真实 K3s/Git 清理矩阵或同步 `main`，需在具备对应凭证和运行环境后单独授权；当前分支可作为恢复 carrier。
+
 - 当前里程碑：6 增量 —— 资源化基础设施与逻辑 Worker Pool
 - 状态：`LOCAL_UAT_PASSED（本地用户验收通过）`；代码、自动回归、双远端推送和 9120 冷恢复验收已通过，未打包、未发布
 - 最后已验证提交：DSH 通用能力分支 `aa888ad0fb`；Bundle 功能提交 `28defce0967b19a5fbac965d97817b78fc0c5ca8`

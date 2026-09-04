@@ -275,3 +275,36 @@ UI 包含：
 1. DSH 通用前置分支通过上游评审、合并并进入受支持发行版；插件不得要求用户使用源码 worktree。
 2. npm 发布与包名安装已完成：0.2.0 的真实用户验收发现 Typert 404 并 deprecate；0.2.1 使用裸 package identity 修复 Host Remote 注册，在全新 Profile 中验证安装、真实 health、启动、卸载后 404 与清洁启动。
 3. 插件正式 Gitea 远端、0.2.1 预发布资产、真实受保护 Pull Request 创建/合并、默认分支更新和临时资源清理均已完成；它们不再是发布 blocker。
+
+## 14. 安全与可靠性加固合同（0.3.0 源码增量）
+
+本节是当前 `codex/pactflow-hardening` 增量的唯一实施合同。保持 DSH 核心、Hermes 和旧 `data-governance` 工作区不变；仓库未初始化 OpenSpec，本节按原生代码变更执行。
+
+### 14.1 阶段一：安全权限边界
+
+- `pactflow_record_review` 必须经过 DSH `Approval` 服务；只有 `allowed-once` 才能追加授权评审。授权评审事件携带 `approvalRequestId`、Need revision、证据摘要和 `source: dsh-approval`。旧 0.1/0.2 `approved` 事件只读展示，不解锁新门禁。
+- 无授权上下文的 `recordReview` 不作为公开 Remote；Agent 只能发起审批请求，Host 只接受同一 Agent/Need/revision 的已授权结果。
+- Git 验证使用用户拥有的 `ValidationProfile` ID。Agent 不再提交任意命令字符串；Host 只运行已登记 Profile，并使用最小环境白名单。历史 raw `validationCommands` 标记为 legacy-untrusted，迁移前不得 Closing。
+- K3s Run Spec 增加 run nonce、Spec digest、claim token hash 和 Job UID；结果必须匹配 Job/Pod owner、镜像 digest、Spec digest、branch、commit 和 claim。prompt 不再写入 ConfigMap。
+
+### 14.2 阶段二：持久化、调度与生命周期
+
+- Producer 版本升至 `0.3.0`，继续只读注册 0.1/0.2；新增 `pactflow/run-queued`、`pactflow/run-queue-cancelled` 和 `pactflow/cleanup-recorded`，所有新增 payload 使用 `v: 1`。
+- `WorkspaceProjectStore` 提供原子 `putIfRevision(expected, next)`；迁移、Workspace Git、Worker 策略和远程仓库写入均必须使用 CAS。
+- 项目配额与全局 Worker Pool 由统一可取消调度器管理。Agent `exec.signal` 必须传入内部派发路径；队列有上限、严格 FIFO、幂等释放，并在重启时恢复项目及全局活动占用。
+- Closing 清理以持久 cleanup ledger（清理账本）表示，支持 `pending/failed/succeeded`、attempt、错误摘要和下次重试时间；Need 可为 `deployed + cleanup-pending`，但不得丢失清理责任。
+- K3s 恢复对临时 Kubernetes/Git/API 错误进行有界指数退避；取消采用子资源先删、Job 后删，404 幂等，非 404 错误不得吞掉。
+- Closing 合并前接收并验证 `remoteRef + expectedCommit`，拒绝 force-push、任务集合变化和未经重新验证的旧 integration branch。
+
+### 14.3 阶段三：Schema、Web 与发布验证
+
+- 抽取单一事件/Settings Schema；Projection fold 前解析 payload，校验 Session/Need/Node 归属、revision 单调性和状态迁移；保留 checkpoint/wire 校验。
+- Overlay 所有异步操作绑定 Session ID 和 generation，并在关闭时取消；过期响应不得覆盖当前状态。Client 按 Overlay、资源卡、项目配置和 Remote adapter 拆分，保持既有 Slot/Theme/Workspace 合同。
+- Harbor/Gitea 列表支持有界分页、去重和 path-preserving URL join；Model/API/Harness 探针必须验证响应语义，HTTP 200 空响应不得标绿。
+- 修复 Web E2E scaffold 的本地 `dsh-pactflow` 安装/链接，新增串行 `check:release`，强制执行 `check`、`test:web` 和 `verify:profile`；suite 失败或意外跳过均失败关闭。
+
+### 14.4 兼容、回滚与验收
+
+- 源码 Producer 使用 `0.3.0`，保留 0.1/0.2 只读恢复；旧批准不解锁新门禁，旧 raw 验证命令需用户迁移。
+- 每阶段一个可独立验收提交，先在 `codex/pactflow-hardening` 验证，再由 Git owner 收口；不发布 npm，不修改 DSH 上游源码。
+- 阶段验收必须覆盖：未授权评审、命令注入/环境泄漏、伪造 K3s 结果、清理重试、Workspace 并发 CAS、队列取消/重启恢复、损坏事件、过期 Web 响应和完整 Web E2E。

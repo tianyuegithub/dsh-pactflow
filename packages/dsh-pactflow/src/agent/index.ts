@@ -1,7 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session/types'
+import type { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import type {} from '../index.ts'
+import { pactFlowReviewEvidenceDigest } from '../review-authorization.ts'
 
 export const name = 'pactflow-agent-tools'
 export const inject = ['tools', 'pactflow']
@@ -72,18 +74,10 @@ export function apply(ctx: Context): void {
       gitea_repo: { type: 'string', description: 'Gitea repository name.' },
       gitea_token_credential_ref: { type: 'string', description: 'DSH Credentials reference containing a Gitea API token.' },
       gitea_username: { type: 'string', description: 'Optional Gitea account name when the Credential stores a password instead of an API token.' },
-      validation_commands: {
+      validation_profile_ids: {
         type: 'array',
-        description: 'Host-side validation commands executed without a shell after the Worker commits and before push.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            command: { type: 'string', required: true },
-            args: { type: 'array', required: true, items: { type: 'string' } },
-            timeout_ms: { type: 'integer', required: true },
-          },
-        },
+        description: 'User-owned validation profile IDs; the Host resolves commands and never accepts command text from the model.',
+        items: { type: 'string' },
       },
     },
     output: OUTPUT,
@@ -102,13 +96,7 @@ export function apply(ctx: Context): void {
           ? {}
           : { giteaTokenCredentialRef: args.gitea_token_credential_ref },
         ...args.gitea_username === undefined ? {} : { giteaUsername: args.gitea_username },
-        ...args.validation_commands === undefined ? {} : {
-          validationCommands: args.validation_commands.map(command => ({
-            command: command.command,
-            args: command.args,
-            timeoutMs: command.timeout_ms,
-          })),
-        },
+        ...args.validation_profile_ids === undefined ? {} : { validationProfileIds: args.validation_profile_ids },
       }).then(jsonObject)
     },
   }))
@@ -195,16 +183,55 @@ export function apply(ctx: Context): void {
     description: 'Record one explicit human review decision for a Need. Use the current Need id and a truthful evidence note before a review-gated phase transition.',
     parameters: {
       need_id: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true, description: 'Current Need revision from pactflow_view.' },
       kind: { type: 'string', required: true, enum: REVIEW_KINDS },
       decision: { type: 'string', required: true, enum: REVIEW_DECISIONS },
       note: { type: 'string', required: true, description: 'Evidence-backed review note; never a credential or raw secret.' },
     },
     output: OUTPUT,
-    execute(args, exec) {
-      return Promise.resolve(jsonObject(ctx.pactflow.recordReview(
-        requireSessionId(exec.agent?.session.id),
-        { needId: args.need_id, kind: args.kind, decision: args.decision, note: args.note },
-      )))
+    async execute(args, exec) {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('PactFlow review approval requires a calling Agent')
+      const sessionId = requireSessionId(agent.session.id)
+      const note = args.note.trim()
+      if (note.length === 0) throw new Error('PactFlow review note must be non-empty')
+      const evidenceDigest = pactFlowReviewEvidenceDigest(
+        sessionId, args.need_id, args.expected_revision, args.kind, args.decision, note,
+      )
+      const approval = ctx.get('approval') as ApprovalService | undefined
+      if (approval === undefined) throw new Error('PactFlow review approval requires the DSH Approval service')
+      const outcome = await approval.request({
+        agent,
+        toolName: 'pactflow_record_review',
+        callId: exec.callId,
+        reason: `Approve PactFlow ${args.kind} review for Need ${args.need_id} at revision ${String(args.expected_revision)} (evidence ${evidenceDigest})`,
+        signal: exec.signal,
+      })
+      if (outcome !== 'allowed-once') throw new Error(`PactFlow review approval was ${outcome}`)
+      const asked = agent.session.events.findLast(event => event.type === 'approval/asked'
+        && event.data.callId === exec.callId && event.data.reason?.includes(evidenceDigest))
+      if (asked === undefined || asked.type !== 'approval/asked') {
+        throw new Error('PactFlow review approval audit record is missing')
+      }
+      return jsonObject(ctx.pactflow.recordReview(sessionId, {
+        needId: args.need_id, needRevision: args.expected_revision,
+        kind: args.kind, decision: args.decision, note,
+        approvalRequestId: String(asked.data.id), evidenceDigest, source: 'dsh-approval',
+      }))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'pactflow_retry_cleanup',
+    description: 'Retry one persisted K3s, Git, or closing cleanup responsibility and return its durable status.',
+    parameters: {
+      cleanup_id: { type: 'string', required: true },
+    },
+    output: OUTPUT,
+    async execute(args, exec) {
+      return jsonObject(await ctx.pactflow.retryCleanup(requireSessionId(exec.agent?.session.id), {
+        cleanupId: args.cleanup_id,
+      }))
     },
   }))
 
@@ -265,13 +292,13 @@ export function apply(ctx: Context): void {
     output: OUTPUT,
     timeoutMs: 86_400_000,
     async execute(args, exec) {
-      return jsonObject(await ctx.pactflow.dispatchGitNode(requireSessionId(exec.agent?.session.id), {
+      return jsonObject(await ctx.pactflow.dispatchGitNodeWithSignal(requireSessionId(exec.agent?.session.id), {
         nodeId: args.node_id,
         expectedRevision: args.expected_revision,
         provider: args.provider,
         prompt: args.prompt,
         leaseDurationMs: args.lease_duration_ms,
-      }))
+      }, exec.signal))
     },
   }))
 
@@ -290,7 +317,7 @@ export function apply(ctx: Context): void {
     output: OUTPUT,
     timeoutMs: 86_400_000,
     async execute(args, exec) {
-      return jsonObject(await ctx.pactflow.dispatchK3sNode(requireSessionId(exec.agent?.session.id), {
+      return jsonObject(await ctx.pactflow.dispatchK3sNodeWithSignal(requireSessionId(exec.agent?.session.id), {
         nodeId: args.node_id,
         expectedRevision: args.expected_revision,
         templateId: args.template_id,
@@ -298,7 +325,7 @@ export function apply(ctx: Context): void {
         ...(args.model_connection_id === undefined ? {} : { modelConnectionId: args.model_connection_id }),
         prompt: args.prompt,
         leaseDurationMs: args.lease_duration_ms,
-      }))
+      }, exec.signal))
     },
   }))
 

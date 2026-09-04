@@ -123,6 +123,7 @@
     "@deepseek-ai/dsh-tool-pwsh": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-tools": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-typert-protocol": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-user-approval": "0.1.2-alpha.1",
     "react": "^18.3.1"
   },
   "peerDependenciesMeta": {
@@ -217,6 +218,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-approval": {
       "optional": true
     },
     "react": {

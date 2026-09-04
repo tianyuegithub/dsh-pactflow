@@ -10,6 +10,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it } from 'vitest'
 import PactFlowService from '../lib/index.js'
 import { createGitFixture } from './git-fixture.ts'
+import { recordAuthorizedReview } from './review-fixture.ts'
 
 describe('PactFlow Gitea closing', () => {
   it('merges verified task refs through a protected PR and records deployment', async () => {
@@ -141,8 +142,8 @@ describe('PactFlow Gitea closing', () => {
       let current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: need.revision, to: 'discussion',
       })
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'requirement', decision: 'approved', note: 'approved',
+      recordAuthorizedReview(ctx.pactflow, session, { ...need, revision: current.revision }, {
+        kind: 'requirement', decision: 'approved', note: 'approved',
       })
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'confirmed',
@@ -150,22 +151,22 @@ describe('PactFlow Gitea closing', () => {
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'design',
       })
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'design', decision: 'approved', note: 'approved',
+      recordAuthorizedReview(ctx.pactflow, session, { ...need, revision: current.revision }, {
+        kind: 'design', decision: 'approved', note: 'approved',
       })
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'planning',
       })
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'plan', decision: 'approved', note: 'approved',
+      recordAuthorizedReview(ctx.pactflow, session, { ...need, revision: current.revision }, {
+        kind: 'plan', decision: 'approved', note: 'approved',
       })
       for (const phase of ['executing', 'code_review', 'verification'] as const) {
         current = ctx.pactflow.transitionNeed(session.id, {
           needId: need.id, expectedRevision: current.revision, to: phase,
         })
       }
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'verification', decision: 'approved', note: 'approved',
+      recordAuthorizedReview(ctx.pactflow, session, { ...need, revision: current.revision }, {
+        kind: 'verification', decision: 'approved', note: 'approved',
       })
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'closing',

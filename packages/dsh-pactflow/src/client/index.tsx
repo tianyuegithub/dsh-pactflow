@@ -179,6 +179,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 interface OverlayState {
   readonly open: boolean
   readonly sessionId: string | null
+  /** Monotonically increases whenever this root-scoped overlay changes owner. */
+  readonly generation: number
   readonly phase: 'idle' | 'loading' | 'ready' | 'failed'
   readonly health: PactFlowHealth | null
   readonly snapshot: PactFlowSnapshot | null
@@ -195,6 +197,7 @@ interface OverlayState {
 const overlay = createSnapshotStore<OverlayState>({
   open: false,
   sessionId: null,
+  generation: 0,
   phase: 'idle',
   health: null,
   snapshot: null,
@@ -297,7 +300,8 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
       type="button"
       onClick={() => {
         overlay.set({
-          open: true, sessionId, phase: 'idle', health: null, snapshot: null, error: null,
+          open: true, sessionId, generation: overlay.getSnapshot().generation + 1,
+          phase: 'idle', health: null, snapshot: null, error: null,
           templates: [], modelConnections: [], workerPools: [], probingTemplateId: null, probe: null,
           giteaStatus: null, workspaceProject: null,
         })
@@ -312,22 +316,52 @@ function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderActionProps) 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
 function PactFlowOverlay({ load, probeApi, probeHarnessImage, verifyGitea, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
+  const activeRequests = useRef(new Set<AbortController>())
+
+  const isCurrent = (sessionId: string, generation: number): boolean => {
+    const current = overlay.getSnapshot()
+    return current.open && current.sessionId === sessionId && current.generation === generation
+  }
+
+  const abortOutstanding = (): void => {
+    for (const controller of activeRequests.current) controller.abort()
+    activeRequests.current.clear()
+  }
+
+  const startRequest = <T,>(
+    request: () => Promise<T>,
+  ): Promise<T> => {
+    const controller = new AbortController()
+    activeRequests.current.add(controller)
+    const aborted = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener('abort', () => reject(new DOMException('Overlay request cancelled', 'AbortError')), { once: true })
+    })
+    return Promise.race([Promise.resolve().then(request), aborted])
+      .finally(() => { activeRequests.current.delete(controller) })
+  }
 
   useEffect(() => {
     if (!state.open || state.phase !== 'idle') return
     if (state.sessionId === null) return
+    const { sessionId, generation } = state
     overlay.set({ ...state, phase: 'loading', error: null })
-    void load(state.sessionId).then(
-      value => { overlay.set({ ...overlay.getSnapshot(), phase: 'ready', ...value }) },
+    void startRequest(() => load(sessionId)).then(
+      value => {
+        if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), phase: 'ready', ...value })
+      },
       error => {
-        overlay.set({
-          ...overlay.getSnapshot(),
-          phase: 'failed',
-          error: error instanceof Error ? error.message : String(error),
-        })
+        if (isCurrent(sessionId, generation) && !(error instanceof DOMException && error.name === 'AbortError')) {
+          overlay.set({
+            ...overlay.getSnapshot(),
+            phase: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
       },
     )
-  }, [load, state])
+  }, [load, state.open, state.sessionId, state.generation])
+
+  useEffect(() => () => { abortOutstanding() }, [])
 
   if (!state.open) return null
   return (
@@ -340,7 +374,11 @@ function PactFlowOverlay({ load, probeApi, probeHarnessImage, verifyGitea, t }: 
           </div>
           <button
             type="button"
-            onClick={() => { overlay.set({ ...overlay.getSnapshot(), open: false }) }}
+            onClick={() => {
+              abortOutstanding()
+              const current = overlay.getSnapshot()
+              overlay.set({ ...current, open: false, generation: current.generation + 1 })
+            }}
             style={buttonStyle}
           >
             {t('close')}
@@ -375,34 +413,53 @@ function PactFlowOverlay({ load, probeApi, probeHarnessImage, verifyGitea, t }: 
               workerPools={state.workerPools}
               probingTemplateId={state.probingTemplateId}
               onProbe={(templateId) => {
+                if (state.sessionId === null) return
+                const { sessionId, generation } = state
                 overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null, error: null })
-                void probeHarnessImage(templateId).then(
-                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe, error: null }),
-                  error => overlay.set({
-                    ...overlay.getSnapshot(), probingTemplateId: null,
-                    error: error instanceof Error ? error.message : String(error),
-                  }),
+                void startRequest(() => probeHarnessImage(templateId)).then(
+                  probe => {
+                    if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe, error: null })
+                  },
+                  error => {
+                    if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
+                    overlay.set({
+                      ...overlay.getSnapshot(), probingTemplateId: null,
+                      error: error instanceof Error ? error.message : String(error),
+                    })
+                  },
                 )
               }}
               onApiProbe={(templateId, modelConnectionId) => {
+                if (state.sessionId === null) return
+                const { sessionId, generation } = state
                 overlay.set({ ...overlay.getSnapshot(), probingTemplateId: templateId, probe: null, error: null })
-                void probeApi(templateId, modelConnectionId, 'say hi to me', 180_000).then(
-                  probe => overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe, error: null }),
-                  error => overlay.set({
-                    ...overlay.getSnapshot(), probingTemplateId: null,
-                    error: error instanceof Error ? error.message : String(error),
-                  }),
+                void startRequest(() => probeApi(templateId, modelConnectionId, 'say hi to me', 180_000)).then(
+                  probe => {
+                    if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), probingTemplateId: null, probe, error: null })
+                  },
+                  error => {
+                    if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
+                    overlay.set({
+                      ...overlay.getSnapshot(), probingTemplateId: null,
+                      error: error instanceof Error ? error.message : String(error),
+                    })
+                  },
                 )
               }}
               giteaStatus={state.giteaStatus}
               onVerifyGitea={() => {
                 if (state.sessionId === null) return
-                void verifyGitea(state.sessionId).then(
-                  giteaStatus => overlay.set({ ...overlay.getSnapshot(), giteaStatus }),
-                  error => overlay.set({
-                    ...overlay.getSnapshot(),
-                    error: error instanceof Error ? error.message : String(error),
-                  }),
+                const { sessionId, generation } = state
+                void startRequest(() => verifyGitea(sessionId)).then(
+                  giteaStatus => {
+                    if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), giteaStatus })
+                  },
+                  error => {
+                    if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
+                    overlay.set({
+                      ...overlay.getSnapshot(), error: error instanceof Error ? error.message : String(error),
+                    })
+                  },
                 )
               }}
               t={t}
@@ -1949,11 +2006,16 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!templates.ok) throw new Error(templates.error.message)
         if (!modelConnections.ok) throw new Error(modelConnections.error.message)
         if (!workerPools.ok) throw new Error(workerPools.error.message)
-        if (!workspaceProject.ok) throw new Error(workspaceProject.error.message)
+        // A persisted session remains inspectable after cold restore. The
+        // project mapping is live-session-only, so absence is distinct from a
+        // failed snapshot and is rendered as the existing empty state.
+        if (!workspaceProject.ok && !workspaceProject.error.message.includes('is not live')) {
+          throw new Error(workspaceProject.error.message)
+        }
         return {
           health: health.value, snapshot: snapshot.value,
           templates: templates.value, modelConnections: modelConnections.value, workerPools: workerPools.value,
-          workspaceProject: workspaceProject.value,
+          workspaceProject: workspaceProject.ok ? workspaceProject.value : null,
         }
       },
       probeHarnessImage: async (templateId) => {

@@ -1,6 +1,7 @@
 /** Minimal Gitea 1.22 API client for repository and branch-protection admission. */
 
 import type { PactFlowGiteaBinding, PactFlowGiteaStatus } from './types.ts'
+import { joinUrlPath } from './infrastructure-probe.ts'
 
 interface RepositoryResponse {
   readonly full_name?: unknown
@@ -57,8 +58,8 @@ export class PactFlowGiteaClient {
     input: { readonly owner: string; readonly repo: string; readonly private: boolean; readonly defaultBranch: string },
   ): Promise<PactFlowCreatedGiteaRepository> {
     const endpoint = username !== undefined && input.owner === username
-      ? `${baseUrl.replace(/\/+$/, '')}/api/v1/user/repos`
-      : `${baseUrl.replace(/\/+$/, '')}/api/v1/orgs/${encodeURIComponent(input.owner)}/repos`
+      ? joinUrlPath(baseUrl, '/api/v1/user/repos')
+      : joinUrlPath(baseUrl, `/api/v1/orgs/${encodeURIComponent(input.owner)}/repos`)
     let response: Response
     try {
       response = await fetch(endpoint, {
@@ -86,14 +87,17 @@ export class PactFlowGiteaClient {
       throw new GiteaRequestError(response.status, detail)
     }
     const repository = await response.json() as RepositoryResponse
-    if (repository.full_name !== `${input.owner}/${input.repo}` || typeof repository.clone_url !== 'string'
+    if (repository.full_name !== `${input.owner}/${input.repo}` || repository.default_branch !== input.defaultBranch
+      || typeof repository.clone_url !== 'string'
       || typeof repository.default_branch !== 'string' || typeof repository.private !== 'boolean') {
       throw new Error('PactFlow Gitea create repository response is invalid')
     }
+    const cloneUrl = credentialFreeCloneUrl(repository.clone_url)
+    const sshUrl = typeof repository.ssh_url === 'string' ? credentialFreeCloneUrl(repository.ssh_url, true) : undefined
     return {
-      fullName: repository.full_name, cloneUrl: repository.clone_url,
+      fullName: repository.full_name, cloneUrl,
       defaultBranch: repository.default_branch, private: repository.private,
-      ...typeof repository.ssh_url === 'string' ? { sshUrl: repository.ssh_url } : {},
+      ...(sshUrl === undefined ? {} : { sshUrl }),
     }
   }
 
@@ -149,8 +153,21 @@ export class PactFlowGiteaClient {
     head: string,
     base: string,
   ): Promise<PactFlowGiteaPullRequest | undefined> {
-    const responses = await this.request<PullRequestResponse[]>(binding, token, '/pulls?state=all&limit=50')
-    const match = responses.find(candidate => candidate.head?.ref === head && candidate.base?.ref === base)
+    const responses: PullRequestResponse[] = []
+    for (let page = 1; page <= 20; page += 1) {
+      const batch = await this.request<PullRequestResponse[]>(
+        binding, token, `/pulls?state=all&limit=50&page=${String(page)}`,
+      )
+      if (!Array.isArray(batch)) throw new Error('PactFlow Gitea pull request response is not an array')
+      responses.push(...batch)
+      if (batch.length < 50) break
+      if (page === 20) throw new Error('PactFlow Gitea pull request list exceeded the maximum page count')
+    }
+    const unique = new Map<number, PullRequestResponse>()
+    for (const candidate of responses) {
+      if (typeof candidate.number === 'number' && Number.isSafeInteger(candidate.number)) unique.set(candidate.number, candidate)
+    }
+    const match = [...unique.values()].find(candidate => candidate.head?.ref === head && candidate.base?.ref === base)
     return match === undefined ? undefined : this.pullRequest(match)
   }
 
@@ -206,7 +223,7 @@ export class PactFlowGiteaClient {
     const repo = encodeURIComponent(binding.repo)
     let response: Response
     try {
-      response = await fetch(`${binding.baseUrl}/api/v1/repos/${owner}/${repo}${suffix}`, {
+      response = await fetch(joinUrlPath(binding.baseUrl, `/api/v1/repos/${owner}/${repo}${suffix}`), {
         method: options.method ?? 'GET',
         headers: {
           accept: 'application/json',
@@ -252,4 +269,14 @@ export class PactFlowGiteaClient {
         : {},
     }
   }
+}
+
+function credentialFreeCloneUrl(value: string, ssh = false): string {
+  let parsed: URL
+  try { parsed = new URL(value) } catch { throw new Error('PactFlow Gitea clone URL is invalid') }
+  if ((!ssh && !['http:', 'https:'].includes(parsed.protocol)) || (ssh && parsed.protocol !== 'ssh:')
+    || (!ssh && parsed.username !== '') || parsed.password !== '' || parsed.search !== '' || parsed.hash !== '') {
+    throw new Error('PactFlow Gitea clone URL must be credential-free')
+  }
+  return parsed.toString().replace(/\/$/, '')
 }

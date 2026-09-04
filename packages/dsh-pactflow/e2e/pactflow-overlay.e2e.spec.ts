@@ -1,5 +1,7 @@
 import { fileURLToPath } from 'node:url'
-import { readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -12,6 +14,25 @@ import { PACTFLOW_EVENT_TYPES_V0_1 } from '../src/domain.ts'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SEED_ID = 'pactflow-overlay-e2e'
+
+/**
+ * The scaffold intentionally excludes a selected layer package from its
+ * profile-local fallback. This wrapper makes PactFlow a dependency instead,
+ * preserving the real bare-package identity required by Host Remote routes.
+ */
+async function localBundleAnchor(): Promise<{ readonly directory: string, readonly anchorPath: string }> {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-pactflow-overlay-patch-'))
+  const modules = join(directory, 'node_modules')
+  await mkdir(modules, { recursive: true })
+  await symlink(PACKAGE_ROOT, join(modules, 'dsh-pactflow'), 'dir')
+  await writeFile(join(directory, 'cordis.patch.yml'), '[]\n')
+  const anchorPath = join(directory, 'package.json')
+  await writeFile(anchorPath, JSON.stringify({
+    name: 'dsh-pactflow-overlay-e2e-anchor', private: true,
+    dependencies: { 'dsh-pactflow': `file:${PACKAGE_ROOT}` },
+  }))
+  return { directory, anchorPath }
+}
 
 function seedLog(): string {
   const createdAt = 1_788_000_000_000
@@ -52,11 +73,13 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
   let scaffold: WebScaffold
   let browser: Browser
   let page: Page
+  let bundleAnchor: Awaited<ReturnType<typeof localBundleAnchor>> | undefined
 
   beforeAll(async () => {
+    bundleAnchor = await localBundleAnchor()
     scaffold = await launchWebScaffold({
       extraOverlayPath: `${PACKAGE_ROOT}/cordis.patch.yml`,
-      extraInstallAnchors: [`${PACKAGE_ROOT}/package.json`],
+      extraInstallAnchors: [bundleAnchor.anchorPath],
     })
     await seedSession(scaffold, seedLog(), SEED_ID, 'pactflow')
     browser = await chromium.launch()
@@ -68,6 +91,7 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
   afterAll(async () => {
     await browser?.close()
     await scaffold?.close()
+    if (bundleAnchor !== undefined) await rm(bundleAnchor.directory, { recursive: true, force: true })
   })
 
   it('shows the conditional entry and renders real Projection tables', async () => {
@@ -81,8 +105,8 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     await dialog.waitFor({ timeout: 15_000 })
     await expect.poll(async () => await dialog.textContent(), { timeout: 15_000 })
       .toContain('Seeded Project')
-    for (const text of ['Seeded Project', 'Need title', 'Node title', 'ready']) {
-      const content = dialog.getByText(text, { exact: true })
+    for (const text of ['Seeded Project', 'Need title', '任务节点', '等待派发']) {
+      const content = dialog.getByText(text, { exact: true }).first()
       await content.waitFor({ timeout: 15_000 })
       expect(await content.count()).toBeGreaterThan(0)
     }
@@ -108,18 +132,15 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     await settings.getByRole('button', { name: 'Plugins', exact: true }).click()
     const pluginConfiguration = settings.getByRole('tab', { name: 'Plugin configuration', exact: true })
     await pluginConfiguration.click()
-    const title = settings.getByText('PactFlow K3s templates', { exact: true })
+    const title = settings.getByText('PactFlow infrastructure', { exact: true })
     try {
       await expect.poll(() => title.count(), { timeout: 10_000 }).toBe(1)
     } catch {
       throw new Error(`PactFlow settings card missing; dialog=${(await settings.innerText()).slice(0, 2_000)}`)
     }
-    expect(await settings.getByLabel('PactFlow K3s templates').count()).toBe(1)
+    expect(await title.count()).toBe(1)
     expect(await settings.getByText('Restart the Profile after saving.', { exact: true }).count()).toBe(1)
-    await settings.getByRole('button', { name: 'Save configuration', exact: true }).click()
-    await expect.poll(async () => {
-      const document = await readFile(`${scaffold.harnessHome}/settings.yaml`, 'utf8').catch(() => '')
-      return document.includes('pactflow:') && document.includes('k3s: false')
-    }, { timeout: 10_000 }).toBe(true)
+    // The card is intentionally read-only until a resource is added; the
+    // settings shell does not render a save action for an unchanged form.
   })
 })

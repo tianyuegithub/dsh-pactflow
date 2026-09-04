@@ -25,6 +25,19 @@ export function harborProjectName(project: string): string {
   return normalized
 }
 
+/** Join an API path without discarding a reverse-proxy sub-path in the base URL. */
+export function joinUrlPath(base: string, path: string): string {
+  const url = new URL(base)
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('URL must use HTTP(S)')
+  const [rawPath = '', rawQuery = ''] = path.split('?', 2)
+  const basePath = url.pathname.replace(/\/+$/, '')
+  const suffix = rawPath.replace(/^\/+/, '')
+  url.pathname = `${basePath}/${suffix}`
+  url.search = rawQuery === '' ? '' : `?${rawQuery}`
+  url.hash = ''
+  return url.toString()
+}
+
 /** Small bounded HTTP probe which never logs headers or response bodies. */
 export async function probeHttp(options: PactFlowHttpProbeOptions): Promise<number> {
   const url = new URL(options.url)

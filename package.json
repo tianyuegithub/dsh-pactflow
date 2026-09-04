@@ -7,6 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "pnpm run build && pnpm run test && pnpm run pack:check",
+    "check:release": "pnpm run check && pnpm run test:web && pnpm run verify:profile",
     "pack": "pnpm run build && pnpm --dir packages/dsh-pactflow pack --pack-destination ../../dist",
     "pack:check": "node scripts/check-package.mjs",
     "test": "vitest run packages/dsh-pactflow/tests",
@@ -62,6 +63,7 @@
     "@deepseek-ai/dsh-tools": "link:../deepseek-harness-pactflow-p0/packages/core/tools",
     "@deepseek-ai/dsh-typert-generator": "link:../deepseek-harness-pactflow-p0/packages/typert/generator",
     "@deepseek-ai/dsh-typert-protocol": "link:../deepseek-harness-pactflow-upstream-pr/packages/typert/protocol",
+    "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness-pactflow-p0/packages/interaction/user-approval",
     "@types/js-yaml": "4.0.9",
     "@types/node": "^22.18.0",
     "@types/react": "~18.3.1",

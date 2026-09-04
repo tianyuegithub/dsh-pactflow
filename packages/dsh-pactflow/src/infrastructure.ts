@@ -39,6 +39,8 @@ interface PoolState {
   readonly queue: Waiter[]
 }
 
+const MAX_POOL_QUEUE = 256
+
 /** Validated resource graph used by the Host; contains references only, never Secret values. */
 export class PactFlowInfrastructure {
   private readonly pools = new Map<string, PactFlowWorkerPoolSettings>()
@@ -245,13 +247,17 @@ export class PactFlowInfrastructure {
       state.running += 1
       return this.releaseOnce(poolId)
     }
+    if (state.queue.length >= MAX_POOL_QUEUE) {
+      throw new Error(`PactFlow Worker Pool "${poolId}" queue is full`)
+    }
     return await new Promise<() => void>((resolve, reject) => {
       const waiter: Waiter = { resolve, reject, ...(signal === undefined ? {} : { signal }) }
       if (signal !== undefined) {
         waiter.abort = () => {
-          const index = state.queue.indexOf(waiter)
-          if (index >= 0) state.queue.splice(index, 1)
-          reject(new Error(`PactFlow Worker Pool "${poolId}" wait was cancelled`))
+        const index = state.queue.indexOf(waiter)
+        if (index >= 0) state.queue.splice(index, 1)
+        reject(new Error(`PactFlow Worker Pool "${poolId}" wait was cancelled`))
+        if (state.running === 0 && state.queue.length === 0) this.states.delete(poolId)
         }
         signal.addEventListener('abort', waiter.abort, { once: true })
       }
@@ -259,10 +265,24 @@ export class PactFlowInfrastructure {
     })
   }
 
+  /** Reserve immediately for the combined Host scheduler; never enqueues. */
+  tryAcquire(poolId: string): (() => void) | undefined {
+    const pool = this.pools.get(poolId)
+    const state = this.states.get(poolId)
+    if (pool === undefined || state === undefined) throw new Error(`PactFlow Worker Pool "${poolId}" is not configured`)
+    if (state.queue.length !== 0 || state.running >= pool.maxConcurrency) return undefined
+    state.running += 1
+    return this.releaseOnce(poolId)
+  }
+
   /** Restore one persisted nonterminal Job as occupied capacity before reconciliation. */
   reserveExisting(poolId: string): () => void {
+    const pool = this.pools.get(poolId)
     const state = this.states.get(poolId)
-    if (state === undefined) throw new Error(`PactFlow Worker Pool "${poolId}" is not configured`)
+    if (pool === undefined || state === undefined) throw new Error(`PactFlow Worker Pool "${poolId}" is not configured`)
+    if (state.running >= pool.maxConcurrency) {
+      throw new Error(`PactFlow Worker Pool "${poolId}" capacity is exhausted during recovery`)
+    }
     state.running += 1
     return this.releaseOnce(poolId)
   }
@@ -377,7 +397,8 @@ function executionKey(poolId: string, templateId: string, modelId: string | unde
 }
 
 export function pactFlowImageOf(registry: PactFlowRegistrySettings, template: PactFlowHarnessProfileSettings): string {
-  const host = new URL(registry.endpoint).host
+  const endpoint = new URL(registry.endpoint)
+  const host = `${endpoint.host}${endpoint.pathname.replace(/\/+$/, '')}`
   const repository = template.repository.replace(/^\/+|\/+$/g, '')
   const project = registry.project?.replace(/^\/+|\/+$/g, '')
   const path = project === undefined || repository.startsWith(`${project}/`)

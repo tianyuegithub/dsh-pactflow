@@ -137,6 +137,9 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: link:../deepseek-harness-pactflow-upstream-pr/packages/typert/protocol
         version: link:../deepseek-harness-pactflow-upstream-pr/packages/typert/protocol
+      '@deepseek-ai/dsh-user-approval':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/interaction/user-approval
+        version: link:../deepseek-harness-pactflow-p0/packages/interaction/user-approval
       '@deepseek-ai/schemastery':
         specifier: link:../deepseek-harness-pactflow-p0/vendor/schemastery
         version: link:../deepseek-harness-pactflow-p0/vendor/schemastery

@@ -46,6 +46,10 @@ describe('PactFlow K3s Worker provider', () => {
       gitSecretName: 'pactflow-git',
     })
     expect(spec.jobName).toMatch(/^dsh-pf-[a-z0-9-]+$/)
+    expect(spec.runNonceHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(spec.claimTokenHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(spec.specDigest).toMatch(/^[0-9a-f]{64}$/)
+    expect(spec.inputSecretName).toMatch(/^dsh-pf-[a-z0-9-]+-input$/)
   })
 
   it('rejects protocol drift, mutable image tags, duplicate ids, and unknown templates', () => {
@@ -64,6 +68,14 @@ describe('PactFlow K3s Worker provider', () => {
       .toThrow(/not configured/)
   })
 
+  it('keeps prompts in the Job-owned input Secret rather than the ConfigMap', () => {
+    const worker = new PactFlowK3sWorker(config())
+    const spec = worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000)
+    const configMap = (Reflect.get(worker, 'configMap') as (value: unknown) => { data?: Record<string, string> }).call(worker, spec)
+    expect(configMap.data?.['spec.json']).toBeUndefined()
+    expect(configMap.data?.['worker.sh']).toContain('pactflow-input')
+  })
+
   it('admits only bounded prompts and SSH Git remotes before claim', () => {
     const worker = new PactFlowK3sWorker(config())
     const base: PactFlowGitRunSpec = {
@@ -76,4 +88,5 @@ describe('PactFlow K3s Worker provider', () => {
       .toThrow(/require an SSH Git remote/)
     expect(() => worker.preflightRun(base, '')).toThrow(/1-262144/)
   })
+
 })

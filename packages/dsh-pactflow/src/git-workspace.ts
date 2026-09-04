@@ -21,6 +21,9 @@ import type {
 
 const GIT_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/
 const K8S_NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/
+const VALIDATION_ENV_KEYS = [
+  'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'CI', 'GIT_TERMINAL_PROMPT',
+] as const
 
 export interface PactFlowGitAuthSecret {
   readonly username: string
@@ -31,6 +34,23 @@ interface PactFlowGitCommitEvidence {
   readonly branch: string
   readonly commit: string
   readonly validations: readonly PactFlowValidationEvidence[]
+}
+
+export interface PactFlowClosingTaskRef {
+  readonly remoteRef: string
+  readonly expectedCommit: string
+}
+
+/** Keep validation subprocesses deterministic and prevent ambient credential leakage. */
+function minimalValidationEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {}
+  for (const key of VALIDATION_ENV_KEYS) {
+    const value = process.env[key]
+    if (value !== undefined) environment[key] = value
+  }
+  environment.CI = '1'
+  environment.GIT_TERMINAL_PROMPT = '0'
+  return environment
 }
 
 /** Git operations used by the PactFlow Host; commands never use a shell. */
@@ -53,11 +73,17 @@ export class PactFlowGitWorkspace {
       throw new Error('PactFlow K3s Git Secret name is invalid')
     }
     const gitea = this.gitea(request)
+    const rawValidationCommands = this.validationCommands(request.validationCommands ?? [])
+    const legacyUntrusted = request.validationProfileIds === undefined && rawValidationCommands.length > 0
     return {
       remote,
       remoteUrl,
       defaultBranch,
-      validationCommands: this.validationCommands(request.validationCommands ?? []),
+      validationCommands: rawValidationCommands,
+      ...(request.validationProfileIds === undefined ? {} : {
+        validationProfileIds: [...new Set(request.validationProfileIds.map(value => value.trim()).filter(Boolean))],
+      }),
+      ...(legacyUntrusted ? { legacyUntrusted: true } : {}),
       ...auth === undefined ? {} : { auth },
       ...k3sGitSecretName === undefined ? {} : { k3sGitSecretName },
       ...gitea === undefined ? {} : { gitea },
@@ -91,6 +117,10 @@ export class PactFlowGitWorkspace {
       branch,
       worktreePath,
       validationCommands: binding.validationCommands,
+      ...(binding.validationProfileIds === undefined ? {} : { validationProfileIds: [...binding.validationProfileIds] }),
+      ...(binding.validationProfileRevisions === undefined ? {} : { validationProfileRevisions: { ...binding.validationProfileRevisions } }),
+      ...(binding.legacyUntrusted === true || (binding.validationProfileIds === undefined && binding.validationCommands.length > 0)
+        ? { legacyUntrusted: true } : {}),
       ...binding.auth === undefined ? {} : { auth: binding.auth },
     }
   }
@@ -200,7 +230,7 @@ export class PactFlowGitWorkspace {
     needId: string,
     needRevision: number,
     binding: PactFlowGitBinding,
-    remoteRefs: readonly string[],
+    remoteRefs: readonly (string | PactFlowClosingTaskRef)[],
     secret?: PactFlowGitAuthSecret,
   ): Promise<PactFlowClosingGit> {
     const root = await this.requireWorkspaceRoot(workspace)
@@ -209,19 +239,31 @@ export class PactFlowGitWorkspace {
       throw new Error('PactFlow Git authentication does not match the project binding')
     }
     const prefix = `refs/remotes/${binding.remote}/`
-    const branches = [...new Set(remoteRefs)].sort().map((remoteRef) => {
-      if (!remoteRef.startsWith(prefix)) throw new Error('PactFlow closing received a foreign task ref')
-      return remoteRef.slice(prefix.length)
-    })
+    const taskRefs = remoteRefs.map(value => typeof value === 'string'
+      ? { remoteRef: value, expectedCommit: undefined }
+      : value)
+    const uniqueTaskRefs = new Map(taskRefs.map(item => [item.remoteRef, item]))
+    if (uniqueTaskRefs.size !== taskRefs.length) throw new Error('PactFlow closing task refs must be unique')
+    const branches = [...uniqueTaskRefs.values()]
+      .sort((left, right) => left.remoteRef.localeCompare(right.remoteRef)).map((item) => {
+        if (!item.remoteRef.startsWith(prefix)) throw new Error('PactFlow closing received a foreign task ref')
+        if (item.expectedCommit !== undefined && !/^[0-9a-f]{40,64}$/.test(item.expectedCommit)) {
+          throw new Error('PactFlow closing received an invalid expected task commit')
+        }
+        return {
+          branch: item.remoteRef.slice(prefix.length),
+          ...(item.expectedCommit === undefined ? {} : { expectedCommit: item.expectedCommit }),
+        }
+      })
     await this.withAuthentication(secret, async (environment) => {
       await this.git(root, [
         'fetch', '--no-tags', binding.remote,
         `refs/heads/${binding.defaultBranch}:refs/remotes/${binding.remote}/${binding.defaultBranch}`,
       ], environment)
-      for (const branch of branches) {
+      for (const task of branches) {
         await this.git(root, [
           'fetch', '--no-tags', binding.remote,
-          `refs/heads/${branch}:refs/remotes/${binding.remote}/${branch}`,
+          `refs/heads/${task.branch}:refs/remotes/${binding.remote}/${task.branch}`,
         ], environment)
       }
     })
@@ -243,6 +285,8 @@ export class PactFlowGitWorkspace {
         ], environment)
       })
       const commit = await this.git(root, ['rev-parse', '--verify', `${remoteClosingRef}^{commit}`])
+      await this.verifyTaskTips(root, prefix, branches, commit)
+      await this.verifyTaskSet(root, branches, commit)
       if (!await this.exists(worktreePath)) {
         const localBranch = await this.git(root, ['branch', '--list', branch])
         await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
@@ -257,8 +301,13 @@ export class PactFlowGitWorkspace {
     }
     await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
     await this.git(root, ['worktree', 'add', '-b', branch, worktreePath, baseCommit])
-    for (const taskBranch of branches) {
-      await this.git(worktreePath, ['merge', '--no-ff', '--no-edit', `${prefix}${taskBranch}`])
+    for (const task of branches) {
+      const taskRef = `${prefix}${task.branch}`
+      const taskCommit = await this.git(root, ['rev-parse', '--verify', `${taskRef}^{commit}`])
+      if (task.expectedCommit !== undefined && taskCommit !== task.expectedCommit) {
+        throw new Error(`PactFlow task branch ${task.branch} changed after verification`)
+      }
+      await this.git(worktreePath, ['merge', '--no-ff', '--no-edit', taskRef])
     }
     const result = await this.validateResult({
       remote: binding.remote,
@@ -268,14 +317,58 @@ export class PactFlowGitWorkspace {
       branch,
       worktreePath,
       validationCommands: binding.validationCommands,
+      ...(binding.validationProfileIds === undefined ? {} : { validationProfileIds: [...binding.validationProfileIds] }),
+      ...(binding.validationProfileRevisions === undefined ? {} : { validationProfileRevisions: { ...binding.validationProfileRevisions } }),
+      ...(binding.legacyUntrusted === true ? { legacyUntrusted: true } : {}),
       ...binding.auth === undefined ? {} : { auth: binding.auth },
     })
+    await this.verifyTaskSet(worktreePath, branches, result.commit)
     await this.withAuthentication(secret, async (environment) => {
       await this.git(worktreePath, [
         'push', '--porcelain', binding.remote, `HEAD:refs/heads/${branch}`,
       ], environment)
     })
     return { branch, commit: result.commit, worktreePath }
+  }
+
+  private async verifyTaskTips(
+    root: string,
+    prefix: string,
+    branches: readonly { readonly branch: string; readonly expectedCommit?: string }[],
+    integrationCommit: string,
+  ): Promise<void> {
+    for (const task of branches) {
+      const taskRef = `${prefix}${task.branch}`
+      const taskCommit = await this.git(root, ['rev-parse', '--verify', `${taskRef}^{commit}`])
+      if (task.expectedCommit !== undefined && taskCommit !== task.expectedCommit) {
+        throw new Error(`PactFlow task branch ${task.branch} changed after verification`)
+      }
+      try {
+        await this.git(root, ['merge-base', '--is-ancestor', taskCommit, integrationCommit])
+      } catch {
+        throw new Error(`PactFlow integration branch does not contain verified task ${task.branch}`)
+      }
+    }
+  }
+
+  /** Verify the integration branch still contains exactly the expected merge set. */
+  private async verifyTaskSet(
+    repository: string,
+    branches: readonly { readonly branch: string; readonly expectedCommit?: string }[],
+    integrationCommit: string,
+  ): Promise<void> {
+    const expected = branches.map(task => task.expectedCommit).filter((commit): commit is string => commit !== undefined)
+    if (expected.length === 0) return
+    const lines = await this.git(repository, ['log', '--first-parent', '--format=%P', integrationCommit])
+    const merged = new Set<string>()
+    for (const line of lines.split('\n')) {
+      const parents = line.trim().split(/\s+/u).filter(Boolean)
+      if (parents.length >= 2) merged.add(parents[1]!)
+    }
+    const expectedSet = new Set(expected)
+    if (merged.size !== expectedSet.size || [...expectedSet].some(commit => !merged.has(commit))) {
+      throw new Error('PactFlow integration branch task-set digest changed after verification')
+    }
   }
 
   /** Fetch the default branch after Gitea merge and require the integration commit in its ancestry. */
@@ -489,14 +582,14 @@ export class PactFlowGitWorkspace {
     validation: PactFlowValidationCommand,
   ): Promise<PactFlowValidationEvidence> {
     const startedAt = Date.now()
-    const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-      !/(?:KEY|SECRET|TOKEN|PASSWORD)/i.test(name)))
+    const environment = minimalValidationEnvironment()
     return new Promise((resolveEvidence, reject) => {
       execFile(validation.command, validation.args, {
         cwd,
         encoding: 'utf8',
         maxBuffer: 1024 * 1024,
         timeout: validation.timeoutMs,
+        shell: false,
         env: { ...environment, CI: '1', GIT_TERMINAL_PROMPT: '0' },
       }, (error) => {
         if (error !== null) {
@@ -508,6 +601,7 @@ export class PactFlowGitWorkspace {
       })
     })
   }
+
 
   private git(cwd: string, args: readonly string[], environment?: NodeJS.ProcessEnv): Promise<string> {
     return new Promise((resolveOutput, reject) => {

@@ -291,7 +291,29 @@ export interface PactFlowWorkspaceProjectConfig {
   readonly updatedAt: number
   readonly git?: PactFlowWorkspaceGitBinding
   readonly worker?: PactFlowProjectWorkerPolicy
-  readonly validationCommands: readonly PactFlowValidationCommand[]
+  readonly validationProfiles?: readonly PactFlowValidationProfile[]
+  readonly validationProfileIds?: readonly string[]
+  /** Historical raw commands; new configurations use validationProfiles instead. */
+  readonly validationCommands?: readonly PactFlowValidationCommand[]
+}
+
+/** User-owned, stable validation command selected by ID rather than model input. */
+export interface PactFlowValidationProfile {
+  readonly id: string
+  readonly displayName: string
+  readonly revision: number
+  readonly command: string
+  readonly args: readonly string[]
+  readonly timeoutMs: number
+}
+
+export interface PactFlowValidationProfileInput {
+  readonly id: string
+  readonly displayName: string
+  readonly command: string
+  readonly args: readonly string[]
+  readonly timeoutMs: number
+  readonly revision?: number
 }
 
 export interface PactFlowWorkspaceProjectView {
@@ -343,6 +365,15 @@ export interface PactFlowMigrateWorkspaceProjectRequest {
   readonly confirm: 'migrate-session-project'
 }
 
+export interface PactFlowSaveValidationProfilesRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  readonly profiles?: readonly PactFlowValidationProfileInput[]
+  readonly validationProfiles?: readonly PactFlowValidationProfileInput[]
+  readonly selectedProfileIds?: readonly string[]
+  readonly validationProfileIds?: readonly string[]
+}
+
 export interface PactFlowSettingsView {
   readonly k3s: false | PactFlowK3sSettings
   readonly infrastructure: false | PactFlowInfrastructureSettings
@@ -367,6 +398,9 @@ export interface PactFlowGitBinding {
   readonly boundAt: number
   readonly auth?: PactFlowGitAuth
   readonly validationCommands: readonly PactFlowValidationCommand[]
+  readonly validationProfileIds?: readonly string[]
+  readonly validationProfileRevisions?: Readonly<Record<string, number>>
+  readonly legacyUntrusted?: boolean
   readonly k3sGitSecretName?: string
   readonly gitea?: PactFlowGiteaBinding
 }
@@ -413,6 +447,9 @@ export interface PactFlowGitRunSpec {
   readonly worktreePath: string
   readonly auth?: PactFlowGitAuth
   readonly validationCommands: readonly PactFlowValidationCommand[]
+  readonly validationProfileIds?: readonly string[]
+  readonly validationProfileRevisions?: Readonly<Record<string, number>>
+  readonly legacyUntrusted?: boolean
 }
 
 export interface PactFlowValidationCommand {
@@ -489,8 +526,17 @@ export interface PactFlowK3sRunSpec {
   readonly model: string
   readonly baseUrl: string
   readonly modelSecretName: string
+  /** Present on newly dispatched runs; absent only on legacy 0.1/0.2 history. */
+  readonly runNonceHash?: string
+  readonly claimTokenHash?: string
+  readonly specDigest?: string
+  readonly inputSecretName?: string
   readonly modelConnectionId?: string
   readonly ephemeralModelSecret?: boolean
+  /** Bound after Job creation; never guessed during plan(). */
+  readonly jobUid?: string
+  readonly expectedBranch?: string
+  readonly expectedBaseCommit?: string
   readonly gitSecretName: string
   readonly cpuRequest: string
   readonly memoryRequest: string
@@ -507,6 +553,9 @@ export interface PactFlowK3sResult {
   readonly branch: string
   readonly harnessVersion: string
   readonly finishedAt: number
+  readonly runNonceHash?: string
+  readonly claimTokenHash?: string
+  readonly specDigest?: string
 }
 
 export interface PactFlowReview {
@@ -516,6 +565,10 @@ export interface PactFlowReview {
   readonly decision: 'approved' | 'rejected' | 'changes-requested'
   readonly note: string
   readonly recordedAt: number
+  readonly approvalRequestId?: string
+  readonly needRevision?: number
+  readonly evidenceDigest?: string
+  readonly source?: 'dsh-approval'
 }
 
 export interface PactFlowDocument {
@@ -535,6 +588,17 @@ export interface PactFlowRelease {
   readonly recordedAt: number
 }
 
+export interface PactFlowCleanupRecord {
+  readonly id: string
+  readonly runId?: PactFlowRunId
+  readonly needId?: PactFlowNeedId
+  readonly target: string
+  readonly state: 'pending' | 'failed' | 'succeeded'
+  readonly attempt: number
+  readonly error?: string
+  readonly nextRetryAt?: number
+}
+
 export interface InitializePactFlowProjectRequest {
   readonly name: string
 }
@@ -546,6 +610,7 @@ export interface BindPactFlowGitRequest {
   readonly username?: string
   readonly credentialRef?: string
   readonly validationCommands?: readonly PactFlowValidationCommand[]
+  readonly validationProfileIds?: readonly string[]
   readonly k3sGitSecretName?: string
   readonly giteaBaseUrl?: string
   readonly giteaOwner?: string
@@ -566,6 +631,10 @@ export interface RecordPactFlowReviewRequest {
   readonly kind: PactFlowReview['kind']
   readonly decision: PactFlowReview['decision']
   readonly note: string
+  readonly needRevision: number
+  readonly evidenceDigest: string
+  readonly approvalRequestId: string
+  readonly source: 'dsh-approval'
 }
 
 export interface TransitionPactFlowNeedRequest {
@@ -638,6 +707,11 @@ export interface DispatchPactFlowK3sNodeRequest {
 export interface ClosePactFlowNeedRequest {
   readonly needId: string
   readonly expectedRevision: number
+  readonly taskRefs?: readonly { readonly remoteRef: string; readonly expectedCommit: string }[]
+}
+
+export interface RetryPactFlowCleanupRequest {
+  readonly cleanupId: string
 }
 
 export interface ClosePactFlowNeedResult {
@@ -729,6 +803,7 @@ export interface PactFlowDeliveryProjection {
   readonly reviews: Readonly<Record<string, PactFlowReview>>
   readonly documents: Readonly<Record<string, PactFlowDocument>>
   readonly releases: Readonly<Record<string, PactFlowRelease>>
+  readonly cleanups: Readonly<Record<string, PactFlowCleanupRecord>>
 }
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -743,6 +818,10 @@ declare module '@deepseek-ai/dsh-session/types' {
     'pactflow/project-configured': { readonly v: 1; readonly project: PactFlowProject }
     'pactflow/release-recorded': { readonly v: 1; readonly release: PactFlowRelease }
     'pactflow/review-recorded': { readonly v: 1; readonly review: PactFlowReview }
+    'pactflow/run-bound': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }
+    'pactflow/run-queued': { readonly v: 1; readonly queueId: string; readonly sessionId: string; readonly nodeId: PactFlowNodeId; readonly requestedAt: number }
+    'pactflow/run-queue-cancelled': { readonly v: 1; readonly queueId: string; readonly reason: string; readonly cancelledAt: number }
+    'pactflow/cleanup-recorded': { readonly v: 1; readonly record: PactFlowCleanupRecord }
     'pactflow/run-claimed': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }
     'pactflow/run-renewed': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }
     'pactflow/run-settled': { readonly v: 1; readonly run: PactFlowRun; readonly node: PactFlowNode }

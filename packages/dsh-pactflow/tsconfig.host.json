@@ -9,6 +9,7 @@
     "src/index.ts",
     "src/agent/index.ts",
     "src/domain.ts",
+    "src/execution-capacity.ts",
     "src/git-workspace.ts",
     "src/gitea.ts",
     "src/harness-discovery.ts",
@@ -17,6 +18,8 @@
     "src/infrastructure-probe.ts",
     "src/k3s-worker.ts",
     "src/project-capacity.ts",
+    "src/review-authorization.ts",
+    "src/schema.ts",
     "src/types.ts",
     "src/workspace-project.ts"
   ]

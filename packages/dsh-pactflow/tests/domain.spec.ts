@@ -16,6 +16,7 @@ import PactFlowService from '../lib/index.js'
 import { PACTFLOW_EVENT_TYPES_V0_2 } from '../src/domain.ts'
 import * as PactFlowAgentTools from '../presets/pactflow/plugin/index.js'
 import { createGitFixture, serveAuthenticatedGit, type AuthenticatedGitServer } from './git-fixture.ts'
+import { recordAuthorizedReview } from './review-fixture.ts'
 
 async function harness(): Promise<Context> {
   const ctx = new Context()
@@ -45,7 +46,7 @@ describe('PactFlow domain foundation', () => {
     ])
     expect(session.events[0]?.data).toMatchObject({
       producer: 'dsh-pactflow',
-      version: '0.2.1',
+      version: '0.3.0',
     })
     expect(ctx.pactflow.project(session.id)).toEqual({ project })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowProject).toEqual({ project })
@@ -163,8 +164,8 @@ describe('PactFlow domain foundation', () => {
     expect(() => ctx.pactflow.transitionNeed(session.id, {
       needId: backlog.id, expectedRevision: 2, to: 'confirmed',
     })).toThrow(/requires latest requirement review approval/)
-    ctx.pactflow.recordReview(session.id, {
-      needId: backlog.id, kind: 'requirement', decision: 'approved', note: '范围确认',
+    recordAuthorizedReview(ctx.pactflow, session, { ...backlog, revision: discussion.revision }, {
+      kind: 'requirement', decision: 'approved', note: '范围确认',
     })
     const confirmed = ctx.pactflow.transitionNeed(session.id, {
       needId: backlog.id, expectedRevision: discussion.revision, to: 'confirmed',
@@ -178,8 +179,8 @@ describe('PactFlow domain foundation', () => {
     expect(() => ctx.pactflow.transitionNeed(session.id, {
       needId: backlog.id, expectedRevision: design.revision, to: 'executing',
     })).toThrow(/illegal PactFlow phase transition/)
-    ctx.pactflow.recordReview(session.id, {
-      needId: backlog.id, kind: 'design', decision: 'approved', note: '设计批准',
+    recordAuthorizedReview(ctx.pactflow, session, { ...backlog, revision: design.revision }, {
+      kind: 'design', decision: 'approved', note: '设计批准',
     })
     const planning = ctx.pactflow.transitionNeed(session.id, {
       needId: backlog.id, expectedRevision: design.revision, to: 'planning',
@@ -187,6 +188,26 @@ describe('PactFlow domain foundation', () => {
     expect(planning).toMatchObject({ phase: 'planning', revision: 5 })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowNeeds)
       .toMatchObject({ byId: { 'need-1': { phase: 'planning', revision: 5 } } })
+  })
+
+  it('shows legacy approved reviews without allowing them to unlock a new gate', async () => {
+    const ctx = await harness()
+    const session = ctx.sessions.create(SessionId('legacy-review'), { meta: { agentPreset: 'pactflow' } })
+    ctx.pactflow.initialize(session.id, { name: 'Legacy review' })
+    const need = ctx.pactflow.createNeed(session.id, { id: 'legacy', title: 'Legacy', description: '' })
+    const discussion = ctx.pactflow.transitionNeed(session.id, {
+      needId: need.id, expectedRevision: need.revision, to: 'discussion',
+    })
+    session.append('pactflow/review-recorded', {
+      v: 1,
+      review: {
+        id: 'legacy-review', needId: need.id, kind: 'requirement', decision: 'approved',
+        note: 'old approval', recordedAt: Date.now(),
+      },
+    })
+    expect(() => ctx.pactflow.transitionNeed(session.id, {
+      needId: need.id, expectedRevision: discussion.revision, to: 'confirmed',
+    })).toThrow(/requires latest requirement review approval/)
   })
 
   it('enforces acyclic dependencies, atomic claim/settle, and first terminal result', async () => {
@@ -731,6 +752,16 @@ describe('PactFlow domain foundation', () => {
     ctx.pactflow.initialize(session.id, { name: 'Tools' })
     ctx.pactflow.createNeed(session.id, { id: 'tool-need', title: 'Tool need', description: '' })
     const agent = { id: session.id, session } as Agent
+    ctx.provide('approval', {
+      request: ({ agent: requestingAgent, callId, reason }: { agent: Agent; callId: string; reason?: string }) => {
+        const id = `approval-${String(requestingAgent.session.events.length)}`
+        requestingAgent.session.append('approval/asked', {
+          id, toolName: 'pactflow_record_review', callId, ...(reason === undefined ? {} : { reason }),
+        })
+        requestingAgent.session.append('approval/decided', { id, outcome: 'allowed-once' })
+        return Promise.resolve('allowed-once' as const)
+      },
+    } as never)
     let scoped!: ReturnType<typeof createScope>
     await ctx.plugin(Object.assign((inner: Context) => {
       scoped = createScope(inner, agent)
@@ -746,6 +777,7 @@ describe('PactFlow domain foundation', () => {
       'pactflow_dispatch_k3s',
       'pactflow_initialize',
       'pactflow_record_review',
+      'pactflow_retry_cleanup',
       'pactflow_retry_node',
       'pactflow_transition_need',
       'pactflow_view',
@@ -764,7 +796,8 @@ describe('PactFlow domain foundation', () => {
       callId: ToolCallId('pactflow-record-review'),
       name: 'pactflow_record_review',
       arguments: {
-        need_id: 'tool-need', kind: 'requirement', decision: 'approved', note: 'requirements verified',
+        need_id: 'tool-need', expected_revision: 1,
+        kind: 'requirement', decision: 'approved', note: 'requirements verified',
       },
       agent,
       signal: new AbortController().signal,

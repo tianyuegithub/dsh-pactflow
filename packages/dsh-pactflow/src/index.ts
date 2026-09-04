@@ -19,6 +19,8 @@ import {
   PACTFLOW_EVENT_TYPES,
   PACTFLOW_EVENT_TYPES_V0_1,
   PACTFLOW_EVENT_TYPES_V0_2,
+  PACTFLOW_EVENT_TYPES_V0_2_1,
+  PACTFLOW_EVENT_TYPES_V0_3,
   PACTFLOW_PROJECTIONS,
 } from './domain.ts'
 import { PactFlowGitWorkspace, type PactFlowGitAuthSecret } from './git-workspace.ts'
@@ -26,11 +28,12 @@ import { PactFlowGiteaClient } from './gitea.ts'
 import {
   PACTFLOW_HARNESS_API_MODE,
   PactFlowK3sWorker,
+  pactFlowK3sSpecDigest,
   type PactFlowK3sConfig,
 } from './k3s-worker.ts'
 import { PactFlowInfrastructure, pactFlowImageOf } from './infrastructure.ts'
 import { PactFlowInfrastructureHealthStore } from './infrastructure-health.ts'
-import { harborProjectName, harborRepositoryPathSegment, probeHttp, requestJson } from './infrastructure-probe.ts'
+import { harborProjectName, harborRepositoryPathSegment, joinUrlPath, probeHttp, requestJson } from './infrastructure-probe.ts'
 import { synchronizeHarnessTemplates } from './harness-discovery.ts'
 import {
   PactFlowWorkspaceProjectStore,
@@ -39,6 +42,8 @@ import {
   inspectWorkspaceGit,
 } from './workspace-project.ts'
 import { PactFlowProjectCapacity } from './project-capacity.ts'
+import { PactFlowExecutionCapacity } from './execution-capacity.ts'
+import { pactFlowReviewEvidenceDigest } from './review-authorization.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
   BindPactFlowGitRequest,
@@ -46,6 +51,7 @@ import type {
   PactFlowMigrateWorkspaceProjectRequest,
   ClosePactFlowNeedRequest,
   ClosePactFlowNeedResult,
+  RetryPactFlowCleanupRequest,
   ClaimPactFlowNodeRequest,
   CreatePactFlowNeedRequest,
   CreatePactFlowNodeRequest,
@@ -54,6 +60,7 @@ import type {
   DispatchPactFlowLocalNodeRequest,
   InitializePactFlowProjectRequest,
   PactFlowClaimResult,
+  PactFlowCleanupRecord,
   PactFlowDagProjection,
   PactFlowGitResult,
   PactFlowGitBinding,
@@ -85,6 +92,9 @@ import type {
   PactFlowInitializeWorkspaceGitRequest,
   PactFlowSaveWorkspaceWorkerPolicyRequest,
   PactFlowCreateWorkspaceRemoteRequest,
+  PactFlowSaveValidationProfilesRequest,
+  PactFlowValidationProfile,
+  PactFlowValidationProfileInput,
   PactFlowNeed,
   PactFlowNode,
   PactFlowPhase,
@@ -123,6 +133,7 @@ interface PactFlowWorkspaceRegistry {
 }
 
 const VERSION = '0.2.1'
+const EVENT_PRODUCER_VERSION = '0.3.0'
 const PRESET_ROOT = fileURLToPath(new URL('../presets', import.meta.url))
 const PACTFLOW_SETTINGS_NS = settingsNamespace('pactflow')
 const NEXT_PHASE: Readonly<Partial<Record<PactFlowPhase, PactFlowPhase>>> = {
@@ -237,6 +248,7 @@ export class PactFlowService extends TypertRemoteService {
   private readonly infrastructureHealth = new PactFlowInfrastructureHealthStore()
   private readonly workspaceProjects = new PactFlowWorkspaceProjectStore()
   private readonly projectCapacity = new PactFlowProjectCapacity()
+  private readonly executionCapacity = new PactFlowExecutionCapacity(this.projectCapacity)
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'pactflow')
@@ -277,6 +289,7 @@ export class PactFlowService extends TypertRemoteService {
       for (const timer of this.localExpiryTimers.values()) clearTimeout(timer)
       this.localExpiryTimers.clear()
     }, 'dsh-pactflow: clear local Run expiry timers')
+    ctx.effect(() => () => this.executionCapacity.dispose(), 'dsh-pactflow: dispose Worker admission scheduler')
     ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
       version: '0.1.0',
@@ -289,10 +302,16 @@ export class PactFlowService extends TypertRemoteService {
       eventTypes: PACTFLOW_EVENT_TYPES_V0_2,
       mode: 'read-only',
     })
+    ctx.sessions.externalEventProducers.register({
+      producer: 'dsh-pactflow',
+      version: '0.2.1',
+      eventTypes: PACTFLOW_EVENT_TYPES_V0_2_1,
+      mode: 'read-only',
+    })
     this.events = ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
-      version: VERSION,
-      eventTypes: PACTFLOW_EVENT_TYPES,
+      version: EVENT_PRODUCER_VERSION,
+      eventTypes: PACTFLOW_EVENT_TYPES_V0_3,
     })
     for (const projection of PACTFLOW_PROJECTIONS) ctx.sessionProjections.register(projection as never)
     ctx.provide('pactflowPresetRoot', PRESET_ROOT)
@@ -357,7 +376,18 @@ export class PactFlowService extends TypertRemoteService {
     const session = this.livePactFlowSession(sessionId)
     const current = this.requireProject(session)
     this.requireRevision('project', current.id, current.revision, request.expectedRevision)
-    let inspected = await this.git.inspectBinding(session.header.cwd, request)
+    const validation = await this.resolveValidationSelection(session, request)
+    let inspected = await this.git.inspectBinding(session.header.cwd, {
+      ...request,
+      ...(validation === undefined ? {} : { validationCommands: validation.commands }),
+    })
+    if (validation !== undefined) {
+      inspected = {
+        ...inspected,
+        validationProfileIds: validation.ids,
+        validationProfileRevisions: validation.revisions,
+      }
+    }
     if (inspected.gitea === undefined && this.infrastructure !== undefined) {
       const matched = this.infrastructure.matchGitea(inspected.remoteUrl)
       if (matched !== undefined) {
@@ -430,10 +460,11 @@ export class PactFlowService extends TypertRemoteService {
     const project = this.requireProject(session)
     const binding = project.git
     if (binding?.gitea === undefined) throw new Error('PactFlow project has no Gitea binding')
+    await this.assertValidationProfilesCurrent(session, binding)
     const giteaBinding = this.effectiveGiteaBinding(binding.gitea)
     const need = this.need(session, request.needId)
     this.requireRevision('need', need.id, need.revision, request.expectedRevision)
-    if (need.phase !== 'closing' || !this.latestReviewApproved(session, need.id, 'verification')) {
+    if (need.phase !== 'closing' || !this.latestReviewApproved(session, need.id, 'verification', need.revision - 1)) {
       throw new Error('PactFlow closing requires the closing phase and latest verification approval')
     }
     const nodes = Object.values(this.dagState(session)).filter(node => node.needId === need.id)
@@ -450,6 +481,19 @@ export class PactFlowService extends TypertRemoteService {
       }
       return run
     })
+    if (this.isLegacyValidationBinding(binding) || taskRuns.some(run => this.isLegacyValidationBinding(run.git!))) {
+      throw new Error('PactFlow closing refuses legacy-untrusted validation commands; bind Workspace validation profiles first')
+    }
+    const expectedTaskRefs = taskRuns.map(run => ({
+      remoteRef: run.gitResult!.remoteRef,
+      expectedCommit: run.gitResult!.commit,
+    })).sort((left, right) => left.remoteRef.localeCompare(right.remoteRef))
+    if (request.taskRefs !== undefined) {
+      const supplied = [...request.taskRefs].sort((left, right) => left.remoteRef.localeCompare(right.remoteRef))
+      if (JSON.stringify(supplied) !== JSON.stringify(expectedTaskRefs)) {
+        throw new Error('PactFlow closing task refs do not match the verified Run commits')
+      }
+    }
     const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
     if (credentials === undefined) throw new Error('PactFlow Gitea requires the Credentials service')
     const giteaToken = await credentials.resolve(credentialRef(giteaBinding.tokenCredentialRef))
@@ -468,7 +512,7 @@ export class PactFlowService extends TypertRemoteService {
       need.id,
       need.revision,
       binding,
-      taskRuns.map(run => run.gitResult!.remoteRef),
+      expectedTaskRefs,
       gitSecret,
     )
     const existingPullRequest = await this.gitea.findPullRequest(
@@ -508,30 +552,43 @@ export class PactFlowService extends TypertRemoteService {
       expectedRevision: need.revision,
       to: 'deployed',
     })
-    const cleanupFailures: string[] = []
-    try {
-      await this.git.cleanupClosing(session.header.cwd, integration)
-    } catch (error) {
-      cleanupFailures.push(`closing:${integration.branch}`)
-      this.ctx.logger.warn('PactFlow closing cleanup failed for Need "%s": %s', need.id, this.boundedOutcome(error))
+    const cleanupRecords: PactFlowCleanupRecord[] = [
+      { id: `cleanup-${need.id}-closing`, needId: need.id, target: `closing:${integration.branch}`, state: 'pending', attempt: 1 },
+      ...taskRuns.flatMap(run => [
+        { id: `cleanup-${run.id}-k3s`, needId: need.id, runId: run.id, target: `k3s:${run.k3s?.jobName ?? run.id}`, state: 'pending' as const, attempt: 1 },
+        { id: `cleanup-${run.id}-git`, needId: need.id, runId: run.id, target: `git:${run.git!.branch}`, state: 'pending' as const, attempt: 1 },
+      ]),
+    ]
+    const existingCleanups = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups ?? {}
+    for (const record of cleanupRecords) {
+      if (existingCleanups[record.id] === undefined) this.appendCleanupRecord(session, record)
     }
+    const cleanupFailures: string[] = []
+    const closingRecord = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[cleanupRecords[0]!.id]
+      ?? cleanupRecords[0]!
+    if (!await this.continueCleanupRecord(session, closingRecord, async () => {
+      await this.git.cleanupClosing(session.header.cwd, integration)
+    })) cleanupFailures.push(`closing:${integration.branch}`)
     for (const run of taskRuns) {
-      if (run.k3s !== undefined && (this.k3s !== undefined || this.infrastructure !== undefined)) {
-        try {
-          await this.workerForRun(run.k3s).cleanupRun(run.k3s)
-        } catch (error) {
-          cleanupFailures.push(`k3s:${run.k3s.jobName}`)
-          this.ctx.logger.warn('PactFlow K3s cleanup failed for Run "%s": %s', run.id, this.boundedOutcome(error))
-        }
+      const k3sRecord = cleanupRecords.find(record => record.runId === run.id && record.target.startsWith('k3s'))
+      if (run.k3s !== undefined && k3sRecord !== undefined && (this.k3s !== undefined || this.infrastructure !== undefined)) {
+        const persistedK3sRecord = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[k3sRecord.id] ?? k3sRecord
+        if (!await this.continueCleanupRecord(session, persistedK3sRecord, async () => {
+          await this.workerForRun(run.k3s!).cleanupRun(run.k3s!)
+        })) cleanupFailures.push(`k3s:${run.k3s.jobName}`)
+      } else if (k3sRecord !== undefined) {
+        this.appendCleanupRecord(session, {
+          ...k3sRecord, state: 'succeeded', attempt: k3sRecord.attempt,
+        })
       }
-      try {
+      const gitRecord = cleanupRecords.find(record => record.runId === run.id && record.target.startsWith('git'))
+      const persistedGitRecord = gitRecord === undefined ? undefined
+        : this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[gitRecord.id] ?? gitRecord
+      if (persistedGitRecord !== undefined && !await this.continueCleanupRecord(session, persistedGitRecord, async () => {
         await this.git.cleanupTaskRun(
           session.header.cwd, binding, run.git!, await this.resolveGitAuth(run.git!),
         )
-      } catch (error) {
-        cleanupFailures.push(`git:${run.git!.branch}`)
-        this.ctx.logger.warn('PactFlow Git cleanup failed for Run "%s": %s', run.id, this.boundedOutcome(error))
-      }
+      })) cleanupFailures.push(`git:${run.git!.branch}`)
     }
     return {
       need: deployed,
@@ -541,6 +598,161 @@ export class PactFlowService extends TypertRemoteService {
       integrationBranch: integration.branch,
       integrationCommit: integration.commit,
       cleanupFailures,
+    }
+  }
+
+  private appendCleanupRecord(session: Session, record: PactFlowCleanupRecord): void {
+    this.events.append(session, 'pactflow/cleanup-recorded', { v: 1, record })
+  }
+
+  private async acquireExecutionOrCancel(
+    session: Session,
+    queueId: string,
+    workspaceId: string | undefined,
+    policy: PactFlowWorkspaceProjectConfig['worker'],
+    profileId: string | undefined,
+    poolId: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<() => void> {
+    try {
+      return await this.executionCapacity.acquire({
+        workspaceId, policy, profileId, poolId,
+        resolveInfrastructure: () => this.infrastructure,
+        signal,
+      })
+    } catch (error) {
+      this.events.append(session, 'pactflow/run-queue-cancelled', {
+        v: 1, queueId, reason: this.boundedOutcome(error), cancelledAt: Date.now(),
+      })
+      throw error
+    }
+  }
+
+  private async runCleanupRecord(
+    session: Session,
+    record: PactFlowCleanupRecord,
+    action: () => Promise<void>,
+  ): Promise<boolean> {
+    try {
+      await action()
+      const { error: previousError, nextRetryAt: previousRetryAt, ...identity } = record
+      void previousError
+      void previousRetryAt
+      this.appendCleanupRecord(session, {
+        ...identity, state: 'succeeded', attempt: record.attempt,
+      })
+      return true
+    } catch (error) {
+      const nextRetryAt = Date.now() + Math.min(3_600_000, 1_000 * (2 ** Math.min(record.attempt - 1, 10)))
+      this.appendCleanupRecord(session, {
+        ...record, state: 'failed', error: this.boundedOutcome(error), nextRetryAt,
+      })
+      this.ctx.logger.warn('PactFlow cleanup target "%s" failed: %s', record.target, this.boundedOutcome(error))
+      return false
+    }
+  }
+
+  private async continueCleanupRecord(
+    session: Session,
+    record: PactFlowCleanupRecord,
+    action: () => Promise<void>,
+  ): Promise<boolean> {
+    if (record.state === 'succeeded') return true
+    if (record.state === 'failed') {
+      const retried = await this.retryCleanup(session.id, { cleanupId: record.id })
+      return retried.state === 'succeeded'
+    }
+    return await this.runCleanupRecord(session, record, action)
+  }
+
+  private async ensureK3sCleanup(
+    session: Session,
+    run: PactFlowRun,
+  ): Promise<void> {
+    if (run.k3s === undefined) return
+    const id = `cleanup-${run.id}-k3s`
+    const current = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[id]
+    const pending = current ?? {
+      id, runId: run.id, needId: this.node(session, run.nodeId).needId,
+      target: `k3s:${run.k3s.jobName}`, state: 'pending' as const, attempt: 1,
+    }
+    if (current === undefined) this.appendCleanupRecord(session, pending)
+    if (pending.state === 'failed') {
+      await this.retryCleanup(session.id, { cleanupId: pending.id })
+    } else if (pending.state !== 'succeeded') await this.runCleanupRecord(session, pending, async () => {
+      await this.workerForRun(run.k3s!).cleanupRun(run.k3s!)
+    })
+  }
+
+  /** Explicitly retry one persisted cleanup responsibility after a failed close. */
+  @Remote('retryCleanup')
+  async retryCleanup(
+    sessionId: string,
+    request: RetryPactFlowCleanupRequest,
+  ): Promise<PactFlowCleanupRecord> {
+    const session = this.livePactFlowSession(sessionId)
+    const current = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[request.cleanupId]
+    if (current === undefined) throw new Error(`PactFlow cleanup "${request.cleanupId}" does not exist`)
+    if (current.state === 'succeeded') return current
+    const attempt = current.attempt + 1
+    const { error: previousError, nextRetryAt: previousRetryAt, ...identity } = current
+    void previousError
+    void previousRetryAt
+    const pending: PactFlowCleanupRecord = {
+      ...identity, state: 'pending', attempt,
+    }
+    this.appendCleanupRecord(session, pending)
+    await this.runCleanupRecord(session, pending, () => this.cleanupAction(session, pending))
+    return this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[pending.id] ?? pending
+  }
+
+  private async cleanupAction(session: Session, record: PactFlowCleanupRecord): Promise<void> {
+    const project = this.requireProject(session)
+    const workspaceProject = await this.workspaceProjectForSession(session)
+    const binding = project.git ?? this.workspaceGitBinding(workspaceProject)
+    if (record.target === 'k3s' || record.target.startsWith('k3s:')) {
+      const run = record.runId === undefined ? undefined : this.runState(session)[record.runId]
+      if (run?.k3s === undefined) return
+      await this.workerForRun(run.k3s).cleanupRun(run.k3s)
+      return
+    }
+    if (record.target === 'git' || record.target.startsWith('git:')) {
+      if (binding === undefined) throw new Error('PactFlow cleanup cannot resolve the project Git binding')
+      const run = record.runId === undefined ? undefined : this.runState(session)[record.runId]
+      if (run?.git === undefined) return
+      await this.git.cleanupTaskRun(session.header.cwd, binding, run.git, await this.resolveGitAuth(run.git))
+      return
+    }
+    if (record.target === 'closing' || record.target.startsWith('closing:')) {
+      if (binding === undefined) throw new Error('PactFlow cleanup cannot resolve the project Git binding')
+      if (record.needId === undefined) throw new Error('PactFlow closing cleanup has no Need id')
+      const need = this.need(session, record.needId)
+      const nodes = Object.values(this.dagState(session)).filter(node => node.needId === need.id)
+      const runs = Object.values(this.runState(session))
+      const taskRuns = nodes.map(node => runs.filter(run => run.nodeId === node.id
+        && run.state === 'succeeded' && run.git !== undefined && run.gitResult !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]).filter((run): run is PactFlowRun => run !== undefined)
+      if (taskRuns.length !== nodes.length) throw new Error('PactFlow closing cleanup cannot reconstruct verified task runs')
+      const integration = await this.git.prepareClosing(
+        session.header.cwd, session.id, need.id, Math.max(1, need.revision - 1), binding,
+        taskRuns.map(run => ({ remoteRef: run.gitResult!.remoteRef, expectedCommit: run.gitResult!.commit })),
+        await this.resolveGitAuth(taskRuns[0]!.git!),
+      )
+      await this.git.cleanupClosing(session.header.cwd, integration)
+      return
+    }
+    throw new Error(`PactFlow cleanup target "${record.target}" is unknown`)
+  }
+
+  private async reconcileCleanups(session: Session): Promise<void> {
+    const cleanups = Object.values(this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups ?? {})
+    for (const record of cleanups) {
+      if (record.state === 'succeeded' || (record.nextRetryAt !== undefined && record.nextRetryAt > Date.now())) continue
+      const current = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[record.id]
+      if (current === undefined || current.state === 'succeeded') continue
+      try { await this.retryCleanup(session.id, { cleanupId: current.id }) } catch (error) {
+        this.ctx.logger.warn('PactFlow cleanup recovery failed for "%s": %s', current.id, this.boundedOutcome(error))
+      }
     }
   }
 
@@ -568,12 +780,39 @@ export class PactFlowService extends TypertRemoteService {
     return need
   }
 
-  /** Record one human review decision used by a later phase gate. */
-  @Remote('recordReview')
+  /** Record one already-authorized human review decision used by a later phase gate. */
   recordReview(sessionId: string, request: RecordPactFlowReviewRequest): PactFlowReview {
     const session = this.livePactFlowSession(sessionId)
     const need = this.need(session, request.needId)
     const note = request.note.trim()
+    if (note.length === 0) throw new Error('PactFlow review note must be non-empty')
+    if (new TextEncoder().encode(note).length > 8_192 || /(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+/i.test(note)) {
+      throw new Error('PactFlow review note contains a credential-like value or is too large')
+    }
+    if (request.source !== 'dsh-approval') throw new Error('PactFlow review requires DSH Approval authorization')
+    if (!Number.isSafeInteger(request.needRevision) || request.needRevision !== need.revision) {
+      throw new Error(`PactFlow review targets stale Need revision: expected ${String(need.revision)}, got ${String(request.needRevision)}`)
+    }
+    const expectedDigest = pactFlowReviewEvidenceDigest(
+      session.id, need.id, need.revision, request.kind, request.decision, note,
+    )
+    if (!/^[0-9a-f]{64}$/.test(request.evidenceDigest) || request.evidenceDigest !== expectedDigest) {
+      throw new Error('PactFlow review evidence digest does not match the requested decision')
+    }
+    const askedIndex = session.events.findIndex(event => event.type === 'approval/asked'
+      && String(event.data.id) === request.approvalRequestId
+      && event.data.toolName === 'pactflow_record_review'
+      && event.data.reason?.includes(request.evidenceDigest))
+    const decidedIndex = session.events.findIndex(event => event.type === 'approval/decided'
+      && String(event.data.id) === request.approvalRequestId
+      && event.data.outcome === 'allowed-once')
+    if (askedIndex < 0 || decidedIndex <= askedIndex) {
+      throw new Error('PactFlow review approval audit pair is missing or not allowed')
+    }
+    const priorReviews = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {}
+    if (Object.values(priorReviews).some(review => review.approvalRequestId === request.approvalRequestId)) {
+      throw new Error('PactFlow review approval has already been consumed')
+    }
     const review: PactFlowReview = {
       id: `review-${randomUUID()}` as PactFlowReview['id'],
       needId: need.id,
@@ -581,6 +820,10 @@ export class PactFlowService extends TypertRemoteService {
       decision: request.decision,
       note,
       recordedAt: Date.now(),
+      approvalRequestId: request.approvalRequestId,
+      needRevision: request.needRevision,
+      evidenceDigest: request.evidenceDigest,
+      source: request.source,
     }
     this.events.append(session, 'pactflow/review-recorded', { v: 1, review })
     return review
@@ -742,6 +985,37 @@ export class PactFlowService extends TypertRemoteService {
     return { node, run }
   }
 
+  /** Bind the API-created Job UID to the already claimed Run before accepting any result. */
+  private bindK3sRunInSession(
+    session: Session,
+    owned: PactFlowClaimResult,
+    jobUid: string,
+  ): PactFlowClaimResult {
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(jobUid)) throw new Error('PactFlow K3s Job UID is invalid')
+    const currentRun = this.run(session, owned.run.id)
+    this.requireClaim(currentRun, owned.run.claimId)
+    if (currentRun.k3s === undefined) throw new Error(`PactFlow Run "${currentRun.id}" has no K3s spec`)
+    if (currentRun.k3s.runNonceHash === undefined || currentRun.k3s.claimTokenHash === undefined
+      || currentRun.k3s.specDigest === undefined) {
+      throw new Error(`PactFlow Run "${currentRun.id}" has no secure K3s binding fields`)
+    }
+    if (currentRun.k3s.jobUid !== undefined && currentRun.k3s.jobUid !== jobUid) {
+      throw new Error(`PactFlow Run "${currentRun.id}" is already bound to another K3s Job`)
+    }
+    const currentNode = this.node(session, currentRun.nodeId)
+    if (currentNode.revision !== currentRun.nodeRevision) {
+      throw new Error(`PactFlow Run "${currentRun.id}" owns stale node revision`)
+    }
+    if (currentRun.k3s.jobUid === jobUid) return { node: currentNode, run: currentRun }
+    const run: PactFlowRun = {
+      ...currentRun,
+      k3s: { ...currentRun.k3s, jobUid },
+      updatedAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/run-bound', { v: 1, run, node: currentNode })
+    return { node: currentNode, run }
+  }
+
   /** Renew a live Run lease; the first renewal also moves its node to running. */
   @Remote('renewRun')
   renewRun(sessionId: string, request: RenewPactFlowRunRequest): PactFlowClaimResult {
@@ -848,7 +1122,7 @@ export class PactFlowService extends TypertRemoteService {
       needs: values.pactflowNeeds ?? { byId: {} },
       dag: values.pactflowDag ?? { byId: {} },
       runs: values.pactflowRuns ?? { byId: {} },
-      delivery: values.pactflowDelivery ?? { reviews: {}, documents: {}, releases: {} },
+      delivery: values.pactflowDelivery ?? { reviews: {}, documents: {}, releases: {}, cleanups: {} },
     }
   }
 
@@ -860,7 +1134,7 @@ export class PactFlowService extends TypertRemoteService {
       dag: this.ctx.sessionProjections.stateOf(session, 'pactflowDag') ?? { byId: {} },
       runs: this.ctx.sessionProjections.stateOf(session, 'pactflowRuns') ?? { byId: {} },
       delivery: this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')
-        ?? { reviews: {}, documents: {}, releases: {} },
+        ?? { reviews: {}, documents: {}, releases: {}, cleanups: {} },
     }
   }
 
@@ -918,6 +1192,57 @@ export class PactFlowService extends TypertRemoteService {
     return await this.workspaceProjectForSession(this.liveSession(sessionId)) ?? null
   }
 
+  /** List user-owned validation profiles without exposing any runtime credentials. */
+  @Remote('listValidationProfiles')
+  async listValidationProfiles(workspaceId: string): Promise<readonly PactFlowValidationProfile[]> {
+    this.requireWorkspace(workspaceId)
+    const config = await this.workspaceProjects.get(workspaceId)
+    return config?.validationProfiles ?? []
+  }
+
+  /** Atomically replace the Workspace-owned validation profile catalog. */
+  @Remote('saveValidationProfiles')
+  async saveValidationProfiles(
+    request: PactFlowSaveValidationProfilesRequest,
+  ): Promise<PactFlowWorkspaceProjectConfig> {
+    const workspace = this.requireWorkspace(request.workspaceId)
+    const current = await this.workspaceProjects.get(request.workspaceId)
+    this.requireWorkspaceProjectRevision(current, request.expectedRevision)
+    const profileInput = request.profiles ?? request.validationProfiles
+    if (request.profiles !== undefined && request.validationProfiles !== undefined
+      && JSON.stringify(request.profiles) !== JSON.stringify(request.validationProfiles)) {
+      throw new Error('PactFlow validation profile payload was provided twice with different values')
+    }
+    const profiles = profileInput === undefined
+      ? current?.validationProfiles ?? []
+      : this.normalizeValidationProfiles(profileInput, current?.validationProfiles ?? [])
+    if (request.selectedProfileIds !== undefined && request.validationProfileIds !== undefined
+      && JSON.stringify(request.selectedProfileIds) !== JSON.stringify(request.validationProfileIds)) {
+      throw new Error('PactFlow selected validation profiles were provided twice with different values')
+    }
+    const requestedSelectedProfileIds = request.selectedProfileIds ?? request.validationProfileIds
+    const selectedProfileIds = requestedSelectedProfileIds === undefined
+      ? current?.validationProfileIds
+      : [...new Set(requestedSelectedProfileIds.map(value => value.trim()).filter(Boolean))]
+    if (selectedProfileIds !== undefined && selectedProfileIds.some(id => !profiles.some(profile => profile.id === id))) {
+      throw new Error('PactFlow Workspace selected validation profile is not in the saved catalog')
+    }
+    const now = Date.now()
+    const config: PactFlowWorkspaceProjectConfig = {
+      schema: 'dsh_pactflow_workspace_project/v1', workspaceId: request.workspaceId,
+      workspacePath: workspace.path, workspaceTitle: workspace.title,
+      revision: (current?.revision ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now,
+      ...(current?.git === undefined ? {} : { git: current.git }),
+      ...(current?.worker === undefined ? {} : { worker: current.worker }),
+      validationProfiles: profiles,
+      ...(selectedProfileIds === undefined ? {} : { validationProfileIds: selectedProfileIds }),
+      validationCommands: current?.validationCommands ?? [],
+    }
+    const written = await this.workspaceProjects.putIfRevision(request.expectedRevision, config)
+    if (!written) throw new Error('PactFlow Workspace project revision changed while saving validation profiles')
+    return config
+  }
+
   /** Initialize a Workspace-local Git repository without staging or committing files. */
   @Remote('initializeWorkspaceGit')
   async initializeWorkspaceGitProject(
@@ -953,9 +1278,13 @@ export class PactFlowService extends TypertRemoteService {
         }),
       },
       ...(current?.worker === undefined ? {} : { worker: current.worker }),
+      ...(current?.validationProfiles === undefined ? {} : { validationProfiles: current.validationProfiles }),
+      ...(current?.validationProfileIds === undefined ? {} : { validationProfileIds: current.validationProfileIds }),
       validationCommands: current?.validationCommands ?? [],
     }
-    await this.workspaceProjects.put(config)
+    if (!await this.workspaceProjects.putIfRevision(request.expectedRevision, config)) {
+      throw new Error('PactFlow Workspace project revision changed while adopting Git')
+    }
     return config
   }
 
@@ -998,9 +1327,13 @@ export class PactFlowService extends TypertRemoteService {
         giteaProviderId: provider.id, owner: request.owner, repo: request.repo, boundAt: now,
       },
       ...(current?.worker === undefined ? {} : { worker: current.worker }),
+      ...(current?.validationProfiles === undefined ? {} : { validationProfiles: current.validationProfiles }),
+      ...(current?.validationProfileIds === undefined ? {} : { validationProfileIds: current.validationProfileIds }),
       validationCommands: current?.validationCommands ?? [],
     }
-    await this.workspaceProjects.put(config)
+    if (!await this.workspaceProjects.putIfRevision(request.expectedRevision, config)) {
+      throw new Error('PactFlow Workspace project revision changed while creating the remote')
+    }
     return config
   }
 
@@ -1047,9 +1380,13 @@ export class PactFlowService extends TypertRemoteService {
         git: { ...current.git, k3sGitSecretName: request.k3sGitSecretName },
       }),
       worker: { ...structuredClone(request.worker), maxConcurrency: totalWorkers },
+      ...(current?.validationProfiles === undefined ? {} : { validationProfiles: current.validationProfiles }),
+      ...(current?.validationProfileIds === undefined ? {} : { validationProfileIds: current.validationProfileIds }),
       validationCommands: current?.validationCommands ?? [],
     }
-    await this.workspaceProjects.put(config)
+    if (!await this.workspaceProjects.putIfRevision(request.expectedRevision, config)) {
+      throw new Error('PactFlow Workspace project revision changed while saving Worker policy')
+    }
     return config
   }
 
@@ -1083,9 +1420,13 @@ export class PactFlowService extends TypertRemoteService {
         }),
       },
       ...(current?.worker === undefined ? {} : { worker: current.worker }),
+      ...(current?.validationProfiles === undefined ? {} : { validationProfiles: current.validationProfiles }),
+      ...(current?.validationProfileIds === undefined ? {} : { validationProfileIds: current.validationProfileIds }),
       validationCommands: legacy.git.validationCommands,
     }
-    await this.workspaceProjects.put(config)
+    if (!await this.workspaceProjects.putIfRevision(request.expectedRevision, config)) {
+      throw new Error('PactFlow Workspace project revision changed while migrating the Session project')
+    }
     return config
   }
 
@@ -1184,33 +1525,48 @@ export class PactFlowService extends TypertRemoteService {
     const headers = await this.registryHeaders(
       registry.username, registry.usernameCredentialRef, registry.passwordCredentialRef,
     )
-    const repositories = await requestJson<readonly { readonly name?: string }[]>({
-      url: new URL(`/api/v2.0/projects/${encodeURIComponent(project)}/repositories?page_size=100`, registry.endpoint).toString(),
-      tlsVerify: registry.tlsVerify,
-      ...headers === undefined ? {} : { headers },
-    })
-    if (repositories.status < 200 || repositories.status >= 300) {
-      throw new Error(`Harbor repositories returned HTTP ${String(repositories.status)}`)
+    const repositories: { readonly name?: string }[] = []
+    for (let page = 1; page <= 20; page += 1) {
+      const response = await requestJson<readonly { readonly name?: string }[]>({
+        url: joinUrlPath(registry.endpoint, `/api/v2.0/projects/${encodeURIComponent(project)}/repositories?page_size=100&page=${String(page)}`),
+        tlsVerify: registry.tlsVerify, ...headers === undefined ? {} : { headers },
+      })
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Harbor repositories returned HTTP ${String(response.status)}`)
+      }
+      if (!Array.isArray(response.value)) throw new Error('Harbor repositories response is not an array')
+      repositories.push(...response.value)
+      if (response.value.length < 100) break
+      if (page === 20) throw new Error('Harbor repositories exceeded the maximum page count')
     }
     const expectedNames = new Set([harnessRepository, `${project}/${harnessRepository}`])
-    const entry = repositories.value.find(candidate => candidate.name !== undefined && expectedNames.has(candidate.name))
+    const entry = repositories.find(candidate => candidate.name !== undefined && expectedNames.has(candidate.name))
     if (entry?.name === undefined) {
       throw new Error(`Harbor Harness repository "${harnessRepository}" was not found in project "${project}"`)
     }
-    const artifacts = await requestJson<readonly {
+    const artifacts: { readonly digest?: string; readonly tags?: readonly { readonly name?: string }[] }[] = []
+    for (let page = 1; page <= 20; page += 1) {
+      const response = await requestJson<readonly {
         readonly digest?: string
         readonly tags?: readonly { readonly name?: string }[]
       }[]>({
-        url: new URL(`/api/v2.0/projects/${encodeURIComponent(project)}/repositories/${harborRepositoryPathSegment(project, entry.name)}/artifacts?page_size=100&with_tag=true`, registry.endpoint).toString(),
-        tlsVerify: registry.tlsVerify,
-        ...headers === undefined ? {} : { headers },
+        url: joinUrlPath(registry.endpoint, `/api/v2.0/projects/${encodeURIComponent(project)}/repositories/${harborRepositoryPathSegment(project, entry.name)}/artifacts?page_size=100&with_tag=true&page=${String(page)}`),
+        tlsVerify: registry.tlsVerify, ...headers === undefined ? {} : { headers },
       })
-    if (artifacts.status < 200 || artifacts.status >= 300) {
-      throw new Error(`Harbor artifacts for "${entry.name}" returned HTTP ${String(artifacts.status)}`)
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Harbor artifacts for "${entry.name}" returned HTTP ${String(response.status)}`)
+      }
+      if (!Array.isArray(response.value)) throw new Error('Harbor artifacts response is not an array')
+      artifacts.push(...response.value)
+      if (response.value.length < 100) break
+      if (page === 20) throw new Error('Harbor artifacts exceeded the maximum page count')
     }
     const options: PactFlowHarborArtifactOption[] = []
-    for (const artifact of artifacts.value) {
+    const seenDigests = new Set<string>()
+    for (const artifact of artifacts) {
       if (artifact.digest === undefined || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) continue
+      if (seenDigests.has(artifact.digest)) continue
+      seenDigests.add(artifact.digest)
       const tags = (artifact.tags ?? []).map(tag => tag.name).filter((name): name is string => name !== undefined)
       options.push({
         registryId, repository: harnessRepository, digest: artifact.digest, tags,
@@ -1247,7 +1603,9 @@ export class PactFlowService extends TypertRemoteService {
   /** Return non-secret logical capacity counters for every configured Worker Pool. */
   @Remote('listWorkerPools')
   listWorkerPools(): readonly PactFlowWorkerPoolStatus[] {
-    return this.infrastructure?.statuses() ?? []
+    return this.infrastructure?.statuses().map(status => ({
+      ...status, waiting: status.waiting + this.executionCapacity.waiting(status.id),
+    })) ?? []
   }
 
   /** Run one real, read-only infrastructure connection probe with bounded stage evidence. */
@@ -1281,7 +1639,7 @@ export class PactFlowService extends TypertRemoteService {
           registry.username, registry.usernameCredentialRef, registry.passwordCredentialRef,
         )
         const ping = await probeHttp({
-          url: new URL('/api/v2.0/ping', registry.endpoint).toString(), tlsVerify: registry.tlsVerify,
+          url: joinUrlPath(registry.endpoint, '/api/v2.0/ping'), tlsVerify: registry.tlsVerify,
           ...headers === undefined ? {} : { headers },
         })
         if (ping < 200 || ping >= 300) throw new Error(`Harbor ping returned HTTP ${String(ping)}`)
@@ -1289,7 +1647,7 @@ export class PactFlowService extends TypertRemoteService {
         if (registry.project !== undefined && registry.project.trim() !== '') {
           const projectName = harborProjectName(registry.project)
           const project = await probeHttp({
-            url: new URL(`/api/v2.0/projects/${encodeURIComponent(projectName)}`, registry.endpoint).toString(),
+            url: joinUrlPath(registry.endpoint, `/api/v2.0/projects/${encodeURIComponent(projectName)}`),
             tlsVerify: registry.tlsVerify, ...headers === undefined ? {} : { headers },
           })
           if (project < 200 || project >= 300) throw new Error(`Harbor project access returned HTTP ${String(project)}`)
@@ -1313,12 +1671,16 @@ export class PactFlowService extends TypertRemoteService {
         const authorization = provider.username === undefined
           ? `token ${token}`
           : `Basic ${Buffer.from(`${provider.username}:${token}`).toString('base64')}`
-        const status = await probeHttp({
-          url: new URL('/api/v1/version', provider.baseUrl).toString(),
+        const response = await requestJson<{ readonly version?: unknown }>({
+          url: joinUrlPath(provider.baseUrl, '/api/v1/version'),
           headers: { Authorization: authorization },
         })
-        if (status < 200 || status >= 300) throw new Error(`Gitea version API returned HTTP ${String(status)}`)
-        stages.push({ name: 'gitea-api', state: 'succeeded', detail: `Gitea API returned HTTP ${String(status)}` })
+        if (response.status < 200 || response.status >= 300) throw new Error(`Gitea version API returned HTTP ${String(response.status)}`)
+        if (response.value === null || typeof response.value !== 'object'
+          || typeof response.value.version !== 'string' || response.value.version.trim() === '') {
+          throw new Error('Gitea version API returned no semantic version')
+        }
+        stages.push({ name: 'gitea-api', state: 'succeeded', detail: `Gitea API returned HTTP ${String(response.status)}` })
       } else if (request.kind === 'harness') {
         const template = infrastructure.listTemplates().find(candidate => candidate.id === request.id)
         if (template === undefined) throw new Error(`PactFlow Harness "${request.id}" is not configured`)
@@ -1530,11 +1892,22 @@ export class PactFlowService extends TypertRemoteService {
     sessionId: string,
     request: DispatchPactFlowK3sNodeRequest,
   ): Promise<PactFlowClaimResult> {
+    return await this.dispatchK3sNodeWithSignal(sessionId, request)
+  }
+
+  /** Internal Agent path carrying the live exec.signal through queue and Job cancellation. */
+  async dispatchK3sNodeWithSignal(
+    sessionId: string,
+    request: DispatchPactFlowK3sNodeRequest,
+    signal?: AbortSignal,
+  ): Promise<PactFlowClaimResult> {
+    if (signal?.aborted) throw new Error('PactFlow K3s dispatch was cancelled before claim')
     const session = this.livePactFlowSession(sessionId)
     const project = this.requireProject(session)
     const workspaceProject = await this.workspaceProjectForSession(session)
     const projectGit = project.git ?? this.workspaceGitBinding(workspaceProject)
     if (projectGit === undefined) throw new Error('PactFlow project has no Git binding')
+    await this.assertValidationProfilesCurrent(session, projectGit)
     if (projectGit.k3sGitSecretName === undefined) {
       throw new Error('PactFlow project has no K3s Git Secret binding')
     }
@@ -1567,11 +1940,13 @@ export class PactFlowService extends TypertRemoteService {
     const runId = PactFlowRunId(`run-${randomUUID()}`)
     const git = await this.git.plan(session.header.cwd, session.id, runId, node, projectGit)
     worker.preflightRun(git, prompt)
-    const planned = worker.plan(runId, resolved.executionTemplateId, projectGit.k3sGitSecretName, leaseDurationMs)
+    const planned = worker.plan(
+      runId, resolved.executionTemplateId, projectGit.k3sGitSecretName, leaseDurationMs, git, prompt,
+    )
     const modelApiKey = resolved.modelConnection === undefined
       ? undefined
       : await this.resolveCredential(resolved.modelConnection.apiKeyCredentialRef, 'model API key')
-    const k3s: PactFlowK3sRunSpec = {
+    const k3sDraft: PactFlowK3sRunSpec = {
       ...planned,
       ...(workspaceProject === undefined ? {} : { projectConfigRevision: workspaceProject.revision }),
       ...(selectedProfile === undefined ? {} : { agentProfileId: selectedProfile.id }),
@@ -1582,15 +1957,36 @@ export class PactFlowService extends TypertRemoteService {
         ephemeralModelSecret: true,
       }),
     }
+    const k3s: PactFlowK3sRunSpec = {
+      ...k3sDraft,
+      specDigest: pactFlowK3sSpecDigest(k3sDraft, git, prompt),
+    }
     this.requireRevision('project', project.id, this.requireProject(session).revision, project.revision)
-    const releaseProjectCapacity = workspaceProject?.worker === undefined
-      ? undefined
-      : await this.projectCapacity.acquire(
-        workspaceProject.workspaceId, workspaceProject.worker, selectedProfile!.id,
+    const latestWorkspaceProject = await this.workspaceProjectForSession(session)
+    if ((workspaceProject?.revision ?? 0) !== (latestWorkspaceProject?.revision ?? 0)
+      || JSON.stringify(workspaceProject?.worker) !== JSON.stringify(latestWorkspaceProject?.worker)
+      || JSON.stringify(workspaceProject?.validationProfiles) !== JSON.stringify(latestWorkspaceProject?.validationProfiles)
+      || JSON.stringify(workspaceProject?.validationProfileIds) !== JSON.stringify(latestWorkspaceProject?.validationProfileIds)) {
+      throw new Error('PactFlow dispatch Workspace configuration changed before claim')
+    }
+    const queueId = `queue-${randomUUID()}`
+    this.events.append(session, 'pactflow/run-queued', {
+      v: 1, queueId, sessionId: String(session.id), nodeId: node.id, requestedAt: Date.now(),
+    })
+    let releaseCapacity: (() => void) | undefined
+    try {
+      releaseCapacity = await this.acquireExecutionOrCancel(
+        session, queueId,
+        workspaceProject?.worker === undefined ? undefined : workspaceProject.workspaceId,
+        workspaceProject?.worker,
+        selectedProfile?.id,
+        resolved.poolId,
+        signal,
       )
-    const releaseCapacity = resolved.poolId === undefined || this.infrastructure === undefined
-      ? undefined
-      : await this.infrastructure.acquire(resolved.poolId)
+    } catch (error) {
+      releaseCapacity?.()
+      throw error
+    }
     try {
       let owned = this.claimNodeInSession(session, {
         nodeId: request.nodeId,
@@ -1611,6 +2007,11 @@ export class PactFlowService extends TypertRemoteService {
       }
 
       const controller = new AbortController()
+      const forwardAbort = (): void => controller.abort(signal?.reason ?? 'PactFlow K3s dispatch cancelled')
+      if (signal !== undefined) {
+        if (signal.aborted) forwardAbort()
+        else signal.addEventListener('abort', forwardAbort, { once: true })
+      }
       let timer: ReturnType<typeof setInterval> | undefined
       try {
         owned = this.renewRun(session.id, {
@@ -1620,9 +2021,11 @@ export class PactFlowService extends TypertRemoteService {
         })
         timer = setInterval(() => {
           try {
+            const liveOwned = owned
+            if (liveOwned === undefined) return
             owned = this.renewRun(session.id, {
-              runId: owned.run.id,
-              claimId: owned.run.claimId,
+              runId: liveOwned.run.id,
+              claimId: liveOwned.run.claimId,
               leaseDurationMs,
             })
           } catch {
@@ -1631,16 +2034,23 @@ export class PactFlowService extends TypertRemoteService {
         }, Math.max(1_000, Math.floor(leaseDurationMs / 2)))
         let remoteResult: PactFlowK3sResult
         try {
-          remoteResult = await worker.run(k3s, git, prompt, controller.signal, modelApiKey)
+          remoteResult = await worker.run(
+            k3s, git, prompt, controller.signal, modelApiKey, undefined,
+            async (jobUid) => {
+              owned = this.bindK3sRunInSession(session, owned, jobUid)
+            },
+          )
           if (remoteResult.branch !== git.branch) throw new Error('PactFlow K3s Worker returned another branch')
         } catch (error) {
-          return this.settleRunInSession(session, {
+          const settled = this.settleRunInSession(session, {
             runId: owned.run.id,
             claimId: owned.run.claimId,
             expectedNodeRevision: owned.node.revision,
             state: controller.signal.aborted ? 'cancelled' : 'failed',
             outcome: this.boundedOutcome(error),
           })
+          await this.ensureK3sCleanup(session, settled.run)
+          return settled
         }
         let gitResult: PactFlowGitResult
         try {
@@ -1651,13 +2061,15 @@ export class PactFlowService extends TypertRemoteService {
             await this.resolveGitAuth(git),
           )
         } catch (error) {
-          return this.settleRunInSession(session, {
+          const settled = this.settleRunInSession(session, {
             runId: owned.run.id,
             claimId: owned.run.claimId,
             expectedNodeRevision: owned.node.revision,
             state: 'failed',
             outcome: this.boundedOutcome(error),
           })
+          await this.ensureK3sCleanup(session, settled.run)
+          return settled
         }
         return this.settleRunInSession(session, {
           runId: owned.run.id,
@@ -1668,10 +2080,10 @@ export class PactFlowService extends TypertRemoteService {
         }, gitResult, remoteResult, remoteResult.finishedAt)
       } finally {
         if (timer !== undefined) clearInterval(timer)
+        if (signal !== undefined) signal.removeEventListener('abort', forwardAbort)
       }
     } finally {
       releaseCapacity?.()
-      releaseProjectCapacity?.()
     }
   }
 
@@ -1693,10 +2105,21 @@ export class PactFlowService extends TypertRemoteService {
     sessionId: string,
     request: DispatchPactFlowGitNodeRequest,
   ): Promise<PactFlowClaimResult> {
+    return await this.dispatchGitNodeWithSignal(sessionId, request)
+  }
+
+  /** Internal Agent path carrying cancellation into a local Subagent-backed Git Run. */
+  async dispatchGitNodeWithSignal(
+    sessionId: string,
+    request: DispatchPactFlowGitNodeRequest,
+    signal?: AbortSignal,
+  ): Promise<PactFlowClaimResult> {
+    if (signal?.aborted) throw new Error('PactFlow Git dispatch was cancelled before claim')
     const session = this.livePactFlowSession(sessionId)
     const execution = this.localExecution(session, request, true)
     const project = this.requireProject(session)
     if (project.git === undefined) throw new Error('PactFlow project has no Git binding')
+    await this.assertValidationProfilesCurrent(session, project.git)
     const node = this.node(session, request.nodeId)
     this.requireRevision('node', node.id, node.revision, request.expectedRevision)
     if (node.state !== 'ready') throw new Error(`PactFlow node "${node.id}" is not ready`)
@@ -1715,7 +2138,7 @@ export class PactFlowService extends TypertRemoteService {
         outcome: this.boundedOutcome(error),
       })
     }
-    return await this.executeClaimed(session, request, execution, owned, git)
+    return await this.executeClaimed(session, request, execution, owned, git, signal)
   }
 
   /** Resolve the live parent and selected Provider before a node is claimed. */
@@ -1748,9 +2171,15 @@ export class PactFlowService extends TypertRemoteService {
     execution: { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string },
     claimed: PactFlowClaimResult,
     git?: PactFlowGitRunSpec,
+    externalSignal?: AbortSignal,
   ): Promise<PactFlowClaimResult> {
     let owned = claimed
     const controller = new AbortController()
+    const forwardAbort = (): void => controller.abort(externalSignal?.reason ?? 'PactFlow dispatch cancelled')
+    if (externalSignal !== undefined) {
+      if (externalSignal.aborted) forwardAbort()
+      else externalSignal.addEventListener('abort', forwardAbort, { once: true })
+    }
     let child: SubagentRun
     try {
       child = await execution.subagents.start(request.provider, {
@@ -1831,6 +2260,7 @@ export class PactFlowService extends TypertRemoteService {
       }, gitResult)
     } finally {
       if (timer !== undefined) clearInterval(timer)
+      if (externalSignal !== undefined) externalSignal.removeEventListener('abort', forwardAbort)
       await child.dispose()
     }
   }
@@ -1928,9 +2358,22 @@ export class PactFlowService extends TypertRemoteService {
     } catch {
       throw new Error('PactFlow could not connect to the model endpoint')
     }
-    await response.body?.cancel()
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`PactFlow model endpoint returned HTTP ${String(response.status)}`)
+    }
+    let document: unknown
+    try { document = await response.json() } catch {
+      throw new Error('PactFlow model endpoint returned invalid JSON')
+    }
+    if (document === null || typeof document !== 'object') {
+      throw new Error('PactFlow model endpoint returned an empty response')
+    }
+    const record = document as { readonly content?: unknown; readonly output?: unknown; readonly choices?: unknown; readonly id?: unknown }
+    const hasContent = Array.isArray(record.content) && record.content.length > 0
+    const hasOutput = Array.isArray(record.output) && record.output.length > 0
+    const hasChoices = Array.isArray(record.choices) && record.choices.length > 0
+    if (!hasContent && !hasOutput && !hasChoices && typeof record.id !== 'string') {
+      throw new Error('PactFlow model endpoint returned no semantic response')
     }
   }
 
@@ -1975,6 +2418,7 @@ export class PactFlowService extends TypertRemoteService {
     if (this.currentPreset(session) !== 'pactflow') return
     this.reconcileLocalSession(session)
     await this.reconcileK3sSession(session)
+    await this.reconcileCleanups(session)
   }
 
   /** Schedule or settle nonterminal local Runs whose in-memory Worker cannot survive a cold restart. */
@@ -2033,18 +2477,69 @@ export class PactFlowService extends TypertRemoteService {
 
   private async reconcileK3sRun(session: Session, initial: PactFlowRun): Promise<void> {
     if (initial.k3s === undefined || initial.git === undefined) return
-    const worker = this.workerForRun(initial.k3s)
+    let worker: PactFlowK3sWorker
+    try {
+      worker = this.workerForRun(initial.k3s)
+    } catch (error) {
+      const currentNode = this.node(session, initial.nodeId)
+      if (!this.isTerminalRun(initial)) {
+        this.settleRunInSession(session, {
+          runId: initial.id, claimId: initial.claimId, expectedNodeRevision: currentNode.revision,
+          state: 'failed', outcome: this.boundedOutcome(error),
+        })
+      }
+      return
+    }
     const key = `${session.id}:${initial.id}`
     if (this.reconcilingK3s.has(key)) return
     this.reconcilingK3s.add(key)
-    const releaseCapacity = initial.k3s.workerPoolId === undefined || this.infrastructure === undefined
-      ? undefined
-      : this.infrastructure.reserveExisting(initial.k3s.workerPoolId)
+    const workspaceProject = await this.workspaceProjectForSession(session)
+    let releaseCapacity: (() => void) | undefined
+    try {
+      releaseCapacity = this.executionCapacity.reserveExisting({
+        workspaceId: workspaceProject?.worker === undefined ? undefined : workspaceProject.workspaceId,
+        policy: workspaceProject?.worker,
+        profileId: initial.k3s.agentProfileId,
+        poolId: initial.k3s.workerPoolId,
+        resolveInfrastructure: () => this.infrastructure,
+      })
+    } catch (error) {
+      releaseCapacity?.()
+      const current = this.runState(session)[initial.id]
+      if (current !== undefined && !this.isTerminalRun(current)) {
+        try {
+          const currentNode = this.node(session, current.nodeId)
+          const settled = this.settleRunInSession(session, {
+            runId: current.id, claimId: current.claimId, expectedNodeRevision: currentNode.revision,
+            state: 'failed', outcome: this.boundedOutcome(error),
+          })
+          await this.ensureK3sCleanup(session, settled.run)
+        } catch (settleError) {
+          this.ctx.logger.warn('PactFlow K3s capacity failure left Run unsettled "%s": %s', initial.id, this.boundedOutcome(settleError))
+        }
+      }
+      this.reconcilingK3s.delete(key)
+      this.ctx.logger.warn('PactFlow K3s capacity recovery failed for "%s": %s', initial.id, this.boundedOutcome(error))
+      return
+    }
     const controller = new AbortController()
     let timer: ReturnType<typeof setInterval> | undefined
+    let owned: PactFlowClaimResult | undefined
     try {
-      let owned = { run: initial, node: this.node(session, initial.nodeId) }
-      let observation = await worker.observe(initial.k3s)
+      owned = { run: initial, node: this.node(session, initial.nodeId) }
+      if (initial.k3s.runNonceHash === undefined || initial.k3s.claimTokenHash === undefined
+        || initial.k3s.specDigest === undefined) {
+        const producerVersion = this.pactFlowProducerVersion(session)
+        if (producerVersion !== '0.3.0') {
+          const settled = this.settleRunInSession(session, {
+            runId: initial.id, claimId: initial.claimId, expectedNodeRevision: owned.node.revision,
+            state: 'failed', outcome: 'Legacy K3s Run has no bound nonce, claim, or Spec digest',
+          })
+          await this.ensureK3sCleanup(session, settled.run)
+          return
+        }
+      }
+      let observation = await this.retryK3sOperation(() => worker.observe(initial.k3s!), controller.signal)
       if (observation.state === 'missing') {
         if (Date.now() >= owned.run.leaseDeadline) {
           this.expireRunInSession(session, owned.run, 'K3s Job is missing after lease expiry')
@@ -2061,7 +2556,7 @@ export class PactFlowService extends TypertRemoteService {
       }
       if (observation.state === 'pending') {
         if (Date.now() >= owned.run.leaseDeadline) {
-          await worker.cancelRun(initial.k3s)
+          await this.retryK3sOperation(() => worker.cancelRun(initial.k3s!), controller.signal)
           this.expireRunInSession(session, owned.run, 'K3s Job exceeded its persisted lease')
           return
         }
@@ -2074,9 +2569,11 @@ export class PactFlowService extends TypertRemoteService {
         })
         timer = setInterval(() => {
           try {
+            const liveOwned = owned
+            if (liveOwned === undefined) return
             owned = this.renewRun(session.id, {
-              runId: owned.run.id,
-              claimId: owned.run.claimId,
+              runId: liveOwned.run.id,
+              claimId: liveOwned.run.claimId,
               leaseDurationMs,
             })
           } catch {
@@ -2084,19 +2581,22 @@ export class PactFlowService extends TypertRemoteService {
           }
         }, Math.max(1_000, Math.floor(leaseDurationMs / 2)))
         try {
-          const result = await worker.waitExisting(initial.k3s, controller.signal)
+          const result = await this.retryK3sOperation(
+            () => worker.waitExisting(initial.k3s!, controller.signal), controller.signal,
+          )
           observation = { state: 'succeeded', result }
         } catch (error) {
           if (Date.now() >= owned.run.leaseDeadline) {
             this.expireRunInSession(session, owned.run, 'K3s Job failed after lease expiry')
           } else {
-            this.settleRunInSession(session, {
+            const settled = this.settleRunInSession(session, {
               runId: owned.run.id,
               claimId: owned.run.claimId,
               expectedNodeRevision: owned.node.revision,
               state: controller.signal.aborted ? 'cancelled' : 'failed',
               outcome: this.boundedOutcome(error),
             })
+            await this.ensureK3sCleanup(session, settled.run)
           }
           return
         }
@@ -2106,13 +2606,14 @@ export class PactFlowService extends TypertRemoteService {
           this.expireRunInSession(session, owned.run, 'K3s Job failed after lease expiry')
           return
         }
-        this.settleRunInSession(session, {
+        const settled = this.settleRunInSession(session, {
           runId: owned.run.id,
           claimId: owned.run.claimId,
           expectedNodeRevision: owned.node.revision,
           state: 'failed',
           outcome: observation.outcome,
         }, undefined, undefined, observation.finishedAt)
+        await this.ensureK3sCleanup(session, settled.run)
         return
       }
       if (observation.state !== 'succeeded') {
@@ -2124,12 +2625,12 @@ export class PactFlowService extends TypertRemoteService {
         return
       }
       if (remoteResult.branch !== initial.git.branch) throw new Error('recovered K3s Worker returned another branch')
-      const gitResult = await this.git.acceptRemoteResult(
+      const gitResult = await this.retryK3sOperation(async () => this.git.acceptRemoteResult(
         session.header.cwd,
-        initial.git,
+        initial.git!,
         remoteResult.commit,
-        await this.resolveGitAuth(initial.git),
-      )
+        await this.resolveGitAuth(initial.git!),
+      ), controller.signal)
       this.settleRunInSession(session, {
         runId: owned.run.id,
         claimId: owned.run.claimId,
@@ -2137,11 +2638,64 @@ export class PactFlowService extends TypertRemoteService {
         state: 'succeeded',
         outcome: `Recovered K3s Worker ${remoteResult.podName} committed ${remoteResult.commit}`,
       }, gitResult, remoteResult, remoteResult.finishedAt)
+    } catch (error) {
+      const current = this.runState(session)[initial.id]
+      if (current !== undefined && !this.isTerminalRun(current)) {
+        try {
+          const currentNode = this.node(session, current.nodeId)
+          if (Date.now() >= current.leaseDeadline) {
+            const settled = this.expireRunInSession(session, current, this.boundedOutcome(error))
+            await this.ensureK3sCleanup(session, settled.run)
+          } else {
+            const settled = this.settleRunInSession(session, {
+              runId: current.id, claimId: current.claimId, expectedNodeRevision: currentNode.revision,
+              state: controller.signal.aborted ? 'cancelled' : 'failed', outcome: this.boundedOutcome(error),
+            })
+            await this.ensureK3sCleanup(session, settled.run)
+          }
+        } catch (settleError) {
+          this.ctx.logger.warn('PactFlow K3s Run "%s" could not be settled after recovery failure: %s', initial.id, this.boundedOutcome(settleError))
+        }
+      }
     } finally {
       if (timer !== undefined) clearInterval(timer)
       releaseCapacity?.()
       this.reconcilingK3s.delete(key)
     }
+  }
+
+  private async retryK3sOperation<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    let lastError: unknown
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (signal?.aborted) throw new Error('PactFlow K3s recovery was cancelled')
+      try { return await operation() } catch (error) {
+        lastError = error
+        if (this.isPermanentK3sError(error) || attempt === 4) break
+        await this.backoff(Math.min(15_000, 250 * (2 ** attempt)), signal)
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('PactFlow K3s operation failed')
+  }
+
+  private async backoff(delayMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error('PactFlow K3s recovery was cancelled')
+    await new Promise<void>((resolveDelay, rejectDelay) => {
+      let timer: ReturnType<typeof setTimeout>
+      const abort = (): void => { clearTimeout(timer); rejectDelay(new Error('PactFlow K3s recovery was cancelled')) }
+      timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort)
+        resolveDelay()
+      }, delayMs)
+      signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
+
+  private isPermanentK3sError(error: unknown): boolean {
+    const message = this.boundedOutcome(error).toLowerCase()
+    return /uid|identity|label|invalid|foreign|does not match|not descended|another branch|claim|status 4\d\d|http 4\d\d/.test(message)
   }
 
   /** Record scheduler-owned expiry; this is not a late Worker result. */
@@ -2193,6 +2747,12 @@ export class PactFlowService extends TypertRemoteService {
     return this.ctx.sessionProjections.stateOf(session, 'agentPreset') ?? session.header.agentPreset
   }
 
+  private pactFlowProducerVersion(session: Session): string | undefined {
+    const declaration = session.events.findLast(event => event.type === 'session/external-event-producer'
+      && event.data.producer === 'dsh-pactflow')
+    return declaration?.type === 'session/external-event-producer' ? declaration.data.version : undefined
+  }
+
   /** Require the root project projection. */
   private requireProject(session: Session): PactFlowProject {
     const project = this.ctx.sessionProjections.stateOf(session, 'pactflowProject')?.project
@@ -2230,16 +2790,74 @@ export class PactFlowService extends TypertRemoteService {
     return workspace === undefined ? undefined : await this.workspaceProjects.get(String(workspace.id))
   }
 
+  private async resolveValidationSelection(
+    session: Session,
+    request: BindPactFlowGitRequest,
+  ): Promise<{ readonly ids: readonly string[]; readonly revisions: Readonly<Record<string, number>>; readonly commands: readonly PactFlowValidationProfile[] } | undefined> {
+    if (request.validationProfileIds === undefined) return undefined
+    if (request.validationCommands !== undefined && request.validationCommands.length > 0) {
+      throw new Error('PactFlow Git binding cannot mix validation profile IDs with raw validation commands')
+    }
+    const ids = [...new Set(request.validationProfileIds.map(value => value.trim()).filter(Boolean))]
+    if (ids.length > 32) throw new Error('PactFlow Git binding selects too many validation profiles')
+    const config = await this.workspaceProjectForSession(session)
+    const profiles = new Map((config?.validationProfiles ?? []).map(profile => [profile.id, profile]))
+    const selected = ids.map(id => {
+      const profile = profiles.get(id)
+      if (profile === undefined) throw new Error(`PactFlow validation profile "${id}" is not registered for this Workspace`)
+      return profile
+    })
+    return {
+      ids,
+      revisions: Object.fromEntries(selected.map(profile => [profile.id, profile.revision])),
+      commands: selected,
+    }
+  }
+
+  private async assertValidationProfilesCurrent(
+    session: Session,
+    binding: PactFlowGitBinding,
+  ): Promise<void> {
+    if (binding.validationProfileIds === undefined || binding.validationProfileIds.length === 0) return
+    const config = await this.workspaceProjectForSession(session)
+    const profiles = new Map((config?.validationProfiles ?? []).map(profile => [profile.id, profile]))
+    for (const id of binding.validationProfileIds) {
+      const profile = profiles.get(id)
+      const expected = binding.validationProfileRevisions?.[id]
+      if (profile === undefined || expected === undefined || profile.revision !== expected) {
+        throw new Error(`PactFlow validation profile "${id}" changed after Git binding; rebind the project`)
+      }
+    }
+  }
+
+  private isLegacyValidationBinding(binding: Pick<PactFlowGitBinding, 'validationCommands' | 'validationProfileIds' | 'legacyUntrusted'>): boolean {
+    return binding.legacyUntrusted === true
+      || (binding.validationProfileIds === undefined && binding.validationCommands.length > 0)
+  }
+
   private workspaceGitBinding(config: PactFlowWorkspaceProjectConfig | undefined): PactFlowGitBinding | undefined {
     if (config === undefined || config.git === undefined) return undefined
     const git = config.git
     const provider = git.giteaProviderId === undefined
       ? undefined
       : this.infrastructure?.settings.gitProviders.find(item => item.id === git.giteaProviderId)
+    const selectedProfileIds = config.validationProfileIds ?? []
+    const selectedProfiles = selectedProfileIds.map(id => config.validationProfiles?.find(profile => profile.id === id))
+    if (selectedProfiles.some(profile => profile === undefined)) {
+      throw new Error('PactFlow Workspace references an unknown validation profile')
+    }
+    const profileCommands = selectedProfiles.map(profile => ({
+      command: profile!.command, args: [...profile!.args], timeoutMs: profile!.timeoutMs,
+    }))
     return {
       remote: git.remote, remoteUrl: git.remoteUrl, defaultBranch: git.defaultBranch,
       revision: config.revision, boundAt: git.boundAt,
-      validationCommands: config.validationCommands,
+      validationCommands: profileCommands.length > 0 ? profileCommands : config.validationCommands ?? [],
+      ...(selectedProfileIds.length === 0 ? {} : {
+        validationProfileIds: selectedProfileIds,
+        validationProfileRevisions: Object.fromEntries(selectedProfiles.map(profile => [profile!.id, profile!.revision])),
+      }),
+      ...(profileCommands.length === 0 && (config.validationCommands?.length ?? 0) > 0 ? { legacyUntrusted: true } : {}),
       ...(git.k3sGitSecretName === undefined ? {} : { k3sGitSecretName: git.k3sGitSecretName }),
       ...(provider?.username === undefined ? {} : {
         auth: { kind: 'https-token', username: provider.username, credentialRef: provider.tokenCredentialRef },
@@ -2264,6 +2882,51 @@ export class PactFlowService extends TypertRemoteService {
     }
   }
 
+  private normalizeValidationProfiles(
+    input: readonly PactFlowValidationProfileInput[],
+    previous: readonly PactFlowValidationProfile[],
+  ): readonly PactFlowValidationProfile[] {
+    if (input.length > 32) throw new Error('PactFlow Workspace supports at most 32 validation profiles')
+    const prior = new Map(previous.map(profile => [profile.id, profile]))
+    const seen = new Set<string>()
+    return input.map(candidate => {
+      const id = candidate.id.trim()
+      const displayName = candidate.displayName.trim()
+      const command = candidate.command.trim()
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
+        throw new Error(`PactFlow validation profile id "${id}" is invalid`)
+      }
+      if (seen.has(id)) throw new Error(`duplicate PactFlow validation profile "${id}"`)
+      seen.add(id)
+      if (displayName.length === 0 || displayName.length > 256) {
+        throw new Error(`PactFlow validation profile "${id}" displayName is invalid`)
+      }
+      if (command.length === 0 || command.length > 256 || /[\0\r\n\s;&|<>$()`]/.test(command)) {
+        throw new Error(`PactFlow validation profile "${id}" command is invalid`)
+      }
+      const executable = command.split('/').pop()?.toLowerCase() ?? command.toLowerCase()
+      if (new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'cmd.exe', 'powershell', 'pwsh']).has(executable)) {
+        throw new Error(`PactFlow validation profile "${id}" cannot invoke a shell wrapper`)
+      }
+      if (candidate.args.length > 64 || candidate.args.some(argument =>
+        argument.length > 4_096 || /[\0\r\n]/.test(argument))) {
+        throw new Error(`PactFlow validation profile "${id}" args are invalid`)
+      }
+      if (!Number.isSafeInteger(candidate.timeoutMs) || candidate.timeoutMs < 1_000 || candidate.timeoutMs > 3_600_000) {
+        throw new Error(`PactFlow validation profile "${id}" timeoutMs is invalid`)
+      }
+      const existing = prior.get(id)
+      if (candidate.revision !== undefined && (!Number.isSafeInteger(candidate.revision)
+        || candidate.revision !== (existing?.revision ?? 1))) {
+        throw new Error(`PactFlow validation profile "${id}" revision is stale`)
+      }
+      return {
+        id, displayName, command, args: [...candidate.args], timeoutMs: candidate.timeoutMs,
+        revision: (existing?.revision ?? 0) + 1,
+      }
+    })
+  }
+
   /** Resolve one need from the projection. */
   private need(session: Session, rawId: string): PactFlowNeed {
     this.requireProject(session)
@@ -2278,10 +2941,19 @@ export class PactFlowService extends TypertRemoteService {
     session: Session,
     needId: PactFlowNeed['id'],
     kind: PactFlowReview['kind'],
+    expectedRevision?: number,
   ): boolean {
+    const currentNeed = this.ctx.sessionProjections.stateOf(session, 'pactflowNeeds')?.byId[needId]
+    const reviewRevision = expectedRevision ?? currentNeed?.revision
     const reviews = Object.values(
       this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {},
-    ).filter(review => review.needId === needId && review.kind === kind)
+    ).filter(review => review.needId === needId && review.kind === kind
+      && review.source === 'dsh-approval'
+      && review.approvalRequestId !== undefined
+      && review.evidenceDigest !== undefined
+      && review.needRevision !== undefined
+      && reviewRevision !== undefined
+      && review.needRevision === reviewRevision)
       .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
     return reviews[0]?.decision === 'approved'
   }

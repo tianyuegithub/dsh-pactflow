@@ -10,6 +10,7 @@ import {
   inspectWorkspaceGit,
 } from '../src/workspace-project.ts'
 import { PactFlowProjectCapacity } from '../src/project-capacity.ts'
+import { PactFlowGitWorkspace } from '../src/git-workspace.ts'
 
 const exec = promisify(execFile)
 
@@ -39,6 +40,30 @@ describe('PactFlow Workspace projects', () => {
       })
       await expect(new PactFlowWorkspaceProjectStore(path).get('workspace-1')).resolves.toMatchObject({ revision: 1 })
       expect(await readFile(path, 'utf8')).not.toMatch(/token|password|apiKey/i)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('atomically accepts one concurrent revision compare-and-swap write', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pactflow-project-cas-'))
+    try {
+      const path = join(root, 'projects.json')
+      const initial = {
+        schema: 'dsh_pactflow_workspace_project/v1' as const, workspaceId: 'workspace-1',
+        workspacePath: '/workspace/project', workspaceTitle: 'Project', revision: 1,
+        createdAt: 1, updatedAt: 1, validationCommands: [],
+      }
+      await new PactFlowWorkspaceProjectStore(path).put(initial)
+      const first = new PactFlowWorkspaceProjectStore(path)
+      const second = new PactFlowWorkspaceProjectStore(path)
+      const results = await Promise.all([
+        first.putIfRevision(1, { ...initial, workspaceTitle: 'First', revision: 2, updatedAt: 2 }),
+        second.putIfRevision(1, { ...initial, workspaceTitle: 'Second', revision: 2, updatedAt: 3 }),
+      ])
+      expect(results.filter(Boolean)).toHaveLength(1)
+      await expect(new PactFlowWorkspaceProjectStore(path).get('workspace-1'))
+        .resolves.toMatchObject({ revision: 2 })
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -76,5 +101,41 @@ describe('PactFlow Workspace projects', () => {
     expect(order).toEqual(['codex'])
     releaseSecond()
     releaseDsh()
+  })
+
+  it('cancels queued capacity, releases idempotently, and restores persisted occupancy', async () => {
+    const capacity = new PactFlowProjectCapacity()
+    const policy = {
+      clusterId: 'cluster', workerPoolId: 'default', maxConcurrency: 1,
+      agentProfiles: [{ id: 'codex', displayName: 'Codex', templateId: 'codex', maxConcurrency: 1, modelConnectionId: 'responses' }],
+    }
+    const restored = capacity.reserveExisting('workspace', policy, 'codex')
+    const abort = new AbortController()
+    const queued = capacity.acquire('workspace', policy, 'codex', abort.signal)
+    abort.abort()
+    await expect(queued).rejects.toThrow('wait was cancelled')
+    restored()
+    restored()
+    const release = await capacity.acquire('workspace', policy, 'codex')
+    release()
+  })
+
+  it('does not expose ambient credential-like environment variables to validation', async () => {
+    const workspace = new PactFlowGitWorkspace()
+    const prior = process.env.PACTFLOW_TEST_SECRET
+    process.env.PACTFLOW_TEST_SECRET = 'must-not-cross-boundary'
+    try {
+      const runValidation = Reflect.get(workspace, 'runValidation') as (
+        cwd: string, validation: { command: string; args: readonly string[]; timeoutMs: number },
+      ) => Promise<unknown>
+      await expect(runValidation('/tmp', {
+        command: process.execPath,
+        args: ['-e', "if (process.env.PACTFLOW_TEST_SECRET) process.exit(1)"],
+        timeoutMs: 5_000,
+      })).resolves.toMatchObject({ exitCode: 0 })
+    } finally {
+      if (prior === undefined) delete process.env.PACTFLOW_TEST_SECRET
+      else process.env.PACTFLOW_TEST_SECRET = prior
+    }
   })
 })

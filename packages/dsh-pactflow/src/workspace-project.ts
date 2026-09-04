@@ -90,54 +90,96 @@ export async function attachAndPushWorkspaceRemote(
 
 /** Durable plugin-owned project configuration store keyed by the stable DSH workspace id. */
 export class PactFlowWorkspaceProjectStore {
+  private static readonly locks = new Map<string, Promise<void>>()
   private readonly rows = new Map<string, PactFlowWorkspaceProjectConfig>()
   private loaded: Promise<void> | undefined
-  private writes = Promise.resolve()
 
   constructor(private readonly path = join(resolveDshHome(), 'pactflow', 'workspace-projects.json')) {}
 
   async list(): Promise<readonly PactFlowWorkspaceProjectConfig[]> {
     await this.load()
-    return [...this.rows.values()]
+    return [...this.rows.values()].map(row => structuredClone(row))
   }
 
   async get(workspaceId: string): Promise<PactFlowWorkspaceProjectConfig | undefined> {
     await this.load()
-    return this.rows.get(workspaceId)
+    const row = this.rows.get(workspaceId)
+    return row === undefined ? undefined : structuredClone(row)
   }
 
+  /** Legacy unconditional write. New Workspace mutations must use putIfRevision(). */
   async put(config: PactFlowWorkspaceProjectConfig): Promise<void> {
     await this.load()
-    this.rows.set(config.workspaceId, structuredClone(config))
-    await this.persist()
+    await this.withLock(async () => {
+      await this.reload()
+      this.rows.set(config.workspaceId, structuredClone(config))
+      await this.persist()
+    })
+  }
+
+  /**
+   * Atomically replaces one Workspace configuration only when its persisted revision matches.
+   * A missing configuration has revision zero; each successful write must advance it by one.
+   */
+  async putIfRevision(expectedRevision: number, config: PactFlowWorkspaceProjectConfig): Promise<boolean> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error('PactFlow Workspace expected revision must be a non-negative integer')
+    }
+    if (config.revision !== expectedRevision + 1) {
+      throw new Error('PactFlow Workspace configuration revision must advance by exactly one')
+    }
+    await this.load()
+    return await this.withLock(async () => {
+      await this.reload()
+      const current = this.rows.get(config.workspaceId)
+      if ((current?.revision ?? 0) !== expectedRevision) return false
+      this.rows.set(config.workspaceId, structuredClone(config))
+      await this.persist()
+      return true
+    })
   }
 
   private async load(): Promise<void> {
     this.loaded ??= (async () => {
-      try {
-        const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
-        if (!Array.isArray(parsed)) return
-        for (const row of parsed) {
-          if (!validConfig(row)) continue
-          this.rows.set(row.workspaceId, row)
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      }
+      await this.reload()
     })()
     await this.loaded
+  }
+
+  private async reload(): Promise<void> {
+    this.rows.clear()
+    try {
+      const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
+      if (!Array.isArray(parsed)) return
+      for (const row of parsed) {
+        if (!validConfig(row)) continue
+        this.rows.set(row.workspaceId, structuredClone(row))
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
   }
 
   private async persist(): Promise<void> {
     const content = `${JSON.stringify([...this.rows.values()], null, 2)}\n`
     const checksum = createHash('sha256').update(content).digest('hex')
-    this.writes = this.writes.then(async () => {
-      await mkdir(dirname(this.path), { recursive: true })
-      const temporary = `${this.path}.${checksum.slice(0, 12)}.tmp`
-      await writeFile(temporary, content, { mode: 0o600 })
-      await rename(temporary, this.path)
-    })
-    await this.writes
+    await mkdir(dirname(this.path), { recursive: true })
+    const temporary = `${this.path}.${checksum.slice(0, 12)}.tmp`
+    await writeFile(temporary, content, { mode: 0o600 })
+    await rename(temporary, this.path)
+  }
+
+  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = PactFlowWorkspaceProjectStore.locks.get(this.path) ?? Promise.resolve()
+    let unlock: (() => void) | undefined
+    const current = new Promise<void>(resolve => { unlock = resolve })
+    PactFlowWorkspaceProjectStore.locks.set(this.path, previous.then(() => current, () => current))
+    await previous.catch(() => undefined)
+    try {
+      return await operation()
+    } finally {
+      unlock!()
+    }
   }
 }
 
@@ -146,7 +188,36 @@ function validConfig(value: unknown): value is PactFlowWorkspaceProjectConfig {
   const row = value as Partial<PactFlowWorkspaceProjectConfig>
   return row.schema === 'dsh_pactflow_workspace_project/v1'
     && typeof row.workspaceId === 'string' && typeof row.workspacePath === 'string'
-    && typeof row.workspaceTitle === 'string' && Number.isSafeInteger(row.revision)
-    && typeof row.createdAt === 'number' && typeof row.updatedAt === 'number'
-    && Array.isArray(row.validationCommands)
+    && typeof row.workspaceTitle === 'string' && typeof row.revision === 'number'
+    && Number.isSafeInteger(row.revision) && row.revision > 0
+    && typeof row.createdAt === 'number' && Number.isSafeInteger(row.createdAt) && row.createdAt >= 0
+    && typeof row.updatedAt === 'number' && Number.isSafeInteger(row.updatedAt) && row.updatedAt >= 0
+    && (row.validationCommands === undefined || Array.isArray(row.validationCommands))
+    && (row.validationProfiles === undefined || validValidationProfiles(row.validationProfiles))
+    && (row.validationProfileIds === undefined || (Array.isArray(row.validationProfileIds)
+      && row.validationProfileIds.every(id => typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(id))
+      && (row.validationProfiles === undefined || row.validationProfileIds.every(id =>
+        row.validationProfiles!.some(profile => profile.id === id)))))
+}
+
+function validValidationProfiles(value: readonly unknown[]): boolean {
+  const ids = value.map(profile => typeof profile === 'object' && profile !== null
+    ? (profile as { readonly id?: unknown }).id : undefined)
+  return new Set(ids).size === ids.length && value.every(profile => validValidationProfile(profile))
+}
+
+function validValidationProfile(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const profile = value as Record<string, unknown>
+  const command = profile.command
+  const executable = typeof command === 'string' ? command.split('/').pop()?.toLowerCase() : undefined
+  return typeof profile.id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(profile.id)
+    && typeof profile.displayName === 'string' && profile.displayName.trim() !== ''
+    && typeof command === 'string' && /^[^\s\0\r\n;&|<>$()`]{1,256}$/.test(command)
+    && (executable === undefined || !new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'cmd.exe', 'powershell', 'pwsh']).has(executable))
+    && Array.isArray(profile.args) && profile.args.length <= 64
+    && profile.args.every(argument => typeof argument === 'string' && argument.length <= 4_096 && !/[\0\r\n]/.test(argument))
+    && Number.isSafeInteger(profile.timeoutMs) && (profile.timeoutMs as number) >= 1_000
+    && (profile.timeoutMs as number) <= 3_600_000
+    && Number.isSafeInteger(profile.revision) && (profile.revision as number) > 0
 }
