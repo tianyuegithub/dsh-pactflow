@@ -67,6 +67,7 @@
 - Kubeconfig 通过 DSH 通用 Host 文件选择能力定位，Client 只获得绝对路径；Host 解析并只返回 Context 名称。本轮不上传 kubeconfig 内容，未来远程企业平台的上传、留存和租户隔离单独设计。
 - Harness 只保存工具类型、Harbor 镜像引用和资源规格；Model Connection 独立保存协议、endpoint、model id 和 DSH Credential 引用，Run 选择 Harness + Model Connection，禁止用组合名称复制模板。
 - 密码和 API key 只通过 DSH Credentials Remote 写入，Settings、PactFlow Remote、Session Event 和日志只保留内部引用或已配置状态；Client 显示账号/密码而不显示 Credential Ref。
+- 未保存凭证的连通性测试只使用隔离的临时 Credential Ref；凭证测试、模型发现、清理与保存必须互斥，只有临时 Ref 清理成功后才可写入正式 Ref 并保存资源。清理失败必须保留可重试引用并向用户显示失败；K3s 探针的临时 Job、Pod 或模型 Secret 任一清理失败时，整体测试必须失败关闭，不得仅记录日志后显示成功。
 - Harbor 镜像从 Project/Repository/Artifact 列表选择；Kubernetes imagePullSecret 是 Cluster + Registry 绑定属性，从 Namespace 中已有 `kubernetes.io/dockerconfigjson` Secret 选择，不属于 Harbor 全局元数据。
 - Worker Pool 的用户名为「执行资源池」；普通流程自动创建默认池，只显示 Cluster、最大并发和允许的 Harness。内部 ID、Registry 引用和固定 FIFO 策略不向普通用户展示。
 - 六类资源共享同一卡片生命周期：新增或编辑时只有一张活动草稿；当前草稿测试成功后才能卡片级保存；保存后收缩为摘要；编辑回显已保存非密钥值，密码保持写后不可读；取消丢弃草稿。字段变更使旧测试结果失效。

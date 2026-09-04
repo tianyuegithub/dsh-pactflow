@@ -12,7 +12,11 @@ import {
   synchronizeHarnessTemplates,
 } from '../harness-discovery.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
-import { replaceInfrastructureCredentialRefs, temporaryCredentialRef } from './credential-probe.ts'
+import {
+  releaseTemporaryCredentialRefs,
+  replaceInfrastructureCredentialRefs,
+  temporaryCredentialRef,
+} from './credential-probe.ts'
 import { PactFlowDagGraph } from './dag-graph.tsx'
 import { PactFlowProjectPanel, type PactFlowProjectPanelFace } from './project-panel.tsx'
 import type {
@@ -273,6 +277,8 @@ interface ActiveResourceEditor {
   readonly id: string
   readonly mode: 'new' | 'edit'
 }
+
+type CredentialActivity = 'cancel' | 'model-discovery' | 'probe' | 'save'
 
 interface DeleteResourceDialogState {
   readonly kind: PactFlowInfrastructureResourceKind
@@ -941,10 +947,11 @@ function HarborArtifactField({ artifacts, value, onChange }: {
   </label>
 }
 
-function ModelDiscoveryField({ models, value, busy, failure, manual, onLoad, onManual, onChange }: {
+function ModelDiscoveryField({ models, value, busy, disabled, failure, manual, onLoad, onManual, onChange }: {
   readonly models: readonly PactFlowDiscoveredModel[]
   readonly value: string
   readonly busy: boolean
+  readonly disabled: boolean
   readonly failure: string | undefined
   readonly manual: boolean
   readonly onLoad: () => void
@@ -954,14 +961,14 @@ function ModelDiscoveryField({ models, value, busy, failure, manual, onLoad, onM
   return <div style={resourceFieldStyle}>
     <span style={resourceFieldLabelStyle}>模型</span>
     <div style={filePickerStyle}>
-      <button type="button" onClick={onLoad} disabled={busy} style={secondaryButtonStyle}>
+      <button type="button" onClick={onLoad} disabled={busy || disabled} style={secondaryButtonStyle}>
         {busy ? '加载中…' : '加载模型列表'}
       </button>
-      {failure === undefined || manual ? null : <button type="button" onClick={onManual} style={secondaryButtonStyle}>
+      {failure === undefined || manual ? null : <button type="button" onClick={onManual} disabled={disabled} style={secondaryButtonStyle}>
         手动填写模型 ID
       </button>}
     </div>
-    {models.length > 0 && !manual ? <select value={value} onChange={event => onChange(event.currentTarget.value)} style={inputStyle}>
+    {models.length > 0 && !manual ? <select value={value} disabled={disabled} onChange={event => onChange(event.currentTarget.value)} style={inputStyle}>
       <option value="">请选择模型</option>
       {value !== '' && !models.some(model => model.id === value)
         ? <option value={value}>{value}（当前配置，模型列表未返回）</option>
@@ -970,7 +977,7 @@ function ModelDiscoveryField({ models, value, busy, failure, manual, onLoad, onM
         model.name === undefined || model.name === model.id ? model.id : `${model.name} (${model.id})`
       }</option>)}
     </select> : manual ? <input
-      aria-label="手动模型 ID" value={value} onChange={event => onChange(event.currentTarget.value)} style={inputStyle}
+      aria-label="手动模型 ID" value={value} disabled={disabled} onChange={event => onChange(event.currentTarget.value)} style={inputStyle}
     /> : <span style={fieldHintStyle}>填写 URL 和 API Key 后加载服务端模型列表。</span>}
     {failure === undefined ? null : <span style={errorTextStyle}>{failure}</span>}
     {manual ? <span style={fieldHintStyle}>模型列表未验证；保存前仍会发送真实消息测试。</span> : null}
@@ -1031,13 +1038,16 @@ function PactFlowSettingsCard({
     readonly active: ActiveResourceEditor | null
   } | null>(null)
   const temporaryCredentialRefsRef = useRef(new Map<string, string>())
+  const credentialActivityRef = useRef<CredentialActivity | null>(null)
+  const [credentialActivity, setCredentialActivity] = useState<CredentialActivity | null>(null)
   const unsetCredentialRef = useRef(unsetCredential)
 
   useEffect(() => { unsetCredentialRef.current = unsetCredential }, [unsetCredential])
   useEffect(() => () => {
-    const temporaryRefs = [...temporaryCredentialRefsRef.current.values()]
-    temporaryCredentialRefsRef.current.clear()
-    for (const ref of temporaryRefs) void unsetCredentialRef.current(ref)
+    void releaseTemporaryCredentialRefs(
+      temporaryCredentialRefsRef.current,
+      ref => unsetCredentialRef.current(ref),
+    )
   }, [])
 
   const probeCredentialRef = (reference: string): string => {
@@ -1048,14 +1058,25 @@ function PactFlowSettingsCard({
     return created
   }
   const releaseTemporaryCredentials = async (references?: readonly string[]): Promise<void> => {
-    const realRefs = references ?? [...temporaryCredentialRefsRef.current.keys()]
-    const temporaryRefs = realRefs.flatMap(reference => {
-      const temporary = temporaryCredentialRefsRef.current.get(reference)
-      if (temporary === undefined) return []
-      temporaryCredentialRefsRef.current.delete(reference)
-      return [temporary]
-    })
-    await Promise.allSettled(temporaryRefs.map(ref => unsetCredential(ref)))
+    const result = await releaseTemporaryCredentialRefs(
+      temporaryCredentialRefsRef.current,
+      unsetCredential,
+      references,
+    )
+    if (result.failed.length > 0) {
+      throw new Error(`有 ${String(result.failed.length)} 个临时凭证清理失败；引用已保留，请重试`)
+    }
+  }
+  const beginCredentialActivity = (activity: CredentialActivity): boolean => {
+    if (credentialActivityRef.current !== null) return false
+    credentialActivityRef.current = activity
+    setCredentialActivity(activity)
+    return true
+  }
+  const finishCredentialActivity = (activity: CredentialActivity): void => {
+    if (credentialActivityRef.current !== activity) return
+    credentialActivityRef.current = null
+    setCredentialActivity(null)
   }
 
   useEffect(() => {
@@ -1116,6 +1137,7 @@ function PactFlowSettingsCard({
     }
   }
   const disabled = !snapshot.writable
+  const actionDisabled = disabled || credentialActivity !== null
   const modeFor = (kind: PactFlowInfrastructureResourceKind, id: string): 'view' | 'edit' | 'new' => {
     return activeEditor?.kind === kind && activeEditor.id === id ? activeEditor.mode : 'view'
   }
@@ -1155,22 +1177,33 @@ function PactFlowSettingsCard({
     if (kind === 'worker-pool') refreshPoolPullSecrets(resource as PactFlowWorkerPoolSettings)
   }
   const cancelEdit = (): void => {
+    if (!beginCredentialActivity('cancel')) return
     const editor = activeEditor
     if (editor !== null) {
       const resource = resourceRows(draft, editor.kind).find(row => row.id === editor.id)
       if (resource !== undefined) {
         const refs = resourceCredentialRefs(editor.kind, resource)
-        void releaseTemporaryCredentials(refs)
-        setCredentialDrafts(current => {
-          const next = { ...current }
-          for (const ref of refs) delete next[ref]
-          return next
-        })
+        void releaseTemporaryCredentials(refs).then(() => {
+          setCredentialDrafts(current => {
+            const next = { ...current }
+            for (const ref of refs) delete next[ref]
+            return next
+          })
+          setDraft(persisted)
+          setAdvanced(JSON.stringify(persisted, null, 2))
+          setActiveEditor(null)
+        }, error => {
+          const detail = error instanceof Error ? error.message : String(error)
+          setNotice(detail)
+          showFeedback('error', `取消失败：${detail}`)
+        }).finally(() => finishCredentialActivity('cancel'))
+        return
       }
     }
     setDraft(persisted)
     setAdvanced(JSON.stringify(persisted, null, 2))
     setActiveEditor(null)
+    finishCredentialActivity('cancel')
   }
   const resourceFingerprint = (kind: PactFlowInfrastructureResourceKind, id: string): string => {
     return JSON.stringify(resourceRows(draft, kind).find(row => row.id === id) ?? null)
@@ -1209,9 +1242,11 @@ function PactFlowSettingsCard({
     const refs = resourceCredentialRefs(kind, resource)
     const writes = refs.map(ref => [ref, credentialDrafts[ref] ?? ''] as const)
       .filter((entry): entry is [string, string] => entry[1].trim() !== '')
+    if (!beginCredentialActivity('save')) return
     setSavingId(resource.id)
     postSaveRef.current = { persisted: nextPersisted, draft: nextDraft, active: nextActive }
-    void Promise.all(writes.map(([ref, secret]) => setCredential(ref, secret)))
+    void releaseTemporaryCredentials(refs)
+      .then(() => Promise.all(writes.map(([ref, secret]) => setCredential(ref, secret))))
       .then(() => snapshot.value?.k3s === false ? undefined : settings.set('k3s', false))
       .then(() => settings.set('infrastructure', nextPersisted))
       .then(() => {
@@ -1227,7 +1262,6 @@ function PactFlowSettingsCard({
           for (const ref of refs) delete next[ref]
           return next
         })
-        void releaseTemporaryCredentials(refs)
       })
       .catch((error) => {
         const detail = error instanceof Error ? error.message : String(error)
@@ -1236,6 +1270,7 @@ function PactFlowSettingsCard({
         setNotice(detail)
         showFeedback('error', `保存失败：${detail}`)
       })
+      .finally(() => finishCredentialActivity('save'))
   }
   const resourceName = (resource: InfrastructureResource): string => {
     return 'displayName' in resource && typeof resource.displayName === 'string'
@@ -1297,6 +1332,7 @@ function PactFlowSettingsCard({
     }).catch(error => { setNotice(error instanceof Error ? error.message : String(error)) })
   }
   const loadModels = (model: PactFlowModelConnectionSettings): void => {
+    if (!beginCredentialActivity('model-discovery')) return
     setModelDiscovery(current => ({ ...current, [model.id]: { busy: true, manual: false } }))
     const apiKey = credentialDrafts[model.apiKeyCredentialRef] ?? ''
     const discoveryModel = apiKey.trim() === '' ? model : {
@@ -1312,7 +1348,7 @@ function PactFlowSettingsCard({
         ...current,
         [model.id]: { busy: false, manual: false, failure: error instanceof Error ? error.message : String(error) },
       })),
-    )
+    ).finally(() => finishCredentialActivity('model-discovery'))
   }
   const draftForProbe = (
     kind: PactFlowInfrastructureResourceKind, id: string,
@@ -1362,6 +1398,7 @@ function PactFlowSettingsCard({
     }))
   }
   const probe = (kind: PactFlowInfrastructureResourceKind, id: string, saved = false): void => {
+    if (!beginCredentialActivity('probe')) return
     const key = `${kind}:${id}`
     const startedAt = Date.now()
     setProbingId(id)
@@ -1515,7 +1552,7 @@ function PactFlowSettingsCard({
           },
         }))
       },
-    )
+    ).finally(() => finishCredentialActivity('probe'))
   }
   const summaryFor = (kind: PactFlowInfrastructureResourceKind, resource: InfrastructureResource): ReactNode => {
     const values: readonly [string, string][] = kind === 'cluster'
@@ -1539,7 +1576,7 @@ function PactFlowSettingsCard({
       <p>{t('settingsDescription')}</p>
       <p style={hintStyle}>{t('settingsRestart')}</p>
       <EditableResourceCards title="K3s 集群" description="连接集群并选择 Worker 运行的 Namespace。"
-        rows={draft.clusters} disabled={disabled}
+        rows={draft.clusters} disabled={actionDisabled}
         columns={clusterColumns} create={() => newCluster(draft.clusters)} onChange={rows => changeRows('cluster', 'clusters', rows)}
         onAdd={row => beginAdd('cluster', row)} addDisabled={activeEditor !== null}
         modeFor={row => modeFor('cluster', row.id)} summaryFor={row => summaryFor('cluster', row)}
@@ -1561,7 +1598,7 @@ function PactFlowSettingsCard({
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `cluster:${row.id}`))}
         onViewProbe={row => probe('cluster', row.id, true)} />
       <EditableResourceCards title="Harbor 镜像仓库" description="配置镜像服务、项目、TLS 策略和拉取密钥引用。"
-        rows={draft.registries} disabled={disabled}
+        rows={draft.registries} disabled={actionDisabled}
         columns={registryColumns} create={() => newRegistry(draft.registries)} onChange={rows => changeRows('registry', 'registries', rows)}
         onAdd={row => beginAdd('registry', row)} addDisabled={activeEditor !== null}
         modeFor={row => modeFor('registry', row.id)} summaryFor={row => summaryFor('registry', row)}
@@ -1571,7 +1608,7 @@ function PactFlowSettingsCard({
         renderExtraFields={row => <CredentialInput
           label="密码 / Token" hint="留空保留已配置的凭证；新值仅写入 DSH Credentials。"
           value={credentialDrafts[row.passwordCredentialRef ?? ''] ?? ''}
-          disabled={disabled || row.passwordCredentialRef === undefined}
+          disabled={actionDisabled || row.passwordCredentialRef === undefined}
           onChange={value => { if (row.passwordCredentialRef !== undefined) updateSecret(row.passwordCredentialRef, value) }}
         />}
         probeKind="registry" probingId={probingId} onProbe={probe}
@@ -1580,7 +1617,7 @@ function PactFlowSettingsCard({
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `registry:${row.id}`))}
         onViewProbe={row => probe('registry', row.id, true)} />
       <EditableResourceCards title="Gitea Git Provider" description="根据项目本地 Git remote 自动匹配代码仓库。"
-        rows={draft.gitProviders} disabled={disabled}
+        rows={draft.gitProviders} disabled={actionDisabled}
         columns={gitProviderColumns} create={() => newGitProvider(draft.gitProviders)} onChange={rows => changeRows('git-provider', 'gitProviders', rows)}
         onAdd={row => beginAdd('git-provider', row)} addDisabled={activeEditor !== null}
         modeFor={row => modeFor('git-provider', row.id)} summaryFor={row => summaryFor('git-provider', row)}
@@ -1589,7 +1626,7 @@ function PactFlowSettingsCard({
         onCancel={cancelEdit} onRequestDelete={row => requestDelete('git-provider', row)}
         renderExtraFields={row => <CredentialInput
           label="密码 / Token" hint="用于 Gitea API，原值不写入 Settings。"
-          value={credentialDrafts[row.tokenCredentialRef] ?? ''} disabled={disabled}
+          value={credentialDrafts[row.tokenCredentialRef] ?? ''} disabled={actionDisabled}
           onChange={value => updateSecret(row.tokenCredentialRef, value)}
         />}
         probeKind="git-provider" probingId={probingId} onProbe={probe}
@@ -1598,7 +1635,7 @@ function PactFlowSettingsCard({
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `git-provider:${row.id}`))}
         onViewProbe={row => probe('git-provider', row.id, true)} />
       <EditableResourceCards title="Harness 模板" description="只定义开发工具、Worker 镜像与 CPU/内存规格；不绑定模型。"
-        rows={draft.templates.filter(isHarnessProfile)} disabled={disabled}
+        rows={draft.templates.filter(isHarnessProfile)} disabled={actionDisabled}
         columns={templateColumns}
         create={() => newTemplate(draft.templates, draft.registries[0]?.id ?? '')}
         onChange={rows => changeRows('harness', 'templates', rows)}
@@ -1626,7 +1663,7 @@ function PactFlowSettingsCard({
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `harness:${row.id}`))}
         onViewProbe={row => probe('harness', row.id, true)} />
       <EditableResourceCards title="模型连接" description="模型与 Harness 独立配置，运行任务时再选择兼容组合。"
-        rows={draft.modelConnections ?? []} disabled={disabled}
+        rows={draft.modelConnections ?? []} disabled={actionDisabled}
         columns={modelColumns} create={() => newModel(draft.modelConnections ?? [])}
         onChange={rows => changeRows('model-connection', 'modelConnections', rows)}
         onAdd={row => beginAdd('model-connection', row)} addDisabled={activeEditor !== null}
@@ -1637,12 +1674,13 @@ function PactFlowSettingsCard({
         renderExtraFields={(row, _index, update) => <>
           <CredentialInput
             label="API Key" hint="原值只写入 DSH Credentials，不进入 Settings 或日志。"
-            value={credentialDrafts[row.apiKeyCredentialRef] ?? ''} disabled={disabled}
+            value={credentialDrafts[row.apiKeyCredentialRef] ?? ''} disabled={actionDisabled}
             onChange={value => updateSecret(row.apiKeyCredentialRef, value)}
           />
           <ModelDiscoveryField
             models={modelOptions[row.id] ?? []} value={row.model}
             busy={modelDiscovery[row.id]?.busy === true}
+            disabled={actionDisabled}
             failure={modelDiscovery[row.id]?.failure}
             manual={modelDiscovery[row.id]?.manual === true}
             onLoad={() => loadModels(row)}
@@ -1663,7 +1701,7 @@ function PactFlowSettingsCard({
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `model-connection:${row.id}`))}
         onViewProbe={row => probe('model-connection', row.id, true)} />
       <EditableResourceCards title="Worker 并发与调度" description="选择运行集群、允许使用的 Harness 和最多同时启动的 Worker Pod 数；超出的任务自动排队。"
-        rows={draft.workerPools} disabled={disabled}
+        rows={draft.workerPools} disabled={actionDisabled}
         columns={workerPoolColumns}
         create={() => newWorkerPool(
           draft.workerPools, draft.clusters[0]?.id ?? '', draft.registries[0]?.id ?? '',

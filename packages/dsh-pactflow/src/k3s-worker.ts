@@ -295,13 +295,17 @@ export class PactFlowK3sWorker {
           detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
       } catch {
+        success = false
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
       if (modelApiKey !== undefined) {
         try {
           await this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace })
-        } catch {
-          stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
+        } catch (error) {
+          if (!this.isNotFound(error)) {
+            success = false
+            stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
+          }
         }
       }
     }
@@ -366,6 +370,7 @@ export class PactFlowK3sWorker {
           detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
       } catch {
+        success = false
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
     }
@@ -429,13 +434,17 @@ export class PactFlowK3sWorker {
           detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
       } catch {
+        success = false
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
       if (modelApiKey !== undefined) {
         try {
           await this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace })
-        } catch {
-          stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
+        } catch (error) {
+          if (!this.isNotFound(error)) {
+            success = false
+            stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
+          }
         }
       }
     }

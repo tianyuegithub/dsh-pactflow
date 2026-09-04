@@ -26,7 +26,7 @@
 - 逻辑容量池：每个 Pool 绑定 Cluster/Registry/Templates，以 FIFO 管理 `maxConcurrency`；排队、等待取消、幂等释放、重启时对活动 Job 恢复容量占用均有代码边界。
 - 自动 Gitea 匹配：Git 绑定从本地 remote 读取无凭证 URL，按 host 匹配全局 Provider 并提取 owner/repo；多匹配失败关闭。
 - 连接测试：Cluster 读取真实 Namespace；Harbor 调用 v2 ping/project API、只访问配置的 `pactflow-worker` 仓库并识别四类 Harness 镜像；Gitea 调用 version API；Harness 已保存卡片在 K3s 中拉取镜像、运行独立 CLI `--version` 临时 Pod，不再错误依赖 Worker Pool 或模型；Model 发送真实消息；Pool 验证资源图。Remote 只返回分阶段脱敏证据。
-- 测试凭证事务：未保存的 Harbor/Gitea/模型凭证只写入随机 `_PROBE_` 临时 Credential Ref，测试草稿引用临时 Ref；保存成功时才写正式 Ref，取消编辑与组件卸载均清理临时 Ref。真实浏览器验收确认模型发现期间临时 Ref 数量从 0→1，取消后回到 0，正式 Ref 未被覆盖。
+- 测试凭证事务：未保存的 Harbor/Gitea/模型凭证只写入随机 `_PROBE_` 临时 Credential Ref，测试草稿引用临时 Ref；测试、模型发现、清理与保存共享互斥门禁，保存时先确认临时 Ref 清理成功，再写正式 Ref。取消或保存时清理失败会保留引用以便重试并给出明确反馈；K3s 临时 Job、Pod 或模型 Secret 清理失败会使整体测试失败，不再显示绿色成功。真实浏览器验收确认模型发现期间临时 Ref 数量从 0→1，取消后回到 0，正式 Ref 未被覆盖。
 - 设置 UI：六类基础设施资源均为 DSH 原生风格的多行响应式卡片；一次只编辑一张卡片，成功测试且表单未变化时才允许保存。保存后收缩为摘要，支持编辑回显、取消、删除影响检查和二次确认；高级 JSON 仅用于只读排障，容量快照在控制台显示运行/等待数。
 - 易用性收口：Kubeconfig 使用 DSH Host 原生文件选择并从文件解析 Context 下拉；Harbor/Gitea/模型页面显示账号和写后不可读的密码框，内部 Credential Ref 隐藏；Harbor 连接成功后从 `pactflow-worker` 自动同步 Claude Code、Codex、OpenCode、DSH 四个模板的不可变 digest，保留人工资源规格；K3s imagePullSecret 由真实服务列表选择。
 - 测试可观测：K3s、Harbor、Gitea 和执行资源池的测试直接使用当前未保存卡片草稿；每张卡片就地显示准备、凭证、配置校验、连接、资源发现和详细失败日志，不再把错误写到设置卡底部或浏览器控制台。
@@ -55,7 +55,7 @@
 - npm 分发：Package 采用 Apache-2.0，所有未发布的 DSH/Cordis/React in-box peer 保留版本声明并标为 optional，由 DSH 安装本身解析；用户通过官方 `dsh plugin --profile web add dsh-pactflow@0.2.1` 安装。
 - 公共发现：源码同步到 `https://github.com/tianyuegithub/dsh-pactflow`，带 `dsh-plugin`、`deepseek-harness`、`pactflow`、`multi-agent` topics；GitHub Release tarball 与 npm 包名都走 DSH 官方安装命令。
 - npm 发布：0.2.0 已 deprecate；0.2.1 修复外部 Typert package identity 并保持历史事件兼容。7 天 granular publish token 按产品 Owner 要求暂时保留，便于测试期修复重发。
-- 当轮验证：`pnpm run build` 通过；`pnpm run test` 的 11 个文件/49 项测试通过，新增覆盖本地 Run 过期回收幂等性、Agent 恢复后定时回收、活动 Run 重试拒绝、revision CAS/attempt 递增、Agent 评审工具、Gitea Basic Auth 历史 binding 兼容与 K3s child-first 终态清理。Gitea main 干净 clone 的 `mvn -o test -pl dg-quality -am` 为 103/103 通过；`dg-ui-hdmy` Vite production build 通过；`dg-ui` 在 Node 22 下以 `NODE_OPTIONS=--openssl-legacy-provider npm run build:prod` 通过。`git diff --check` 通过。全仓 lint 仍有 5.7 万个历史基线问题，不归因本变更。
+- 当轮验证：`pnpm run check` 通过，包含构建、13 个测试文件/65 项测试和 13 项发布产物检查；新增覆盖本地 Run 过期回收幂等性、Agent 恢复后定时回收、活动 Run 重试拒绝、revision CAS/attempt 递增、Agent 评审工具、Gitea Basic Auth 历史 binding 兼容、K3s child-first 终态清理、临时凭证清理失败重试与并发替换失败关闭。Gitea main 干净 clone 的 `mvn -o test -pl dg-quality -am` 为 103/103 通过；`dg-ui-hdmy` Vite production build 通过；`dg-ui` 在 Node 22 下以 `NODE_OPTIONS=--openssl-legacy-provider npm run build:prod` 通过。`git diff --check` 通过。全仓 lint 仍有 5.7 万个历史基线问题，不归因本变更。
 - 浏览器生命周期验收：9120 本地 UAT Profile 已真实完成 K3s 卡片“新增 → 测试日志成功 → 保存解锁 → 摘要收缩 → 编辑原值回显 → 修改后取消不污染 → 关闭再进入仍持久化 → 删除影响提示与二次确认 → 删除后重载为空”。测试前保存禁用、修改已测试字段后测试失效也已验证；磁盘 `settings.yaml` 最终恢复为 `clusters: []`。
 - Harbor 回归验收：真实 `datavdl/pactflow-worker` 通过完整测试并显示绿色联通状态，自动持久同步四个 Harness 模板；不再读取 Prometheus 等其它项目仓库。既有 `datavdl/` 配置自动规范化为 `datavdl`。关闭设置和重启 Host 后，绿色状态与模板仍恢复。
 - 模型发现验收：真实 Coding API 使用已保存 Credential 加载并去重为 130 个服务端模型，加上占位项和当前未返回的 `ark-code-latest` 共 132 个唯一下拉值；Anthropic Messages 不支持列表时显示原始兼容错误并出现“手动填写模型 ID”入口，取消编辑不污染保存配置。

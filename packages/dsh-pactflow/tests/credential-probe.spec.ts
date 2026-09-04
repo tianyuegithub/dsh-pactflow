@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  releaseTemporaryCredentialRefs,
   replaceInfrastructureCredentialRefs,
   temporaryCredentialRef,
 } from '../src/client/credential-probe.ts'
@@ -36,5 +37,37 @@ describe('temporary infrastructure probe credentials', () => {
     expect(replaced.modelConnections?.[0]?.apiKeyCredentialRef).toBe(temporary)
     expect(settings.registries[0]?.passwordCredentialRef).toBe('PACTFLOW_HARBOR_PASSWORD')
     expect(settings.modelConnections?.[0]?.apiKeyCredentialRef).toBe('PACTFLOW_MODEL_API_KEY')
+  })
+
+  it('retains failed cleanup refs so a later attempt can retry them', async () => {
+    const references = new Map([['PACTFLOW_MODEL_API_KEY', 'PACTFLOW_MODEL_API_KEY_PROBE_A']])
+    const first = await releaseTemporaryCredentialRefs(
+      references,
+      async () => { throw new Error('credentials service unavailable') },
+      ['PACTFLOW_MODEL_API_KEY'],
+    )
+
+    expect(first).toMatchObject({ released: [], failed: ['PACTFLOW_MODEL_API_KEY'] })
+    expect(references.get('PACTFLOW_MODEL_API_KEY')).toBe('PACTFLOW_MODEL_API_KEY_PROBE_A')
+
+    const second = await releaseTemporaryCredentialRefs(
+      references,
+      async () => {},
+      ['PACTFLOW_MODEL_API_KEY'],
+    )
+    expect(second).toMatchObject({ released: ['PACTFLOW_MODEL_API_KEY'], failed: [] })
+    expect(references.has('PACTFLOW_MODEL_API_KEY')).toBe(false)
+  })
+
+  it('fails closed when a new temporary ref replaces the one being released', async () => {
+    const reference = 'PACTFLOW_MODEL_API_KEY'
+    const references = new Map([[reference, 'PACTFLOW_MODEL_API_KEY_PROBE_A']])
+
+    const result = await releaseTemporaryCredentialRefs(references, async () => {
+      references.set(reference, 'PACTFLOW_MODEL_API_KEY_PROBE_B')
+    }, [reference])
+
+    expect(result).toMatchObject({ released: [], failed: [reference] })
+    expect(references.get(reference)).toBe('PACTFLOW_MODEL_API_KEY_PROBE_B')
   })
 })

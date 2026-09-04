@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { PactFlowK3sWorker } from '../src/k3s-worker.ts'
+import { PactFlowK3sWorker, type PactFlowK3sConfig } from '../src/k3s-worker.ts'
 import type { PactFlowK3sRunSpec } from '../src/types.ts'
 
 const spec: PactFlowK3sRunSpec = {
@@ -15,6 +15,21 @@ function worker(): PactFlowK3sWorker {
   return new PactFlowK3sWorker({
     namespace: 'pactflow', imagePullSecret: 'pull', pollIntervalMs: 250, templates: [],
   })
+}
+
+const probeTemplate = {
+  id: 'claude', harness: 'claude' as const, apiMode: 'anthropic-messages' as const,
+  image: `registry.invalid/worker@sha256:${'b'.repeat(64)}`,
+  model: 'model', baseUrl: 'https://model.invalid', modelSecretName: 'model-secret',
+  cpuRequest: '100m', memoryRequest: '128Mi', cpuLimit: '1', memoryLimit: '1Gi',
+}
+
+function probeWorker(): PactFlowK3sWorker {
+  const config: PactFlowK3sConfig = {
+    namespace: 'pactflow', imagePullSecret: 'pull', pollIntervalMs: 250,
+    templates: [probeTemplate],
+  }
+  return new PactFlowK3sWorker(config)
 }
 
 describe('PactFlow K3s cleanup', () => {
@@ -66,5 +81,63 @@ describe('PactFlow K3s cleanup', () => {
     expect(cleanup).toBeTypeOf('function')
     await cleanup?.call(instance, 'dsh-pf-image-test')
     expect(order).toEqual(['job', 'pod:dsh-pf-image-test-pod'])
+  })
+
+  it.each([
+    ['Harness', (instance: PactFlowK3sWorker) => instance.probe('claude', 'hello', 10_000, 'secret-api-key')],
+    ['API', (instance: PactFlowK3sWorker) => instance.probeApi('claude', 'hello', 10_000, 'secret-api-key')],
+  ])('fails the %s probe when its ephemeral model Secret cannot be removed', async (_name, run) => {
+    const instance = probeWorker()
+    Reflect.set(instance, 'batch', {
+      createNamespacedJob: vi.fn(async () => {}),
+      readNamespacedJob: vi.fn(async () => ({ status: { succeeded: 1 } })),
+    })
+    Reflect.set(instance, 'core', {
+      createNamespacedSecret: vi.fn(async () => {}),
+      deleteNamespacedSecret: vi.fn(async () => { throw new Error('delete failed') }),
+    })
+    Reflect.set(instance, 'probeLog', vi.fn(async () => 'probe completed'))
+    Reflect.set(instance, 'cleanupProbeResources', vi.fn(async () => 1))
+
+    const result = await run(instance)
+
+    expect(result.success).toBe(false)
+    expect(result.stages).toContainEqual(expect.objectContaining({
+      name: 'cleanup', state: 'failed',
+    }))
+  })
+
+  it('fails the image probe when its Job or Pods cannot be removed', async () => {
+    const instance = probeWorker()
+    Reflect.set(instance, 'batch', {
+      createNamespacedJob: vi.fn(async () => {}),
+      readNamespacedJob: vi.fn(async () => ({ status: { succeeded: 1 } })),
+    })
+    Reflect.set(instance, 'probeLog', vi.fn(async () => 'probe completed'))
+    Reflect.set(instance, 'cleanupProbeResources', vi.fn(async () => { throw new Error('cleanup failed') }))
+
+    const result = await instance.probeImage('claude', 10_000)
+
+    expect(result.success).toBe(false)
+    expect(result.stages).toContainEqual(expect.objectContaining({ name: 'cleanup', state: 'failed' }))
+  })
+
+  it('treats an already-missing ephemeral model Secret as clean', async () => {
+    const instance = probeWorker()
+    Reflect.set(instance, 'batch', {
+      createNamespacedJob: vi.fn(async () => {}),
+      readNamespacedJob: vi.fn(async () => ({ status: { succeeded: 1 } })),
+    })
+    Reflect.set(instance, 'core', {
+      createNamespacedSecret: vi.fn(async () => {}),
+      deleteNamespacedSecret: vi.fn(async () => { throw Object.assign(new Error('not found'), { code: 404 }) }),
+    })
+    Reflect.set(instance, 'probeLog', vi.fn(async () => 'probe completed'))
+    Reflect.set(instance, 'cleanupProbeResources', vi.fn(async () => 1))
+
+    const result = await instance.probeApi('claude', 'hello', 10_000, 'secret-api-key')
+
+    expect(result.success).toBe(true)
+    expect(result.stages).not.toContainEqual(expect.objectContaining({ name: 'cleanup', state: 'failed' }))
   })
 })
