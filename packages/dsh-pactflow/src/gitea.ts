@@ -89,7 +89,7 @@ export class PactFlowGiteaClient {
     const repository = await response.json() as RepositoryResponse
     if (repository.full_name !== `${input.owner}/${input.repo}` || repository.default_branch !== input.defaultBranch
       || typeof repository.clone_url !== 'string'
-      || typeof repository.default_branch !== 'string' || typeof repository.private !== 'boolean') {
+      || typeof repository.default_branch !== 'string' || repository.private !== input.private) {
       throw new Error('PactFlow Gitea create repository response is invalid')
     }
     const cloneUrl = credentialFreeCloneUrl(repository.clone_url)
@@ -106,8 +106,10 @@ export class PactFlowGiteaClient {
     binding: PactFlowGiteaBinding,
     token: string,
     expectedDefaultBranch: string,
+    signal?: AbortSignal,
   ): Promise<PactFlowGiteaStatus> {
-    const repository = await this.request<RepositoryResponse>(binding, token, '')
+    const cancellation = signal === undefined ? {} : { signal }
+    const repository = await this.request<RepositoryResponse>(binding, token, '', cancellation)
     if (repository.full_name !== `${binding.owner}/${binding.repo}`
       || repository.default_branch !== expectedDefaultBranch
       || typeof repository.private !== 'boolean'
@@ -115,7 +117,7 @@ export class PactFlowGiteaClient {
       throw new Error('PactFlow Gitea repository identity or default branch does not match the Git binding')
     }
     const protection = await this.request<BranchProtectionResponse | undefined>(
-      binding, token, `/branch_protections/${encodeURIComponent(expectedDefaultBranch)}`, { allowNotFound: true },
+      binding, token, `/branch_protections/${encodeURIComponent(expectedDefaultBranch)}`, { allowNotFound: true, ...cancellation },
     )
     const contexts = protection?.status_check_contexts
     return {
@@ -152,6 +154,7 @@ export class PactFlowGiteaClient {
     token: string,
     head: string,
     base: string,
+    expectedHeadCommit?: string,
   ): Promise<PactFlowGiteaPullRequest | undefined> {
     const responses: PullRequestResponse[] = []
     for (let page = 1; page <= 20; page += 1) {
@@ -167,7 +170,8 @@ export class PactFlowGiteaClient {
     for (const candidate of responses) {
       if (typeof candidate.number === 'number' && Number.isSafeInteger(candidate.number)) unique.set(candidate.number, candidate)
     }
-    const match = [...unique.values()].find(candidate => candidate.head?.ref === head && candidate.base?.ref === base)
+    const match = [...unique.values()].find(candidate => candidate.head?.ref === head && candidate.base?.ref === base
+      && (expectedHeadCommit === undefined || candidate.head?.sha === expectedHeadCommit))
     return match === undefined ? undefined : this.pullRequest(match)
   }
 
@@ -217,6 +221,7 @@ export class PactFlowGiteaClient {
       readonly body?: unknown
       readonly expectedStatus?: number
       readonly noContent?: boolean
+      readonly signal?: AbortSignal
     } = {},
   ): Promise<T> {
     const owner = encodeURIComponent(binding.owner)
@@ -233,9 +238,11 @@ export class PactFlowGiteaClient {
           ...options.body === undefined ? {} : { 'content-type': 'application/json' },
         },
         ...options.body === undefined ? {} : { body: JSON.stringify(options.body) },
-        signal: AbortSignal.timeout(10_000),
+        signal: options.signal === undefined ? AbortSignal.timeout(10_000)
+          : AbortSignal.any([options.signal, AbortSignal.timeout(10_000)]),
       })
     } catch {
+      options.signal?.throwIfAborted()
       throw new Error('PactFlow could not connect to the configured Gitea API')
     }
     if (options.allowNotFound === true && response.status === 404) return undefined as T
@@ -251,6 +258,7 @@ export class PactFlowGiteaClient {
     try {
       return await response.json() as T
     } catch {
+      options.signal?.throwIfAborted()
       throw new Error('PactFlow Gitea API returned invalid JSON')
     }
   }

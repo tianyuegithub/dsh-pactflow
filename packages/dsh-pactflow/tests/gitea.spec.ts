@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PactFlowGiteaClient } from '../src/gitea.ts'
 import type { PactFlowGiteaBinding } from '../src/types.ts'
 
@@ -48,6 +48,52 @@ describe('PactFlow Gitea admission', () => {
       branchProtected: true, requiredApprovals: 2, statusChecks: ['ci/test'], mergeStyle: 'merge',
     })
     expect(JSON.stringify(status)).not.toContain('test-token')
+  })
+
+  it('cancels the actual in-flight repository request', async () => {
+    let received!: () => void
+    const started = new Promise<void>(resolve => { received = resolve })
+    let closed = false
+    const server = createServer((_request, response) => {
+      response.once('close', () => { closed = true })
+      received()
+    })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const controller = new AbortController()
+    let settled = false
+    let failure: unknown
+    const pending = new PactFlowGiteaClient().verify({
+      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      owner: 'owner', repo: 'repo', tokenCredentialRef: 'TEST_TOKEN',
+    }, 'isolated-test-token', 'main', controller.signal).then(
+      () => { settled = true }, error => { settled = true; failure = error },
+    )
+    try {
+      await started
+      controller.abort()
+      await vi.waitFor(() => expect(settled).toBe(true))
+      expect(failure).toBeDefined()
+      await vi.waitFor(() => expect(closed).toBe(true))
+    } finally { server.closeAllConnections(); await pending }
+  })
+
+  it.each([true, false])('requires creation visibility to match the requested private=%s', async requestedPrivate => {
+    let responsePrivate = !requestedPrivate
+    const server = createServer((request, response) => {
+      expect(request.method).toBe('POST')
+      response.writeHead(201, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ full_name: 'owner/repo', default_branch: 'main',
+        private: responsePrivate, clone_url: 'https://gitea.invalid/owner/repo.git' }))
+    })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const client = new PactFlowGiteaClient()
+    const input = { owner: 'owner', repo: 'repo', defaultBranch: 'main', private: requestedPrivate }
+    await expect(client.createRepository(baseUrl, 'owner', 'isolated-test-token', input)).rejects.toThrow(/response is invalid/)
+    responsePrivate = requestedPrivate
+    await expect(client.createRepository(baseUrl, 'owner', 'isolated-test-token', input)).resolves.toMatchObject({ private: requestedPrivate })
   })
 
   it('reports an unprotected branch and rejects repository identity drift', async () => {

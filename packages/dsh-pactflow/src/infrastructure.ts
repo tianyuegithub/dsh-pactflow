@@ -280,9 +280,7 @@ export class PactFlowInfrastructure {
     const pool = this.pools.get(poolId)
     const state = this.states.get(poolId)
     if (pool === undefined || state === undefined) throw new Error(`PactFlow Worker Pool "${poolId}" is not configured`)
-    if (state.running >= pool.maxConcurrency) {
-      throw new Error(`PactFlow Worker Pool "${poolId}" capacity is exhausted during recovery`)
-    }
+    // Existing Jobs remain occupied even when the configured pool was reduced.
     state.running += 1
     return this.releaseOnce(poolId)
   }
@@ -303,11 +301,11 @@ export class PactFlowInfrastructure {
       if (released) return
       released = true
       const state = this.states.get(poolId)!
+      state.running -= 1
+      if (state.running >= this.pools.get(poolId)!.maxConcurrency) return
       const waiter = state.queue.shift()
-      if (waiter === undefined) {
-        state.running -= 1
-        return
-      }
+      if (waiter === undefined) return
+      state.running += 1
       if (waiter.signal !== undefined && waiter.abort !== undefined) {
         waiter.signal.removeEventListener('abort', waiter.abort)
       }

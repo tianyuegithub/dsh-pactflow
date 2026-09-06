@@ -5,12 +5,19 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { withWorkspaceFileLock } from './workspace-lock.ts'
+import { pactFlowWorkspaceProjectSchema } from './schema.ts'
 import type {
   PactFlowWorkspaceGitStatus,
   PactFlowWorkspaceProjectConfig,
 } from './types.ts'
 
 const exec = promisify(execFile)
+
+export async function workspaceHeadCommit(path: string, targetBranch?: string): Promise<string> {
+  if (targetBranch !== undefined) await git(path, ['check-ref-format', `refs/heads/${targetBranch}`])
+  return await git(path, ['rev-parse', '--verify', 'HEAD^{commit}'])
+}
 
 async function git(path: string, args: readonly string[]): Promise<string> {
   const result = await exec('git', ['-C', path, ...args], {
@@ -67,22 +74,32 @@ export async function attachAndPushWorkspaceRemote(
   username: string,
   token: string,
   branch: string,
+  expectedCommit: string,
 ): Promise<void> {
-  if (await gitOptional(path, ['remote', 'get-url', 'origin']) !== undefined) {
-    throw new Error('PactFlow Workspace already has an origin remote')
+  await git(path, ['check-ref-format', `refs/heads/${branch}`])
+  if (await workspaceHeadCommit(path) !== expectedCommit) throw new Error('PactFlow Workspace commit changed before push')
+  const existing = await gitOptional(path, ['remote', 'get-url', 'origin'])
+  if (existing !== undefined && existing !== remoteUrl) {
+    throw new Error('PactFlow Workspace origin changed before push')
   }
-  await git(path, ['remote', 'add', 'origin', remoteUrl])
+  if (existing === undefined) await git(path, ['remote', 'add', 'origin', remoteUrl])
   const helperDir = await mkdtemp(join(tmpdir(), 'pactflow-askpass-'))
   const helper = join(helperDir, 'askpass.sh')
   try {
     await writeFile(helper, '#!/bin/sh\ncase "$1" in *Username*) printf %s "$PACTFLOW_GIT_USERNAME";; *) printf %s "$PACTFLOW_GIT_PASSWORD";; esac\n', { mode: 0o700 })
-    await exec('git', ['-C', path, 'push', '-u', 'origin', branch], {
+    const options = {
       encoding: 'utf8', maxBuffer: 2_097_152,
       env: {
         ...process.env, GIT_ASKPASS: helper, GIT_TERMINAL_PROMPT: '0',
         PACTFLOW_GIT_USERNAME: username, PACTFLOW_GIT_PASSWORD: token,
       },
-    })
+    } as const
+    const ref = `refs/heads/${branch}`
+    const tip = (await exec('git', ['-C', path, 'ls-remote', remoteUrl, ref], options)).stdout.trim().split(/\s+/)[0]
+    if (tip === expectedCommit) return
+    if (tip !== '') throw new Error('PactFlow remote branch changed before initial push')
+    // Lease permits only creation of an absent ref, never replacement of another commit.
+    await exec('git', ['-C', path, 'push', `--force-with-lease=${ref}:`, remoteUrl, `${expectedCommit}:${ref}`], options)
   } finally {
     await rm(helperDir, { recursive: true, force: true })
   }
@@ -92,28 +109,21 @@ export async function attachAndPushWorkspaceRemote(
 export class PactFlowWorkspaceProjectStore {
   private static readonly locks = new Map<string, Promise<void>>()
   private readonly rows = new Map<string, PactFlowWorkspaceProjectConfig>()
-  private loaded: Promise<void> | undefined
 
   constructor(private readonly path = join(resolveDshHome(), 'pactflow', 'workspace-projects.json')) {}
 
   async list(): Promise<readonly PactFlowWorkspaceProjectConfig[]> {
-    await this.load()
-    return [...this.rows.values()].map(row => structuredClone(row))
+    return await this.withLock(async () => {
+      await this.reload()
+      return [...this.rows.values()].map(row => structuredClone(row))
+    })
   }
 
   async get(workspaceId: string): Promise<PactFlowWorkspaceProjectConfig | undefined> {
-    await this.load()
-    const row = this.rows.get(workspaceId)
-    return row === undefined ? undefined : structuredClone(row)
-  }
-
-  /** Legacy unconditional write. New Workspace mutations must use putIfRevision(). */
-  async put(config: PactFlowWorkspaceProjectConfig): Promise<void> {
-    await this.load()
-    await this.withLock(async () => {
+    return await this.withLock(async () => {
       await this.reload()
-      this.rows.set(config.workspaceId, structuredClone(config))
-      await this.persist()
+      const row = this.rows.get(workspaceId)
+      return row === undefined ? undefined : structuredClone(row)
     })
   }
 
@@ -128,36 +138,42 @@ export class PactFlowWorkspaceProjectStore {
     if (config.revision !== expectedRevision + 1) {
       throw new Error('PactFlow Workspace configuration revision must advance by exactly one')
     }
-    await this.load()
+    if (!validConfig(config)) throw new Error('PactFlow Workspace configuration is invalid')
     return await this.withLock(async () => {
       await this.reload()
       const current = this.rows.get(config.workspaceId)
       if ((current?.revision ?? 0) !== expectedRevision) return false
+      if (current?.remoteCreation !== undefined) {
+        const { state: oldState, cloneUrl: oldUrl, ...oldIdentity } = current.remoteCreation
+        const { state: nextState, cloneUrl: nextUrl, ...nextIdentity } = config.remoteCreation ?? {}
+        if (JSON.stringify(oldIdentity) !== JSON.stringify(nextIdentity)
+          || (oldUrl !== undefined && oldUrl !== nextUrl)
+          || !(nextState === oldState || (oldState === 'creating' && nextState === 'created')
+            || (oldState === 'created' && nextState === 'completed'))) {
+          throw new Error('PactFlow remote creation responsibility cannot be discarded or retargeted')
+        }
+      }
       this.rows.set(config.workspaceId, structuredClone(config))
       await this.persist()
       return true
     })
   }
 
-  private async load(): Promise<void> {
-    this.loaded ??= (async () => {
-      await this.reload()
-    })()
-    await this.loaded
-  }
-
   private async reload(): Promise<void> {
-    this.rows.clear()
+    const next = new Map<string, PactFlowWorkspaceProjectConfig>()
     try {
       const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
-      if (!Array.isArray(parsed)) return
+      if (!Array.isArray(parsed)) throw new Error('PactFlow Workspace configuration file must contain an array')
       for (const row of parsed) {
-        if (!validConfig(row)) continue
-        this.rows.set(row.workspaceId, structuredClone(row))
+        if (!validConfig(row)) throw new Error('PactFlow Workspace configuration file contains an invalid record')
+        if (next.has(row.workspaceId)) throw new Error('PactFlow Workspace configuration file contains duplicate workspace IDs')
+        next.set(row.workspaceId, structuredClone(row))
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
+    this.rows.clear()
+    for (const [id, row] of next) this.rows.set(id, row)
   }
 
   private async persist(): Promise<void> {
@@ -176,48 +192,11 @@ export class PactFlowWorkspaceProjectStore {
     PactFlowWorkspaceProjectStore.locks.set(this.path, previous.then(() => current, () => current))
     await previous.catch(() => undefined)
     try {
-      return await operation()
-    } finally {
-      unlock!()
-    }
+      return await withWorkspaceFileLock(this.path, operation)
+    } finally { unlock!() }
   }
 }
 
 function validConfig(value: unknown): value is PactFlowWorkspaceProjectConfig {
-  if (typeof value !== 'object' || value === null) return false
-  const row = value as Partial<PactFlowWorkspaceProjectConfig>
-  return row.schema === 'dsh_pactflow_workspace_project/v1'
-    && typeof row.workspaceId === 'string' && typeof row.workspacePath === 'string'
-    && typeof row.workspaceTitle === 'string' && typeof row.revision === 'number'
-    && Number.isSafeInteger(row.revision) && row.revision > 0
-    && typeof row.createdAt === 'number' && Number.isSafeInteger(row.createdAt) && row.createdAt >= 0
-    && typeof row.updatedAt === 'number' && Number.isSafeInteger(row.updatedAt) && row.updatedAt >= 0
-    && (row.validationCommands === undefined || Array.isArray(row.validationCommands))
-    && (row.validationProfiles === undefined || validValidationProfiles(row.validationProfiles))
-    && (row.validationProfileIds === undefined || (Array.isArray(row.validationProfileIds)
-      && row.validationProfileIds.every(id => typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(id))
-      && (row.validationProfiles === undefined || row.validationProfileIds.every(id =>
-        row.validationProfiles!.some(profile => profile.id === id)))))
-}
-
-function validValidationProfiles(value: readonly unknown[]): boolean {
-  const ids = value.map(profile => typeof profile === 'object' && profile !== null
-    ? (profile as { readonly id?: unknown }).id : undefined)
-  return new Set(ids).size === ids.length && value.every(profile => validValidationProfile(profile))
-}
-
-function validValidationProfile(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) return false
-  const profile = value as Record<string, unknown>
-  const command = profile.command
-  const executable = typeof command === 'string' ? command.split('/').pop()?.toLowerCase() : undefined
-  return typeof profile.id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(profile.id)
-    && typeof profile.displayName === 'string' && profile.displayName.trim() !== ''
-    && typeof command === 'string' && /^[^\s\0\r\n;&|<>$()`]{1,256}$/.test(command)
-    && (executable === undefined || !new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'cmd.exe', 'powershell', 'pwsh']).has(executable))
-    && Array.isArray(profile.args) && profile.args.length <= 64
-    && profile.args.every(argument => typeof argument === 'string' && argument.length <= 4_096 && !/[\0\r\n]/.test(argument))
-    && Number.isSafeInteger(profile.timeoutMs) && (profile.timeoutMs as number) >= 1_000
-    && (profile.timeoutMs as number) <= 3_600_000
-    && Number.isSafeInteger(profile.revision) && (profile.revision as number) > 0
+  return pactFlowWorkspaceProjectSchema.safeParse(value).success
 }

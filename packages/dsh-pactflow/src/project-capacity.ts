@@ -76,10 +76,7 @@ export class PactFlowProjectCapacity {
     }
     const state: State = this.states.get(workspaceId) ?? { running: 0, byProfile: new Map(), queue: [] }
     this.states.set(workspaceId, state)
-    if (state.running >= projectCapacityLimit(policy)
-      || (state.byProfile.get(profileId) ?? 0) >= profileMax(policy, profileId)) {
-      throw new Error(`PactFlow project Worker capacity for "${workspaceId}" is exhausted during recovery`)
-    }
+    // Recovery accounts for existing work, not admission under the new limits.
     this.reserve(state, profileId)
     return this.release(workspaceId, profileId)
   }
@@ -122,10 +119,6 @@ export class PactFlowProjectCapacity {
   private cancelled(workspaceId: string): Error {
     return new Error(`PactFlow project Worker queue for "${workspaceId}" wait was cancelled`)
   }
-}
-
-function profileMax(policy: PactFlowProjectWorkerPolicy, profileId: string): number {
-  return policy.agentProfiles.find(item => item.id === profileId)?.maxConcurrency ?? 0
 }
 
 function projectCapacityLimit(policy: PactFlowProjectWorkerPolicy): number {

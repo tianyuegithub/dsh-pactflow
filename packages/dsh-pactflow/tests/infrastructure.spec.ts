@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os'
 import { PactFlowInfrastructureHealthStore } from '../src/infrastructure-health.ts'
 import { harnessVersionCommand } from '../src/k3s-worker.ts'
 import type { PactFlowInfrastructureSettings } from '../src/types.ts'
+import { PactFlowProjectCapacity } from '../src/project-capacity.ts'
+import { PactFlowExecutionCapacity } from '../src/execution-capacity.ts'
 
 const template = {
   id: 'claude', harness: 'claude' as const, apiMode: 'anthropic-messages' as const,
@@ -38,6 +40,61 @@ function settings(overrides: Partial<PactFlowInfrastructureSettings> = {}): Pact
 }
 
 describe('PactFlow infrastructure resources', () => {
+  it('keeps a queued pool request waiting until recovered over-occupancy falls below its limit', async () => {
+    const infrastructure = new PactFlowInfrastructure(settings())
+    const first = infrastructure.reserveExisting('default')
+    const second = infrastructure.reserveExisting('default')
+    let admitted = false
+    const pending = infrastructure.acquire('default').then(release => { admitted = true; return release })
+    first()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(admitted).toBe(false)
+    second()
+    const release = await pending
+    expect(admitted).toBe(true)
+    release()
+  })
+
+  it('restores over-limit project and pool occupancy without admitting new work', () => {
+    const infrastructure = new PactFlowInfrastructure(settings())
+    const projects = new PactFlowProjectCapacity()
+    const scheduler = new PactFlowExecutionCapacity(projects)
+    const policy = { clusterId: 'home', workerPoolId: 'default', maxConcurrency: 1,
+      agentProfiles: [{ id: 'claude', displayName: 'Claude', templateId: 'claude', maxConcurrency: 1 }] }
+    const input = { workspaceId: 'workspace', profileId: 'claude', policy, poolId: 'default', resolveInfrastructure: () => infrastructure }
+    const first = scheduler.reserveExisting(input)
+    const second = scheduler.reserveExisting(input)
+    expect(projects.tryAcquire('workspace', policy, 'claude')).toBeUndefined()
+    expect(infrastructure.tryAcquire('default')).toBeUndefined()
+    first()
+    first()
+    expect(projects.tryAcquire('workspace', policy, 'claude')).toBeUndefined()
+    expect(infrastructure.tryAcquire('default')).toBeUndefined()
+    second()
+    second()
+    const projectSlot = projects.tryAcquire('workspace', policy, 'claude')
+    const poolSlot = infrastructure.tryAcquire('default')
+    expect(projectSlot).toBeTypeOf('function')
+    expect(poolSlot).toBeTypeOf('function')
+    projectSlot?.()
+    poolSlot?.()
+    scheduler.dispose()
+  })
+
+  it('rolls back recovered project occupancy if pool restoration fails', () => {
+    const infrastructure = new PactFlowInfrastructure(settings())
+    const projects = new PactFlowProjectCapacity()
+    const scheduler = new PactFlowExecutionCapacity(projects)
+    const policy = { clusterId: 'home', workerPoolId: 'default', maxConcurrency: 1,
+      agentProfiles: [{ id: 'claude', displayName: 'Claude', templateId: 'claude', maxConcurrency: 1 }] }
+    expect(() => scheduler.reserveExisting({ workspaceId: 'workspace', profileId: 'claude', policy,
+      poolId: 'missing', resolveInfrastructure: () => infrastructure })).toThrow(/not configured/)
+    const slot = projects.tryAcquire('workspace', policy, 'claude')
+    expect(slot).toBeTypeOf('function')
+    slot?.()
+    scheduler.dispose()
+  })
+
   it('normalizes Harbor project-prefixed repositories and double-encodes nested paths', () => {
     expect(harborRepositoryPathSegment(
       'datavdl', 'datavdl/prometheus-operator/prometheus-config-reloader',

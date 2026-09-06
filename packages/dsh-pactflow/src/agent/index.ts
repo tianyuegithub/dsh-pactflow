@@ -3,7 +3,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session/types'
 import type { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import type {} from '../index.ts'
-import { pactFlowReviewEvidenceDigest } from '../review-authorization.ts'
+import { pactFlowReviewEvidenceDigest, pactFlowReviewNote } from '../review-authorization.ts'
 
 export const name = 'pactflow-agent-tools'
 export const inject = ['tools', 'pactflow']
@@ -193,8 +193,7 @@ export function apply(ctx: Context): void {
       const agent = exec.agent
       if (agent === undefined) throw new Error('PactFlow review approval requires a calling Agent')
       const sessionId = requireSessionId(agent.session.id)
-      const note = args.note.trim()
-      if (note.length === 0) throw new Error('PactFlow review note must be non-empty')
+      const note = pactFlowReviewNote(args.note)
       const evidenceDigest = pactFlowReviewEvidenceDigest(
         sessionId, args.need_id, args.expected_revision, args.kind, args.decision, note,
       )
@@ -204,7 +203,7 @@ export function apply(ctx: Context): void {
         agent,
         toolName: 'pactflow_record_review',
         callId: exec.callId,
-        reason: `Approve PactFlow ${args.kind} review for Need ${args.need_id} at revision ${String(args.expected_revision)} (evidence ${evidenceDigest})`,
+        reason: `授权记录 PactFlow 评审\n需求：${args.need_id}\n修订：${String(args.expected_revision)}\n评审类型：${args.kind}\n决定：${args.decision}（${{ approved: '批准', rejected: '拒绝', 'changes-requested': '要求修改' }[args.decision]}）\n证据说明：\n${note}\n证据摘要：${evidenceDigest}`,
         signal: exec.signal,
       })
       if (outcome !== 'allowed-once') throw new Error(`PactFlow review approval was ${outcome}`)

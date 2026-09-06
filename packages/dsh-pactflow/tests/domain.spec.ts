@@ -27,6 +27,20 @@ async function harness(): Promise<Context> {
 }
 
 describe('PactFlow domain foundation', () => {
+  it('rejects a DSH runtime without the required external event producer capability', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    const producers = ctx.sessions.externalEventProducers
+    try {
+      Reflect.set(ctx.sessions, 'externalEventProducers', undefined)
+      await expect(async () => { await ctx.plugin(PactFlowService) }).rejects.toThrow(/external Session event producers.*unsupported/)
+    } finally {
+      Reflect.set(ctx.sessions, 'externalEventProducers', producers)
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('initializes one project through the external producer and eager projection', async () => {
     const ctx = await harness()
     const session = ctx.sessions.create(SessionId('project-1'), {
@@ -503,11 +517,20 @@ describe('PactFlow domain foundation', () => {
         meta: { agentPreset: 'pactflow', cwd: workspace },
       })
       const initialized = ctx.pactflow.initialize(session.id, { name: 'Git worker' })
+      const registeredWorkspace = { id: 'git-worker-workspace', path: workspace, title: 'Git worker', sessionIds: [session.id] }
+      ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+      await ctx.pactflow.saveValidationProfiles({
+        workspaceId: registeredWorkspace.id, expectedRevision: 0,
+        profiles: [
+          { id: 'git-status', displayName: 'Git status', command: 'git', args: ['status', '--short'], timeoutMs: 5_000 },
+          { id: 'failing-check', displayName: 'Failing check', command: process.execPath, args: ['-e', 'process.exit(7)'], timeoutMs: 5_000 },
+        ],
+      })
       const project = await ctx.pactflow.bindGit(session.id, {
         expectedRevision: initialized.revision,
         remote: 'origin',
         defaultBranch: 'main',
-        validationCommands: [{ command: 'git', args: ['status', '--short'], timeoutMs: 5_000 }],
+        validationProfileIds: ['git-status'],
       })
       expect(project).toMatchObject({
         revision: 2,
@@ -593,9 +616,7 @@ describe('PactFlow domain foundation', () => {
         expectedRevision: currentProject.revision,
         remote: 'origin',
         defaultBranch: 'main',
-        validationCommands: [{
-          command: process.execPath, args: ['-e', 'process.exit(7)'], timeoutMs: 5_000,
-        }],
+        validationProfileIds: ['failing-check'],
       })
       const invalid = ctx.pactflow.createNode(session.id, {
         id: 'invalid', needId: 'need', title: 'Invalid', dependencies: [],

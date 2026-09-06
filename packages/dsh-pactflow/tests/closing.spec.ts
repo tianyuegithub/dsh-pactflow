@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -13,7 +13,7 @@ import { createGitFixture } from './git-fixture.ts'
 import { recordAuthorizedReview } from './review-fixture.ts'
 
 describe('PactFlow Gitea closing', () => {
-  it('merges verified task refs through a protected PR and records deployment', async () => {
+  it.each(['empty', 'registered', 'workspace', 'session-override', 'changed', 'legacy', 'ledger-failure', 'release-failure', 'release-drift'] as const)('checks %s validation authorization before protected PR closing', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-closing-'))
     const priorDshHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, '.dsh')
@@ -25,6 +25,7 @@ describe('PactFlow Gitea closing', () => {
     let pullHead = ''
     let pullHeadCommit = ''
     let mergeCommit = ''
+    let mergeCalls = 0
     const server = createServer((request, response) => {
       void handleGitea(request, response).catch(() => {
         response.statusCode = 500
@@ -50,10 +51,12 @@ describe('PactFlow Gitea closing', () => {
         return
       }
       if (request.method === 'GET' && request.url?.includes('/pulls?') === true) {
-        response.end('[]')
+        response.end(JSON.stringify(pullHead === '' ? [] : [{ number: 1, html_url: `${baseUrl}/owner/repo/pulls/1`,
+          merged: mergeCommit !== '', merge_commit_sha: mergeCommit, head: { ref: pullHead, sha: pullHeadCommit }, base: { ref: 'main' } }]))
         return
       }
       if (request.method === 'POST' && request.url?.endsWith('/pulls/1/merge') === true) {
+        mergeCalls++
         await readBody(request)
         git(['-C', merger, 'fetch', 'origin'])
         git(['-C', merger, 'merge', '--no-ff', '--no-edit', `origin/${pullHead}`])
@@ -106,10 +109,28 @@ describe('PactFlow Gitea closing', () => {
         meta: { agentPreset: 'pactflow', cwd: workspace },
       })
       const initialized = ctx.pactflow.initialize(session.id, { name: 'Closing' })
-      await ctx.pactflow.bindGit(session.id, {
+      const marker = join(root, 'registered-validation')
+      const profile = { id: 'closing-check', displayName: 'Closing check', command: process.execPath,
+        args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'verified')`], timeoutMs: 5_000 }
+      const registeredWorkspace = { id: 'closing-workspace', path: workspace, title: 'Closing', sessionIds: [session.id] }
+      if (mode !== 'empty') {
+        ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+        await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 0, profiles: [profile],
+          ...(mode === 'workspace' ? { selectedProfileIds: [profile.id] } : {}) })
+      }
+      if (mode === 'workspace' || mode === 'session-override') {
+        const config = await ctx.pactflow.adoptWorkspaceGit({ workspaceId: registeredWorkspace.id, expectedRevision: 1 })
+        expect(await Reflect.get(ctx.pactflow, 'workspaceProjects').putIfRevision(config.revision, { ...config, revision: config.revision + 1,
+          git: { ...config.git!, giteaProviderId: 'gitea', owner: 'owner', repo: 'repo',
+            ...(mode === 'session-override' ? { remote: 'workspace-unused' } : {}) } })).toBe(true)
+      }
+      if (mode === 'workspace') {
+        expect(ctx.pactflow.project(session.id).project?.git).toBeUndefined()
+        expect(await ctx.pactflow.verifyGitea(session.id)).toMatchObject({ branchProtected: true })
+      } else await ctx.pactflow.bindGit(session.id, {
         expectedRevision: initialized.revision, remote: 'origin', defaultBranch: 'main',
         giteaBaseUrl: baseUrl, giteaOwner: 'owner', giteaRepo: 'repo',
-        giteaTokenCredentialRef: 'GITEA_TEST_TOKEN', validationCommands: [],
+        giteaTokenCredentialRef: 'GITEA_TEST_TOKEN', validationProfileIds: mode === 'empty' ? [] : [profile.id],
       })
       expect(ctx.pactflow.project(session.id).project?.git?.gitea?.username).toBeUndefined()
       const need = ctx.pactflow.createNeed(session.id, {
@@ -138,6 +159,8 @@ describe('PactFlow Gitea closing', () => {
         leaseDurationMs: 60_000, prompt: 'commit',
       })
       expect(task.run.state).toBe('succeeded')
+      expect(task.run.git?.remote).toBe('origin')
+      if (mode === 'workspace') expect(ctx.pactflow.project(session.id).project?.git).toBeUndefined()
 
       let current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: need.revision, to: 'discussion',
@@ -171,6 +194,58 @@ describe('PactFlow Gitea closing', () => {
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'closing',
       })
+      if (mode !== 'empty') await rm(marker)
+      if (mode === 'changed') {
+        await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 1,
+          profiles: [{ ...profile, timeoutMs: 6_000 }] })
+      }
+      if (mode === 'legacy') {
+        const project = ctx.pactflow.project(session.id).project!
+        session.append('pactflow/project-configured', { v: 1, project: { ...project, revision: project.revision + 1,
+          git: { ...project.git!, validationProfileIds: [], validationProfileRevisions: {}, legacyUntrusted: true } } })
+      }
+      if (mode === 'changed' || mode === 'legacy') {
+        await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
+          .rejects.toThrow(/changed after Git binding|authorization/)
+        await expect(access(marker)).rejects.toThrow()
+        expect(pullHead).toBe('')
+        expect(mergeCommit).toBe('')
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases).toEqual({})
+        await ctx.fiber.dispose()
+        return
+      }
+      if (mode === 'ledger-failure') {
+        const events = Reflect.get(ctx.pactflow, 'events')
+        Reflect.set(ctx.pactflow, 'events', { ...events, append: (...args: unknown[]) => {
+          if (args[1] === 'pactflow/cleanup-recorded') throw new Error('cleanup ledger write failed')
+          return events.append(...args)
+        } })
+        await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
+          .rejects.toThrow('cleanup ledger write failed')
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowNeeds')?.byId[need.id]?.phase).toBe('closing')
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases).toEqual({})
+        expect(mergeCommit).toBe('') // Persist responsibility before the irreversible merge.
+        Reflect.set(ctx.pactflow, 'events', events)
+      }
+      if (mode === 'release-failure' || mode === 'release-drift') {
+        const events = Reflect.get(ctx.pactflow, 'events')
+        Reflect.set(ctx.pactflow, 'events', { ...events, append: (...args: unknown[]) => {
+          if (args[1] === 'pactflow/release-recorded') throw new Error('release write failed')
+          return events.append(...args)
+        } })
+        await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision })).rejects.toThrow('release write failed')
+        expect(mergeCalls).toBe(1)
+        Reflect.set(ctx.pactflow, 'events', events)
+        if (mode === 'release-drift') {
+          git(['--git-dir', remote, 'update-ref', `refs/heads/${task.run.git!.branch}`, task.run.git!.baseCommit, task.run.gitResult!.commit])
+          await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
+            .rejects.toThrow('task branch changed after verification')
+          expect(mergeCalls).toBe(1)
+          expect(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases).toEqual({})
+          await ctx.fiber.dispose()
+          return
+        }
+      }
       const closed = await ctx.pactflow.closeGitNeed(session.id, {
         needId: need.id, expectedRevision: current.revision,
       })
@@ -179,7 +254,14 @@ describe('PactFlow Gitea closing', () => {
         release: { branch: 'main', commit: mergeCommit },
         cleanupFailures: [],
       })
+      expect(mergeCalls).toBe(1)
+      const cleanupIntents = session.events.filter(event => event.type === 'pactflow/cleanup-recorded'
+        && event.data.record.state === 'pending' && event.data.record.attempt === 1)
+      const releaseEvent = session.events.find(event => event.type === 'pactflow/release-recorded')!
+      expect(cleanupIntents).toHaveLength(2) // Integration checkout and the local Git task, no fictional K3s Job.
+      expect(cleanupIntents.every(event => event.seq < releaseEvent.seq)).toBe(true)
       expect(git(['--git-dir', remote, 'rev-parse', 'refs/heads/main^{commit}'])).toBe(mergeCommit)
+      if (mode === 'registered' || mode === 'workspace' || mode === 'session-override') await expect(access(marker)).resolves.toBeUndefined()
       expect(() => git([
         '--git-dir', remote, 'show-ref', '--verify', `refs/heads/${task.run.git?.branch}`,
       ])).toThrow()

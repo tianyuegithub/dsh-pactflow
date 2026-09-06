@@ -1,3 +1,5 @@
+import type {} from '@deepseek-ai/dsh-session-projection/types'
+
 /** Client-visible proof that the PactFlow Host and external event vocabulary are active. */
 export interface PactFlowHealth {
   readonly plugin: 'dsh-pactflow'
@@ -289,12 +291,26 @@ export interface PactFlowWorkspaceProjectConfig {
   readonly revision: number
   readonly createdAt: number
   readonly updatedAt: number
+  readonly remoteCreation?: PactFlowRemoteCreation
   readonly git?: PactFlowWorkspaceGitBinding
   readonly worker?: PactFlowProjectWorkerPolicy
   readonly validationProfiles?: readonly PactFlowValidationProfile[]
   readonly validationProfileIds?: readonly string[]
   /** Historical raw commands; new configurations use validationProfiles instead. */
   readonly validationCommands?: readonly PactFlowValidationCommand[]
+}
+
+export interface PactFlowRemoteCreation {
+  readonly id: string
+  readonly state: 'creating' | 'created' | 'completed'
+  readonly providerId: string
+  readonly providerSnapshot: string
+  readonly owner: string
+  readonly repo: string
+  readonly defaultBranch: string
+  readonly private: boolean
+  readonly expectedCommit: string
+  readonly cloneUrl?: string
 }
 
 /** User-owned, stable validation command selected by ID rather than model input. */
@@ -593,6 +609,11 @@ export interface PactFlowCleanupRecord {
   readonly runId?: PactFlowRunId
   readonly needId?: PactFlowNeedId
   readonly target: string
+  /** Exact Host-created integration checkout; retry never prepares it again. */
+  readonly closing?: PactFlowClosingGit
+  readonly closingInputDigest?: string
+  /** Pre-merge intent: deletion is forbidden until delivery proof exists. */
+  readonly requiresRelease?: boolean
   readonly state: 'pending' | 'failed' | 'succeeded'
   readonly attempt: number
   readonly error?: string
@@ -798,12 +819,19 @@ export interface PactFlowSnapshot {
 export interface PactFlowProjectProjection { readonly project: PactFlowProject | null }
 export interface PactFlowNeedsProjection { readonly byId: Readonly<Record<string, PactFlowNeed>> }
 export interface PactFlowDagProjection { readonly byId: Readonly<Record<string, PactFlowNode>> }
+/** Host-only replay index; the client still receives PactFlowDagProjection. */
+export interface PactFlowDagState extends PactFlowDagProjection { readonly needIds: readonly PactFlowNeedId[] }
 export interface PactFlowRunsProjection { readonly byId: Readonly<Record<string, PactFlowRun>> }
 export interface PactFlowDeliveryProjection {
   readonly reviews: Readonly<Record<string, PactFlowReview>>
   readonly documents: Readonly<Record<string, PactFlowDocument>>
   readonly releases: Readonly<Record<string, PactFlowRelease>>
   readonly cleanups: Readonly<Record<string, PactFlowCleanupRecord>>
+}
+/** Compact Host-only reference indexes; not part of the public delivery view. */
+export interface PactFlowDeliveryState extends PactFlowDeliveryProjection {
+  readonly needIds: readonly PactFlowNeedId[]
+  readonly runNeeds: Readonly<Record<string, PactFlowNeedId>>
 }
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -832,9 +860,9 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     pactflowProject: PactFlowProjectProjection
     pactflowNeeds: PactFlowNeedsProjection
-    pactflowDag: PactFlowDagProjection
+    pactflowDag: PactFlowDagState
     pactflowRuns: PactFlowRunsProjection
-    pactflowDelivery: PactFlowDeliveryProjection
+    pactflowDelivery: PactFlowDeliveryState
   }
   interface SessionProjectionMap {
     pactflowProject: PactFlowProjectProjection

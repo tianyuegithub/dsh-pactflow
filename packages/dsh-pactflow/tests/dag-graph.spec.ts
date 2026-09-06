@@ -40,20 +40,27 @@ describe('PactFlow DAG graph', () => {
     expect(layout.height).toBeGreaterThan(650)
   })
 
-  it('uses concise Chinese product copy while preserving internal identifiers outside the card copy', () => {
-    const known = node('rerun-verify-linkage', [], 'N1 callback handleRerunCheckResult')
-    const unknown = node('custom-english-node', [], 'Run validation callback')
+  it('preserves task titles independently of business-specific identifiers or language', () => {
+    const known = node('rerun-verify-linkage', [], '迁移索引')
+    const unknown = node('custom-english-node', [], 'Run tests')
 
     expect(pactFlowDagNodeCopy(known)).toEqual({
-      label: '重跑结果联动',
-      summary: '回调结果自动进入闭环',
+      label: '迁移索引',
+      summary: '查看该任务的执行详情',
     })
     expect(pactFlowDagNodeCopy(unknown)).toEqual({
-      label: '任务节点',
-      summary: '查看该阶段的执行详情',
+      label: 'Run tests',
+      summary: '查看该任务的执行详情',
     })
     expect(pactFlowDagStateCopy('succeeded')).toEqual({ label: '已完成', tone: 'success' })
     expect(pactFlowDagStateCopy('failed')).toEqual({ label: '执行失败', tone: 'danger' })
+  })
+
+  it('bounds long labels without discarding mixed-language meaning', () => {
+    const copy = pactFlowDagNodeCopy(node('custom', [], 'API gateway 配置与验证'))
+    expect(copy.label).toContain('API gateway')
+    expect(copy.label.length).toBeLessThanOrEqual(13)
+    expect(copy.summary).toContain('配置与验证')
   })
 })
 

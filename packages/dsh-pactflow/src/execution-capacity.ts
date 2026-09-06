@@ -19,9 +19,25 @@ export class PactFlowExecutionCapacity {
   private static readonly maxQueued = 512
   private readonly queue: Request[] = []
   private pumping = false
+  private disposed = false
+  private inventoryDepth = 0
+  private readonly inventoryFailures = new Map<string, string>()
   private wakeTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly projects: PactFlowProjectCapacity) {}
+
+  /** Restore occupied slots before admitting new requests; nested scans compose. */
+  pauseAdmission(): () => void {
+    if (this.disposed) throw new Error('PactFlow Worker admission scheduler was disposed')
+    this.inventoryDepth++
+    return this.once(() => { this.inventoryDepth--; this.pump() })
+  }
+
+  setInventoryFailure(scope: string, message: string | undefined): void {
+    if (message === undefined) this.inventoryFailures.delete(scope)
+    else this.inventoryFailures.set(scope, message.slice(0, 2_048))
+    this.pump()
+  }
 
   async acquire(input: {
     readonly workspaceId: string | undefined
@@ -31,6 +47,9 @@ export class PactFlowExecutionCapacity {
     readonly resolveInfrastructure: () => PactFlowInfrastructure | undefined
     readonly signal: AbortSignal | undefined
   }): Promise<() => void> {
+    if (this.disposed) throw new Error('PactFlow Worker admission scheduler was disposed')
+    const failure = this.inventoryFailures.values().next().value
+    if (failure !== undefined) throw new Error(failure)
     if (input.signal?.aborted) throw new Error('PactFlow Worker admission wait was cancelled')
     if (this.queue.length >= PactFlowExecutionCapacity.maxQueued) throw new Error('PactFlow Worker admission queue is full')
     const result = await new Promise<() => void>((resolve, reject) => {
@@ -58,17 +77,21 @@ export class PactFlowExecutionCapacity {
     readonly poolId: string | undefined
     readonly resolveInfrastructure: () => PactFlowInfrastructure | undefined
   }): () => void {
+    if (this.disposed) throw new Error('PactFlow Worker admission scheduler was disposed')
     const projectRelease = input.workspaceId !== undefined && input.policy !== undefined && input.profileId !== undefined
-      ? this.projects.tryAcquire(input.workspaceId, input.policy, input.profileId)
+      ? this.projects.reserveExisting(input.workspaceId, input.policy, input.profileId)
       : undefined
-    const poolRelease = input.poolId === undefined ? undefined : input.resolveInfrastructure()?.tryAcquire(input.poolId)
-    if ((input.workspaceId !== undefined && input.policy !== undefined && input.profileId !== undefined && projectRelease === undefined)
-      || (input.poolId !== undefined && poolRelease === undefined)) {
-      poolRelease?.()
+    try {
+      const infrastructure = input.poolId === undefined ? undefined : input.resolveInfrastructure()
+      if (input.poolId !== undefined && infrastructure === undefined) {
+        throw new Error('PactFlow Worker infrastructure is unavailable during recovery')
+      }
+      const poolRelease = input.poolId === undefined ? undefined : infrastructure!.reserveExisting(input.poolId)
+      return this.once(() => { poolRelease?.(); projectRelease?.(); })
+    } catch (error) {
       projectRelease?.()
-      throw new Error('PactFlow Worker capacity is exhausted during recovery')
+      throw error
     }
-    return this.once(() => { poolRelease?.(); projectRelease?.(); })
   }
 
   waiting(poolId?: string): number {
@@ -76,6 +99,7 @@ export class PactFlowExecutionCapacity {
   }
 
   dispose(): void {
+    this.disposed = true
     if (this.wakeTimer !== undefined) clearTimeout(this.wakeTimer)
     this.wakeTimer = undefined
     for (const request of this.queue) {
@@ -86,13 +110,16 @@ export class PactFlowExecutionCapacity {
   }
 
   private pump(): void {
-    if (this.pumping) return
+    if (this.pumping || this.disposed || this.inventoryDepth > 0) return
     this.pumping = true
     let projectRelease: (() => void) | undefined
     let poolRelease: (() => void) | undefined
+    let admitted = false
     try {
       const request = this.queue[0]
       if (request === undefined) return
+      const failure = this.inventoryFailures.values().next().value
+      if (failure !== undefined) throw new Error(failure)
       const projects = request.workspaceId !== undefined && request.policy !== undefined && request.profileId !== undefined
         ? this.projects.tryAcquire(request.workspaceId, request.policy, request.profileId)
         : undefined
@@ -115,7 +142,7 @@ export class PactFlowExecutionCapacity {
       request.resolve(this.once(() => { pool?.(); projects?.(); this.pump() }))
       projectRelease = undefined
       poolRelease = undefined
-      this.pump()
+      admitted = true
     } catch (error) {
       poolRelease?.()
       projectRelease?.()
@@ -127,11 +154,12 @@ export class PactFlowExecutionCapacity {
       this.scheduleWake()
     } finally {
       this.pumping = false
+      if (admitted && this.queue.length > 0) this.pump()
     }
   }
 
   private scheduleWake(): void {
-    if (this.wakeTimer !== undefined) return
+    if (this.disposed || this.wakeTimer !== undefined) return
     this.wakeTimer = setTimeout(() => {
       this.wakeTimer = undefined
       this.pump()

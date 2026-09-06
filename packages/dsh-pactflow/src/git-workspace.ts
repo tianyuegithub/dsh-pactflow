@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type {
   BindPactFlowGitRequest,
@@ -41,6 +41,22 @@ export interface PactFlowClosingTaskRef {
   readonly expectedCommit: string
 }
 
+/** The persisted snapshot is not authority; callers must resolve user-owned profiles. */
+export function assertPactFlowValidationAuthorization(
+  snapshot: Pick<PactFlowGitRunSpec, 'validationCommands' | 'legacyUntrusted'>,
+  authorizedCommands: readonly PactFlowValidationCommand[],
+): void {
+  if (snapshot.legacyUntrusted === true || snapshot.validationCommands.length !== authorizedCommands.length
+    || snapshot.validationCommands.some((command, index) => {
+      const authorized = authorizedCommands[index]!
+      return command.command !== authorized.command || command.timeoutMs !== authorized.timeoutMs
+        || command.args.length !== authorized.args.length
+        || command.args.some((argument, offset) => argument !== authorized.args[offset])
+    })) {
+    throw new Error('PactFlow validation commands lack current registry authorization; rebind the project')
+  }
+}
+
 /** Keep validation subprocesses deterministic and prevent ambient credential leakage. */
 function minimalValidationEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {}
@@ -61,7 +77,9 @@ export class PactFlowGitWorkspace {
   async inspectBinding(
     workspace: string | undefined,
     request: BindPactFlowGitRequest,
+    authorizedCommands: readonly PactFlowValidationCommand[] = [],
   ): Promise<Omit<PactFlowGitBinding, 'revision' | 'boundAt'>> {
+    if ((request.validationCommands?.length ?? 0) > 0) throw new Error('PactFlow raw validation commands are not allowed; select registered profile IDs')
     const root = await this.requireWorkspaceRoot(workspace)
     const remote = this.gitName('remote', request.remote)
     const defaultBranch = this.gitName('default branch', request.defaultBranch)
@@ -73,17 +91,15 @@ export class PactFlowGitWorkspace {
       throw new Error('PactFlow K3s Git Secret name is invalid')
     }
     const gitea = this.gitea(request)
-    const rawValidationCommands = this.validationCommands(request.validationCommands ?? [])
-    const legacyUntrusted = request.validationProfileIds === undefined && rawValidationCommands.length > 0
+    const commands = this.validationCommands(authorizedCommands)
     return {
       remote,
       remoteUrl,
       defaultBranch,
-      validationCommands: rawValidationCommands,
+      validationCommands: commands,
       ...(request.validationProfileIds === undefined ? {} : {
         validationProfileIds: [...new Set(request.validationProfileIds.map(value => value.trim()).filter(Boolean))],
       }),
-      ...(legacyUntrusted ? { legacyUntrusted: true } : {}),
       ...auth === undefined ? {} : { auth },
       ...k3sGitSecretName === undefined ? {} : { k3sGitSecretName },
       ...gitea === undefined ? {} : { gitea },
@@ -139,10 +155,12 @@ export class PactFlowGitWorkspace {
   }
 
   /** Validate a clean commit, run Host commands, then prove the commit and tree stayed unchanged. */
-  async validateResult(spec: PactFlowGitRunSpec): Promise<PactFlowGitCommitEvidence> {
+  async validateResult(spec: PactFlowGitRunSpec, authorizedCommands: readonly PactFlowValidationCommand[] = []): Promise<PactFlowGitCommitEvidence> {
+    assertPactFlowValidationAuthorization(spec, authorizedCommands)
+    const commands = this.validationCommands(authorizedCommands)
     const before = await this.validateCommit(spec)
     const validations: PactFlowValidationEvidence[] = []
-    for (const command of spec.validationCommands) {
+    for (const command of commands) {
       validations.push(await this.runValidation(spec.worktreePath, command))
     }
     const after = await this.validateCommit(spec)
@@ -197,7 +215,9 @@ export class PactFlowGitWorkspace {
     spec: PactFlowGitRunSpec,
     remoteCommit: string,
     secret?: PactFlowGitAuthSecret,
+    authorizedCommands: readonly PactFlowValidationCommand[] = [],
   ): Promise<PactFlowGitResult> {
+    assertPactFlowValidationAuthorization(spec, authorizedCommands)
     const root = await this.requireWorkspaceRoot(workspace)
     if (!/^[0-9a-f]{40,64}$/.test(remoteCommit)) throw new Error('PactFlow remote Worker commit is invalid')
     if ((spec.auth === undefined) !== (secret === undefined)) {
@@ -218,9 +238,33 @@ export class PactFlowGitWorkspace {
       throw new Error('PactFlow remote Worker commit is not descended from the Run baseline')
     }
     await this.git(spec.worktreePath, ['merge', '--ff-only', remoteRef])
-    const result = await this.validateResult(spec)
+    const result = await this.validateResult(spec, authorizedCommands)
     if (result.commit !== remoteCommit) throw new Error('PactFlow local worktree differs from the remote Worker commit')
     return { ...result, remoteRef, syncedAt: Date.now() }
+  }
+
+  /** Verify exact remote task tips without recreating an already-merged integration. */
+  async verifyClosingTaskRefs(
+    workspace: string | undefined,
+    binding: PactFlowGitBinding,
+    tasks: readonly PactFlowClosingTaskRef[],
+    secret?: PactFlowGitAuthSecret,
+  ): Promise<void> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    const prefix = `refs/remotes/${binding.remote}/`
+    if (this.credentialFreeRemote(await this.git(root, ['remote', 'get-url', binding.remote])) !== binding.remoteUrl) {
+      throw new Error('PactFlow closing remote URL changed')
+    }
+    await this.withAuthentication(secret, async environment => {
+      for (const task of tasks) {
+        if (!task.remoteRef.startsWith(prefix)) throw new Error('PactFlow closing received a foreign task ref')
+        const branch = this.gitName('task branch', task.remoteRef.slice(prefix.length))
+        const ref = `refs/heads/${branch}`
+        const remote = await this.git(root, ['ls-remote', '--heads', binding.remote, ref], environment)
+        const tip = remote.split('\n').map(line => line.split(/\s+/)).find(([, name]) => name === ref)?.[0]
+        if (tip !== task.expectedCommit) throw new Error('PactFlow task branch changed after verification')
+      }
+    })
   }
 
   /** Merge verified task refs on an isolated integration branch and push it for PR creation. */
@@ -230,18 +274,23 @@ export class PactFlowGitWorkspace {
     needId: string,
     needRevision: number,
     binding: PactFlowGitBinding,
-    remoteRefs: readonly (string | PactFlowClosingTaskRef)[],
+    remoteRefs: readonly PactFlowClosingTaskRef[],
     secret?: PactFlowGitAuthSecret,
+    authorizedCommands: readonly PactFlowValidationCommand[] = [],
+    priorIdentity?: PactFlowClosingGit,
   ): Promise<PactFlowClosingGit> {
+    assertPactFlowValidationAuthorization(binding, authorizedCommands)
     const root = await this.requireWorkspaceRoot(workspace)
     if (remoteRefs.length === 0) throw new Error('PactFlow closing requires at least one task branch')
     if ((binding.auth === undefined) !== (secret === undefined)) {
       throw new Error('PactFlow Git authentication does not match the project binding')
     }
     const prefix = `refs/remotes/${binding.remote}/`
-    const taskRefs = remoteRefs.map(value => typeof value === 'string'
-      ? { remoteRef: value, expectedCommit: undefined }
-      : value)
+    if (remoteRefs.some(value => typeof value !== 'object' || value === null
+      || typeof value.remoteRef !== 'string' || !/^[0-9a-f]{40,64}$/.test(value.expectedCommit ?? ''))) {
+      throw new Error('PactFlow closing requires a remote ref and expected commit for every task')
+    }
+    const taskRefs = remoteRefs
     const uniqueTaskRefs = new Map(taskRefs.map(item => [item.remoteRef, item]))
     if (uniqueTaskRefs.size !== taskRefs.length) throw new Error('PactFlow closing task refs must be unique')
     const branches = [...uniqueTaskRefs.values()]
@@ -271,10 +320,18 @@ export class PactFlowGitWorkspace {
       'rev-parse', '--verify', `refs/remotes/${binding.remote}/${binding.defaultBranch}^{commit}`,
     ])
     const suffix = `r${String(needRevision)}`
-    const branch = `pactflow/closing/${needId}/${suffix}`
-    await this.git(root, ['check-ref-format', '--branch', branch])
     const projectKey = createHash('sha256').update(sessionId).digest('hex').slice(0, 20)
-    const worktreePath = join(this.worktreeRoot, 'closing', projectKey, suffix)
+    const expectedBranch = `pactflow/closing/${projectKey}/${needId}/${suffix}`
+    const expectedPath = join(this.worktreeRoot, 'closing', projectKey, needId, suffix)
+    if (priorIdentity !== undefined && !(
+      (priorIdentity.branch === expectedBranch && priorIdentity.worktreePath === expectedPath)
+      || (priorIdentity.branch === `pactflow/closing/${needId}/${suffix}`
+        && priorIdentity.worktreePath === join(this.worktreeRoot, 'closing', projectKey, suffix)))) {
+      throw new Error('PactFlow prior integration identity belongs to another scope')
+    }
+    const branch = priorIdentity?.branch ?? expectedBranch
+    const worktreePath = priorIdentity?.worktreePath ?? expectedPath
+    await this.git(root, ['check-ref-format', '--branch', branch])
     const remoteClosingRef = `refs/remotes/${binding.remote}/${branch}`
     const existingRemote = await this.withAuthentication(secret, async environment =>
       this.git(root, ['ls-remote', '--heads', binding.remote, branch], environment))
@@ -285,14 +342,19 @@ export class PactFlowGitWorkspace {
         ], environment)
       })
       const commit = await this.git(root, ['rev-parse', '--verify', `${remoteClosingRef}^{commit}`])
+      if (priorIdentity !== undefined && priorIdentity.commit !== commit) throw new Error('PactFlow prior integration commit changed')
       await this.verifyTaskTips(root, prefix, branches, commit)
-      await this.verifyTaskSet(root, branches, commit)
+      await this.verifyTaskSet(root, branches, commit, baseCommit)
       if (!await this.exists(worktreePath)) {
         const localBranch = await this.git(root, ['branch', '--list', branch])
         await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
         await this.git(root, localBranch.length > 0
           ? ['worktree', 'add', worktreePath, branch]
           : ['worktree', 'add', '-b', branch, worktreePath, commit])
+      }
+      if (await this.git(worktreePath, ['branch', '--show-current']) !== branch
+        || await this.git(worktreePath, ['rev-parse', 'HEAD']) !== commit) {
+        throw new Error('PactFlow integration worktree identity changed')
       }
       return { branch, commit, worktreePath }
     }
@@ -321,8 +383,8 @@ export class PactFlowGitWorkspace {
       ...(binding.validationProfileRevisions === undefined ? {} : { validationProfileRevisions: { ...binding.validationProfileRevisions } }),
       ...(binding.legacyUntrusted === true ? { legacyUntrusted: true } : {}),
       ...binding.auth === undefined ? {} : { auth: binding.auth },
-    })
-    await this.verifyTaskSet(worktreePath, branches, result.commit)
+    }, authorizedCommands)
+    await this.verifyTaskSet(worktreePath, branches, result.commit, baseCommit)
     await this.withAuthentication(secret, async (environment) => {
       await this.git(worktreePath, [
         'push', '--porcelain', binding.remote, `HEAD:refs/heads/${branch}`,
@@ -356,17 +418,26 @@ export class PactFlowGitWorkspace {
     repository: string,
     branches: readonly { readonly branch: string; readonly expectedCommit?: string }[],
     integrationCommit: string,
+    baseCommit: string,
   ): Promise<void> {
     const expected = branches.map(task => task.expectedCommit).filter((commit): commit is string => commit !== undefined)
-    if (expected.length === 0) return
-    const lines = await this.git(repository, ['log', '--first-parent', '--format=%P', integrationCommit])
-    const merged = new Set<string>()
-    for (const line of lines.split('\n')) {
-      const parents = line.trim().split(/\s+/u).filter(Boolean)
-      if (parents.length >= 2) merged.add(parents[1]!)
+    if (expected.length === 0 || expected.length !== branches.length) {
+      throw new Error('PactFlow integration task-set requires an expected commit for every task')
     }
+    const lines = await this.git(repository, ['rev-list', '--first-parent', '--parents', `${baseCommit}..${integrationCommit}`])
     const expectedSet = new Set(expected)
-    if (merged.size !== expectedSet.size || [...expectedSet].some(commit => !merged.has(commit))) {
+    const merged = new Set<string>()
+    let cursor = integrationCommit
+    for (const line of lines.split('\n').filter(Boolean)) {
+      const [commit, firstParent, taskParent, ...extraParents] = line.trim().split(/\s+/u)
+      if (commit !== cursor || firstParent === undefined || taskParent === undefined || extraParents.length !== 0
+        || !expectedSet.has(taskParent) || merged.has(taskParent)) {
+        throw new Error('PactFlow integration task-set contains an unexpected commit')
+      }
+      merged.add(taskParent)
+      cursor = firstParent
+    }
+    if (cursor !== baseCommit || merged.size !== expectedSet.size || [...expectedSet].some(commit => !merged.has(commit))) {
       throw new Error('PactFlow integration branch task-set digest changed after verification')
     }
   }
@@ -398,11 +469,52 @@ export class PactFlowGitWorkspace {
 
   /** Remove only the clean local worktree and branch created for closing. */
   async cleanupClosing(workspace: string | undefined, closing: PactFlowClosingGit): Promise<void> {
+    await this.cleanupOwnedCheckout(workspace, closing, 'pactflow/closing/')
+  }
+
+  private async cleanupOwnedCheckout(
+    workspace: string | undefined,
+    closing: PactFlowClosingGit,
+    branchPrefix: string,
+    beforeRemove?: () => Promise<void>,
+  ): Promise<void> {
     const root = await this.requireWorkspaceRoot(workspace)
-    const dirty = await this.git(closing.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
-    if (dirty.length > 0) throw new Error('PactFlow closing worktree is not clean')
-    await this.git(root, ['worktree', 'remove', closing.worktreePath])
-    await this.git(root, ['branch', '-D', closing.branch])
+    const branch = this.gitName('closing branch', closing.branch)
+    const within = (parent: string, child: string): boolean => {
+      const path = relative(parent, child)
+      return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path)
+    }
+    if (!branch.startsWith(branchPrefix) || branch !== closing.branch
+      || !/^[0-9a-f]{40,64}$/.test(closing.commit)
+      || !isAbsolute(closing.worktreePath) || !within(resolve(this.worktreeRoot), resolve(closing.worktreePath))) {
+      throw new Error('PactFlow closing cleanup target is outside Host-owned resources')
+    }
+    const ref = `refs/heads/${branch}`
+    const refs = await this.git(root, ['for-each-ref', '--format=%(refname) %(objectname)', ref])
+    const tip = refs.split('\n').find(line => line.startsWith(`${ref} `))?.slice(ref.length + 1)
+    if (tip !== undefined && tip !== closing.commit) throw new Error('PactFlow closing cleanup branch commit changed')
+    const hasWorktree = await this.exists(closing.worktreePath)
+    if (hasWorktree) {
+      if (!within(await realpath(this.worktreeRoot), await realpath(closing.worktreePath))) {
+        throw new Error('PactFlow closing cleanup worktree resolves outside Host-owned resources')
+      }
+      const common = await this.git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+      const targetCommon = await this.git(closing.worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+      if (await realpath(common) !== await realpath(targetCommon)
+        || await this.git(closing.worktreePath, ['branch', '--show-current']) !== branch
+        || await this.git(closing.worktreePath, ['rev-parse', 'HEAD']) !== closing.commit) {
+        throw new Error('PactFlow closing cleanup worktree identity changed')
+      }
+      const dirty = await this.git(closing.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
+      if (dirty.length > 0) throw new Error('PactFlow closing worktree is not clean')
+    }
+    await beforeRemove?.()
+    if (hasWorktree) await this.git(root, ['worktree', 'remove', closing.worktreePath])
+    if (tip !== undefined) {
+      const worktrees = await this.git(root, ['worktree', 'list', '--porcelain'])
+      if (worktrees.split('\n').includes(`branch ${ref}`)) throw new Error('PactFlow closing branch is still checked out')
+      await this.git(root, ['update-ref', '-d', ref, closing.commit])
+    }
   }
 
   /** Remove one merged task branch from the remote and its clean local worktree. */
@@ -411,18 +523,29 @@ export class PactFlowGitWorkspace {
     binding: PactFlowGitBinding,
     spec: PactFlowGitRunSpec,
     secret?: PactFlowGitAuthSecret,
+    expectedCommit?: string,
   ): Promise<void> {
     const root = await this.requireWorkspaceRoot(workspace)
+    if (expectedCommit === undefined || !/^[0-9a-f]{40,64}$/.test(expectedCommit)) {
+      throw new Error('PactFlow task cleanup requires a verified expected commit')
+    }
+    if (binding.remote !== spec.remote || binding.remoteUrl !== spec.remoteUrl
+      || spec.branch === binding.defaultBranch || spec.branch === spec.defaultBranch
+      || this.credentialFreeRemote(await this.git(root, ['remote', 'get-url', binding.remote])) !== spec.remoteUrl) {
+      throw new Error('PactFlow task cleanup remote or branch identity changed')
+    }
     if ((binding.auth === undefined) !== (secret === undefined)) {
       throw new Error('PactFlow Git authentication does not match the project binding')
     }
-    const dirty = await this.git(spec.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
-    if (dirty.length > 0) throw new Error(`PactFlow task worktree ${spec.branch} is not clean`)
-    await this.withAuthentication(secret, async (environment) => {
-      await this.git(root, ['push', '--porcelain', binding.remote, `:refs/heads/${spec.branch}`], environment)
-    })
-    await this.git(root, ['worktree', 'remove', spec.worktreePath])
-    await this.git(root, ['branch', '-D', spec.branch])
+    await this.cleanupOwnedCheckout(workspace, { branch: spec.branch, worktreePath: spec.worktreePath, commit: expectedCommit },
+      'pactflow/', async () => this.withAuthentication(secret, async environment => {
+        const ref = `refs/heads/${spec.branch}`
+        const output = await this.git(root, ['ls-remote', '--heads', binding.remote, ref], environment)
+        const tip = output.split('\n').map(line => line.split(/\s+/)).find(([, name]) => name === ref)?.[0]
+        if (tip === undefined) return
+        if (tip !== expectedCommit) throw new Error('PactFlow task cleanup remote commit changed')
+        await this.git(root, ['push', '--porcelain', `--force-with-lease=${ref}:${expectedCommit}`, binding.remote, `:${ref}`], environment)
+      }))
   }
 
   private async requireWorkspaceRoot(workspace: string | undefined): Promise<string> {

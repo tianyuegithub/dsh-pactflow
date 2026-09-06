@@ -1,20 +1,27 @@
 import { execFileSync } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import PactFlowService from '../lib/index.js'
 import { PactFlowRunId } from '../src/types.ts'
 import type { PactFlowGitRunSpec, PactFlowK3sRunSpec, PactFlowRun } from '../src/types.ts'
 import { createGitFixture } from './git-fixture.ts'
 
+const recoveryIdentity = { jobUid: 'recovery-job-uid', runNonceHash: '1'.repeat(64), claimTokenHash: '2'.repeat(64), specDigest: '3'.repeat(64) }
+const recoveryLabels = { 'pactflow.run': 'recovery', 'pactflow.run-nonce-hash': recoveryIdentity.runNonceHash.slice(0, 63),
+  'pactflow.claim-token-hash': recoveryIdentity.claimTokenHash.slice(0, 63), 'pactflow.spec-digest': recoveryIdentity.specDigest.slice(0, 63) }
+const recoveryAnnotations = { 'pactflow.dev/run-nonce-hash': recoveryIdentity.runNonceHash,
+  'pactflow.dev/claim-token-hash': recoveryIdentity.claimTokenHash, 'pactflow.dev/spec-digest': recoveryIdentity.specDigest }
+
 describe('PactFlow K3s cold reconciliation', () => {
-  it('settles a pre-existing completed Job when the PactFlow Agent becomes live', async () => {
+  it.each(['empty', 'legacy', 'registered', 'missing-uid', 'missing-hash', 'missing-job', 'transient-recovery', 'transient-dispose', 'inventory-order'] as const)('reconciles a pre-existing Job with %s validation', async mode => {
+    const legacyCommands = mode === 'legacy'
     const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-k3s-recovery-'))
     const priorDshHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, '.dsh')
@@ -36,7 +43,8 @@ describe('PactFlow K3s cold reconciliation', () => {
 
       const finishedAt = Date.now()
       const jobName = 'dsh-pf-recovery'
-      server = createKubeServer(jobName, branch, commit, finishedAt)
+      let deletions = 0
+      server = createKubeServer(jobName, branch, commit, finishedAt, () => { deletions++ }, mode === 'missing-job', mode.startsWith('transient-') ? 5 : 0)
       await new Promise<void>((resolveListen, reject) => {
         server!.once('error', reject)
         server!.listen(0, '127.0.0.1', resolveListen)
@@ -77,11 +85,23 @@ describe('PactFlow K3s cold reconciliation', () => {
         id: 'node', needId: 'recovery', title: 'Node', dependencies: [],
       })
       const runId = PactFlowRunId('run-11111111-2222-3333-4444-555555555555')
+      const registeredCommand = { command: process.execPath,
+        args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(join(root, 'registered-execution'))}, 'verified')`], timeoutMs: 5_000 }
+      if (mode === 'registered') {
+        const registeredWorkspace = { id: 'recovery-workspace', path: workspace, title: 'Recovery', sessionIds: [session.id] }
+        ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+        await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 0,
+          profiles: [{ ...registeredCommand, id: 'recovery-check', displayName: 'Recovery check' }] })
+      }
       const gitSpec: PactFlowGitRunSpec = {
         remote: 'origin', remoteUrl: remote, defaultBranch: 'main', baseCommit, branch, worktreePath,
-        validationCommands: [],
+        validationCommands: legacyCommands ? [{ command: process.execPath,
+          args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(join(root, 'unauthorized-execution'))}, 'executed')`],
+          timeoutMs: 5_000 }] : mode === 'registered' ? [registeredCommand] : [],
+        ...(mode === 'registered' ? { validationProfileIds: ['recovery-check'], validationProfileRevisions: { 'recovery-check': 1 } } : {}),
       }
       const k3sSpec: PactFlowK3sRunSpec = {
+        ...recoveryIdentity, expectedBranch: branch, expectedBaseCommit: baseCommit,
         templateId: 'dsh', namespace: 'pactflow', jobName, configMapName: jobName,
         image: `registry.invalid/worker@sha256:${'a'.repeat(64)}`, imagePullSecret: 'pull',
         harness: 'dsh', apiMode: 'openai-chat-completions', model: 'model', baseUrl: 'https://model.invalid',
@@ -91,6 +111,8 @@ describe('PactFlow K3s cold reconciliation', () => {
         finishedJobTtlSeconds: 86_400,
       }
       const node = { ...ready, state: 'claimed' as const, revision: 2, updatedAt: finishedAt - 1_000 }
+      if (mode === 'missing-uid') Reflect.deleteProperty(k3sSpec, 'jobUid')
+      if (mode === 'missing-hash') Reflect.deleteProperty(k3sSpec, 'claimTokenHash')
       const run: PactFlowRun = {
         id: runId, nodeId: node.id, nodeRevision: node.revision, attempt: 1, provider: 'k3s:dsh',
         claimId: 'claim-recovery', state: 'claimed', leaseDurationMs: 600_000,
@@ -98,13 +120,87 @@ describe('PactFlow K3s cold reconciliation', () => {
       }
       session.append('pactflow/run-claimed', { v: 1, run, node })
 
+      const release = vi.fn()
+      const reserve = vi.fn(() => release)
+      if (mode.startsWith('transient-')) Reflect.set(ctx.pactflow, 'executionCapacity', { reserveExisting: reserve, pauseAdmission: () => () => {}, setInventoryFailure: () => {}, dispose: () => {} })
+      const trace: string[] = []
+      if (mode === 'inventory-order') {
+        const second = ctx.pactflow.createNode(session.id, { id: 'second', needId: 'recovery', title: 'Second', dependencies: [] })
+        session.append('pactflow/run-claimed', { v: 1,
+          node: { ...second, revision: 2, state: 'claimed' },
+          run: { ...run, id: PactFlowRunId('run-66666666-7777-8888-9999-000000000000'), nodeId: second.id,
+            git: { ...gitSpec, branch: `${branch}-second`, worktreePath: join(root, 'second-worktree') },
+            k3s: { ...k3sSpec, jobName: 'dsh-pf-second', jobUid: 'second-job-uid' } },
+        })
+        Reflect.set(ctx.pactflow, 'executionCapacity', {
+          pauseAdmission: () => { trace.push('pause'); return () => { trace.push('resume') } },
+          reserveExisting: () => { trace.push('reserve'); return () => { trace.push('release') } },
+          setInventoryFailure: () => {}, dispose: () => {},
+        })
+        Reflect.set(ctx.pactflow, 'workerForRun', () => ({
+          observe: async () => { trace.push('observe'); return { state: 'failed', finishedAt: Date.now(), outcome: 'isolated terminal result' } },
+          cleanupRun: async () => {},
+        }))
+      }
+
       await ctx.pactflow.reconcileK3s(session.id)
-      expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]?.state).toBe('succeeded')
-      expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]).toMatchObject({
-        gitResult: { commit, branch },
-        k3sResult: { commit, branch, finishedAt },
-        outcome: expect.stringContaining('Recovered K3s Worker'),
-      })
+      if (mode === 'inventory-order') {
+        expect(trace.filter(value => value === 'reserve')).toHaveLength(2)
+        expect(trace.indexOf('observe')).toBeGreaterThan(trace.lastIndexOf('reserve'))
+        expect(trace.indexOf('resume')).toBeGreaterThan(trace.lastIndexOf('reserve'))
+        expect(trace.filter(value => value === 'release')).toHaveLength(2)
+        await ctx.fiber.dispose()
+        return
+      }
+      if (mode === 'transient-dispose') {
+        expect(release).not.toHaveBeenCalled()
+        const deferred = Reflect.get(ctx.pactflow, 'deferredK3s')
+        const timer = deferred.values().next().value.timer
+        const clear = vi.spyOn(globalThis, 'clearTimeout')
+        await ctx.fiber.dispose()
+        expect(clear).toHaveBeenCalledWith(timer)
+        clear.mockRestore()
+        expect(deferred.size).toBe(0)
+        expect(release).toHaveBeenCalledTimes(1)
+        expect(deletions).toBe(0)
+        expect(session.events.some(event => event.type === 'pactflow/run-settled')).toBe(false)
+        return
+      }
+      if (mode === 'transient-recovery') {
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]?.state).toBe('claimed')
+        expect(release).not.toHaveBeenCalled()
+        await vi.waitFor(() => expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]?.state).toBe('succeeded'), { timeout: 10_000 })
+        expect(reserve).toHaveBeenCalledTimes(1)
+        expect(release).toHaveBeenCalledTimes(1)
+      }
+      if (mode === 'missing-job') {
+        expect(deletions).toBe(1)
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]).toMatchObject({ state: 'failed' })
+        expect(Object.values(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')!.cleanups))
+          .toEqual([expect.objectContaining({ runId, state: 'succeeded' })])
+      } else if (mode === 'missing-uid' || mode === 'missing-hash') {
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]).toMatchObject({ state: 'failed', outcome: expect.stringContaining('identity') })
+        expect(deletions).toBe(0)
+        expect(Object.values(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')!.cleanups))
+          .toEqual([expect.objectContaining({ runId, state: 'failed', error: expect.stringContaining('identity') })])
+      } else if (legacyCommands) {
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]).toMatchObject({
+          state: 'failed', outcome: expect.stringMatching(/validation.*authorization/),
+        })
+        await expect(access(join(root, 'unauthorized-execution'))).rejects.toThrow()
+      } else {
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]?.state).toBe('succeeded')
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]).toMatchObject({
+          gitResult: { commit, branch },
+          k3sResult: { commit, branch, finishedAt },
+          outcome: expect.stringContaining('Recovered K3s Worker'),
+        })
+        if (mode === 'registered') {
+          await expect(access(join(root, 'registered-execution'))).resolves.toBeUndefined()
+          expect(ctx.sessionProjections.stateOf(session, 'pactflowRuns')?.byId[runId]?.gitResult?.validations)
+            .toEqual([expect.objectContaining({ ...registeredCommand, exitCode: 0 })])
+        }
+      }
       await ctx.fiber.dispose()
     } finally {
       await new Promise<void>(resolveClose => server?.close(() => resolveClose()) ?? resolveClose())
@@ -120,12 +216,28 @@ function createKubeServer(
   branch: string,
   commit: string,
   finishedAt: number,
+  onDelete: () => void,
+  missingJob = false,
+  failedReads = 0,
 ): Server {
   return createServer((request, response) => {
+    if (request.method === 'DELETE') onDelete()
     response.setHeader('content-type', 'application/json')
+    if (request.method === 'GET' && request.url?.includes(`/jobs/${jobName}`) && failedReads > 0) {
+      failedReads--
+      response.statusCode = 503
+      response.end(JSON.stringify({ kind: 'Status', apiVersion: 'v1', code: 503, status: 'Failure' }))
+      return
+    }
+    if (missingJob) {
+      response.statusCode = 404
+      response.end(JSON.stringify({ kind: 'Status', apiVersion: 'v1', code: 404, status: 'Failure' }))
+      return
+    }
     if (request.url?.includes(`/jobs/${jobName}`) === true) {
       response.end(JSON.stringify({
-        apiVersion: 'batch/v1', kind: 'Job', metadata: { name: jobName }, status: { succeeded: 1 },
+        apiVersion: 'batch/v1', kind: 'Job', metadata: { name: jobName, uid: recoveryIdentity.jobUid,
+          labels: recoveryLabels, annotations: recoveryAnnotations }, status: { succeeded: 1 },
       }))
       return
     }
@@ -133,14 +245,17 @@ function createKubeServer(
       response.end(JSON.stringify({
         apiVersion: 'v1', kind: 'PodList', metadata: {}, items: [{
           apiVersion: 'v1', kind: 'Pod',
-          metadata: { name: `${jobName}-pod`, creationTimestamp: new Date(finishedAt).toISOString() },
+          metadata: { name: `${jobName}-pod`, uid: 'recovery-pod-uid', creationTimestamp: new Date(finishedAt).toISOString(),
+            labels: recoveryLabels, annotations: recoveryAnnotations,
+            ownerReferences: [{ apiVersion: 'batch/v1', kind: 'Job', name: jobName, uid: recoveryIdentity.jobUid, controller: true }] },
           status: { containerStatuses: [{
-            name: 'worker', ready: false, restartCount: 0, image: 'worker', imageID: 'worker',
+            name: 'worker', ready: false, restartCount: 0, image: `registry.invalid/worker@sha256:${'a'.repeat(64)}`,
+            imageID: `docker-pullable://registry.invalid/worker@sha256:${'a'.repeat(64)}`,
             state: { terminated: {
               exitCode: 0, reason: 'Completed', startedAt: new Date(finishedAt - 1_000).toISOString(),
               finishedAt: new Date(finishedAt).toISOString(),
               message: JSON.stringify({
-                schema: 'dsh_pactflow_k3s_result/v1', status: 'succeeded', commit, branch,
+                schema: 'dsh_pactflow_k3s_result/v1', status: 'succeeded', commit, branch, ...recoveryIdentity,
                 harnessVersion: 'test', agentExitCode: 0, pushExitCode: 0,
               }),
             } },
