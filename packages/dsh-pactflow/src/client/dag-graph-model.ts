@@ -43,37 +43,6 @@ export interface PactFlowDagLayout {
   readonly layers: readonly PactFlowDagLayer[]
 }
 
-const NODE_COPY: Readonly<Record<string, PactFlowDagNodeCopy>> = {
-  'rerun-verify-linkage': {
-    label: '重跑结果联动',
-    summary: '回调结果自动进入闭环',
-  },
-  'auto-create-inflight-dedup': {
-    label: '在途问题聚合',
-    summary: '重复失败更新原问题单',
-  },
-  'transition-ownership-guard': {
-    label: '流转归属校验',
-    summary: '只允许相关责任人操作',
-  },
-  'resume-sla-extension': {
-    label: '挂起时长补偿',
-    summary: '恢复时顺延处理期限',
-  },
-  'merge-carryover-decision': {
-    label: '合并数据搬运',
-    summary: '累计数据并保留双向记录',
-  },
-  'cross-node-review-fixes': {
-    label: '跨节点评审修复',
-    summary: '统一关联、权限与时效语义',
-  },
-  'closing-integration-ancestry': {
-    label: '合并前祖先收口',
-    summary: '确保分支无冲突完成合并',
-  },
-}
-
 const STATE_COPY: Readonly<Record<PactFlowNodeState, PactFlowDagStateCopy>> = {
   pending: { label: '等待前置完成', tone: 'neutral' },
   ready: { label: '等待派发', tone: 'active' },
@@ -87,17 +56,10 @@ const STATE_COPY: Readonly<Record<PactFlowNodeState, PactFlowDagStateCopy>> = {
   archived: { label: '已归档', tone: 'neutral' },
 }
 
-const CHINESE_PHRASE = /[\u3400-\u9fff][\u3400-\u9fff、，；与和及的了在为将把由并到：:\s]{1,}/g
-
 export function pactFlowDagNodeCopy(node: PactFlowNode): PactFlowDagNodeCopy {
-  const known = NODE_COPY[String(node.id)]
-  if (known !== undefined) return known
-
-  const title = node.title.replace(/^N\d+\s*/u, '').trim()
-  const phrases = title.match(CHINESE_PHRASE)?.map(value => value.trim()).filter(Boolean) ?? []
-  const label = compactPhrase(phrases[0] ?? '任务节点', 12)
-  const summary = compactPhrase(phrases[1] ?? phrases[0] ?? '查看该阶段的执行详情', 20)
-  return { label, summary: summary === label ? '查看该阶段的执行详情' : summary }
+  const title = node.title.replace(/\s+/gu, ' ').trim() || '未命名任务'
+  const label = compactPhrase(title, 12)
+  return { label, summary: label === title ? '查看该任务的执行详情' : compactPhrase(title, 20) }
 }
 
 export function pactFlowDagStateCopy(state: PactFlowNodeState): PactFlowDagStateCopy {
@@ -336,8 +298,7 @@ function hasAlternatePath(
 
 function compactPhrase(value: string, maximumLength: number): string {
   const normalized = value
-    .replace(/[\s，,；;：:]+$/u, '')
-    .replace(/\s+/gu, '')
+    .replace(/\s+/gu, ' ')
     .trim()
   if (normalized.length <= maximumLength) return normalized
   return `${normalized.slice(0, maximumLength - 1)}…`

@@ -17,6 +17,8 @@ import type {
   PactFlowWorkspaceProjectView,
 } from '../types.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
+import { ValidationProfileEditor } from './validation-profile-editor.tsx'
+import type { PactFlowValidationProfileInput } from '../types.ts'
 
 export interface PactFlowProjectPanelFace {
   list(): Promise<readonly PactFlowWorkspaceProjectView[]>
@@ -31,6 +33,7 @@ export interface PactFlowProjectPanelFace {
   adoptGit(workspaceId: string, expectedRevision: number): Promise<PactFlowWorkspaceProjectConfig>
   gitSecrets(clusterId: string): Promise<readonly string[]>
   saveWorker(workspaceId: string, expectedRevision: number, k3sGitSecretName: string, worker: PactFlowProjectWorkerPolicy): Promise<PactFlowWorkspaceProjectConfig>
+  saveValidation(workspaceId: string, expectedRevision: number, profiles: readonly PactFlowValidationProfileInput[] | undefined, selectedIds: readonly string[]): Promise<PactFlowWorkspaceProjectConfig>
   createRemote(request: {
     readonly workspaceId: string
     readonly expectedRevision: number
@@ -69,7 +72,7 @@ function friendlyProtocol(value: string): string {
   } as Readonly<Record<string, string>>)[value] ?? value
 }
 
-export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, createRemote, migrate }: ProjectPanelProps) {
+export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, createRemote, migrate }: ProjectPanelProps) {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<readonly PactFlowWorkspaceProjectView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -206,7 +209,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
     {!open ? null : <div role="presentation" style={backdropStyle}>
       <section role="dialog" aria-modal="true" aria-label="零脉项目" style={panelStyle}>
         <header style={headerStyle}>
-          <div><h2 style={titleStyle}>零脉项目</h2><p style={mutedStyle}>工作区级 Git 与 Worker 策略</p></div>
+          <div><h2 style={titleStyle}>零脉项目</h2><p style={mutedStyle}>工作区级 Git、验证配置与执行策略</p></div>
           <button type="button" onClick={() => setOpen(false)} style={secondaryButtonStyle}>关闭</button>
         </header>
         <div style={bodyStyle}>
@@ -249,6 +252,10 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                   </div>}
               </section>
 
+              <ValidationProfileEditor key={`${selected.workspaceId}:${selected.config?.revision ?? 0}`}
+                config={selected.config} disabled={busy}
+                onSave={(profiles, ids) => act(() => saveValidation(selected.workspaceId, selected.config?.revision ?? 0, profiles, ids),
+                  { id: 'validation-profiles', success: '验证配置保存成功' })} />
               <section style={cardStyle}>
                 <div style={cardHeaderStyle}>
                   <div><h3 style={cardTitleStyle}>Agent 组合</h3><p style={mutedStyle}>Agent Profile = Harness × Model × Worker 数量</p></div>

@@ -8,11 +8,23 @@
   },
   "files": [
     "src/client/index.tsx",
+    "src/client/locale.ts",
+    "src/client/overlay.tsx",
+    "src/client/resource-model.ts",
+    "src/client/styles.ts",
+    "src/client/settings-contract.ts",
+    "src/client/settings-model.ts",
+    "src/client/settings-probe.ts",
+    "src/client/resource-cards.tsx",
+    "src/client/infrastructure-status.tsx",
+    "src/client/settings.tsx",
     "src/client/action-feedback.tsx",
     "src/client/credential-probe.ts",
     "src/client/dag-graph-model.ts",
     "src/client/dag-graph.tsx",
     "src/client/project-panel.tsx",
+    "src/client/validation-profile-editor.tsx",
+    "src/schema.ts",
     "src/harness-discovery.ts",
     "src/types.ts"
   ]

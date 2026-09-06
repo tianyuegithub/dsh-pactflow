@@ -9,6 +9,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it } from 'vitest'
 import PactFlowService from '../lib/index.js'
+import { recordAuthorizedReview } from '../tests/review-fixture.ts'
 
 const realDescribe = process.env.DSH_GITEA_E2E === '1' ? describe : describe.skip
 const apiBase = 'http://192.168.31.7:30000'
@@ -31,7 +32,7 @@ realDescribe('PactFlow real Gitea closing', () => {
     const proofName = `pactflow-gitea-${suffix}.txt`
     let ctx: Context | undefined
     try {
-      await ensureMainProtection(token)
+      await requireMainProtection(token)
       git(['clone', remoteUrl, workspace])
       git(['-C', workspace, 'config', 'user.name', 'PactFlow Gitea E2E'])
       git(['-C', workspace, 'config', 'user.email', 'pactflow-gitea-e2e@example.invalid'])
@@ -46,6 +47,11 @@ realDescribe('PactFlow real Gitea closing', () => {
       } as never)
       const session = ctx.sessions.create(sessionId, { meta: { agentPreset: 'pactflow', cwd: workspace } })
       const initialized = ctx.pactflow.initialize(session.id, { name: `Gitea closing ${suffix}` })
+      const registeredWorkspace = { id: `gitea-workspace-${suffix}`, path: workspace, title: 'Gitea acceptance', sessionIds: [session.id] }
+      ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+      await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 0,
+        profiles: [{ id: 'git-diff-check', displayName: 'Git diff check', command: '/usr/bin/git',
+          args: ['diff', '--check'], timeoutMs: 30_000 }] })
       await ctx.pactflow.bindGit(session.id, {
         expectedRevision: initialized.revision,
         remote: 'origin',
@@ -54,7 +60,7 @@ realDescribe('PactFlow real Gitea closing', () => {
         giteaOwner: owner,
         giteaRepo: repository,
         giteaTokenCredentialRef: 'PACTFLOW_GITEA_API_TOKEN',
-        validationCommands: [{ command: '/usr/bin/git', args: ['diff', '--check'], timeoutMs: 30_000 }],
+        validationProfileIds: ['git-diff-check'],
       })
       await expect(ctx.pactflow.verifyGitea(session.id)).resolves.toMatchObject({
         fullName: `${owner}/${repository}`,
@@ -109,8 +115,9 @@ realDescribe('PactFlow real Gitea closing', () => {
       let current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: need.revision, to: 'discussion',
       })
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'requirement', decision: 'approved', note: 'real acceptance',
+      // Approval and Worker are isolated fixtures; this suite proves real Git/Gitea, not human UI approval.
+      recordAuthorizedReview(ctx.pactflow, session, current, {
+        kind: 'requirement', decision: 'approved', note: 'Gitea 集成测试授权夹具',
       })
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'confirmed',
@@ -118,22 +125,22 @@ realDescribe('PactFlow real Gitea closing', () => {
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'design',
       })
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'design', decision: 'approved', note: 'real acceptance',
+      recordAuthorizedReview(ctx.pactflow, session, current, {
+        kind: 'design', decision: 'approved', note: 'Gitea 集成测试授权夹具',
       })
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'planning',
       })
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'plan', decision: 'approved', note: 'real acceptance',
+      recordAuthorizedReview(ctx.pactflow, session, current, {
+        kind: 'plan', decision: 'approved', note: 'Gitea 集成测试授权夹具',
       })
       for (const phase of ['executing', 'code_review', 'verification'] as const) {
         current = ctx.pactflow.transitionNeed(session.id, {
           needId: need.id, expectedRevision: current.revision, to: phase,
         })
       }
-      ctx.pactflow.recordReview(session.id, {
-        needId: need.id, kind: 'verification', decision: 'approved', note: 'real acceptance',
+      recordAuthorizedReview(ctx.pactflow, session, current, {
+        kind: 'verification', decision: 'approved', note: 'Gitea 集成测试授权夹具',
       })
       current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: current.revision, to: 'closing',
@@ -168,34 +175,15 @@ realDescribe('PactFlow real Gitea closing', () => {
   }, 120_000)
 })
 
-async function ensureMainProtection(token: string): Promise<void> {
+async function requireMainProtection(token: string): Promise<void> {
   const existing = await fetch(`${apiBase}/api/v1/repos/${owner}/${repository}/branch_protections/main`, {
     headers: { accept: 'application/json', authorization: `token ${token}` },
-  })
-  if (existing.ok) return
-  if (existing.status !== 404) throw new Error(`Gitea protection read failed with HTTP ${String(existing.status)}`)
-  const created = await fetch(`${apiBase}/api/v1/repos/${owner}/${repository}/branch_protections`, {
-    method: 'POST',
-    headers: {
-      accept: 'application/json',
-      authorization: `token ${token}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      rule_name: 'main',
-      enable_push: false,
-      enable_push_whitelist: false,
-      enable_merge_whitelist: false,
-      required_approvals: 0,
-      enable_status_check: false,
-      status_check_contexts: [],
-      require_signed_commits: false,
-      block_on_rejected_reviews: true,
-      block_on_outdated_branch: true,
-    }),
     signal: AbortSignal.timeout(10_000),
   })
-  if (created.status !== 201) throw new Error(`Gitea protection creation failed with HTTP ${String(created.status)}`)
+  await existing.body?.cancel()
+  if (existing.ok) return
+  if (existing.status !== 404) throw new Error(`Gitea protection read failed with HTTP ${String(existing.status)}`)
+  throw new Error('Gitea acceptance requires a preconfigured main protection rule; this test does not change repository permissions')
 }
 
 async function gitea<T>(token: string, suffix: string): Promise<T> {
