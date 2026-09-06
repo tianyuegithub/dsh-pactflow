@@ -6,7 +6,8 @@ import yaml from 'js-yaml'
 
 const credentialFile = resolve(process.env.DSH_CREDENTIAL_FILE ?? resolve(homedir(), '.dsh/.credentials.yaml'))
 const document = yaml.load(readFileSync(credentialFile, 'utf8'))
-const token = document?.refs?.PACTFLOW_GITEA_API_TOKEN
+// The ref may live under `refs:` (namespaced layout) or at the document top level.
+const token = document?.refs?.PACTFLOW_GITEA_API_TOKEN ?? document?.PACTFLOW_GITEA_API_TOKEN
 if (typeof token !== 'string' || token.length === 0) {
   throw new Error('real Gitea E2E requires the PACTFLOW_GITEA_API_TOKEN credential ref')
 }

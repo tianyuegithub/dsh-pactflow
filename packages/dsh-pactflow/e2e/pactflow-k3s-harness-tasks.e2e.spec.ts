@@ -77,10 +77,16 @@ describe.skipIf(!enabled)('PactFlow K3s full Harness task matrix', { timeout: 90
     })
     try {
       const initialized = ctx.pactflow.initialize(session.id, { name: `Matrix ${template.id}` })
+      // Validation now runs only through user-registered profiles; raw commands are refused at bind time.
+      const registeredWorkspace = { id: `k3s-matrix-${template.id}`, path: workspace, title: `K3s matrix ${template.id}`, sessionIds: [session.id] }
+      ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+      await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 0,
+        profiles: [{ id: 'diff-check', displayName: 'Diff check', command: 'git',
+          args: ['diff', '--check', 'HEAD~1..HEAD'], timeoutMs: 10_000 }] })
       await ctx.pactflow.bindGit(session.id, {
         expectedRevision: initialized.revision, remote: 'origin', defaultBranch: 'main',
         k3sGitSecretName: 'pactflow-git-zeromai-demo-v2',
-        validationCommands: [{ command: 'git', args: ['diff', '--check', 'HEAD~1..HEAD'], timeoutMs: 10_000 }],
+        validationProfileIds: ['diff-check'],
       })
       ctx.pactflow.createNeed(session.id, { id: 'matrix', title: 'Matrix', description: template.id })
       const node = ctx.pactflow.createNode(session.id, {

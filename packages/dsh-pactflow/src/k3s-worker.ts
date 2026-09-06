@@ -1661,6 +1661,8 @@ except urllib.error.HTTPError as error:
 text = ''
 if mode == 'anthropic-messages':
     text = ''.join(block.get('text', '') for block in document.get('content', []) if isinstance(block, dict))
+    if not text:
+        text = ''.join(block.get('thinking', '') for block in document.get('content', []) if isinstance(block, dict))
 elif mode == 'openai-responses':
     text = document.get('output_text', '')
     if not text:
@@ -1668,7 +1670,8 @@ elif mode == 'openai-responses':
             for block in item.get('content', []) if isinstance(item, dict) else []:
                 if isinstance(block, dict): text += block.get('text', '')
 else:
-    text = ((document.get('choices') or [{}])[0].get('message') or {}).get('content', '')
+    message = (document.get('choices') or [{}])[0].get('message') or {}
+    text = message.get('content') or message.get('reasoning_content') or message.get('reasoning') or ''
 if not isinstance(document, dict):
     print(json.dumps({'status': 502, 'error': 'response was not a JSON object'}, ensure_ascii=False))
     raise SystemExit(1)

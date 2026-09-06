@@ -96,14 +96,18 @@ describe.skipIf(!enabled)('PactFlow real K3s Worker', { timeout: 900_000 }, () =
       meta: { agentPreset: 'pactflow', cwd: workspace },
     })
     const initialized = ctx.pactflow.initialize(session.id, { name: 'Real K3s Worker' })
+    // Validation now runs only through user-registered profiles; raw commands are refused at bind time.
+    const registeredWorkspace = { id: 'k3s-workspace', path: workspace, title: 'Real K3s acceptance', sessionIds: [session.id] }
+    ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+    await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 0,
+      profiles: [{ id: 'k3s-proof', displayName: 'K3s proof check', command: '/bin/test',
+        args: ['-f', 'dsh-k3s-e2e-proof.txt'], timeoutMs: 10_000 }] })
     await ctx.pactflow.bindGit(session.id, {
       expectedRevision: initialized.revision,
       remote: 'origin',
       defaultBranch: 'main',
       k3sGitSecretName: 'pactflow-git-zeromai-demo-v2',
-      validationCommands: [{
-        command: '/bin/test', args: ['-f', 'dsh-k3s-e2e-proof.txt'], timeoutMs: 10_000,
-      }],
+      validationProfileIds: ['k3s-proof'],
     })
     ctx.pactflow.createNeed(session.id, {
       id: 'real-k3s', title: 'Real K3s', description: 'Real DSH remote Worker acceptance',

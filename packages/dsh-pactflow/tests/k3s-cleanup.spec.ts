@@ -97,6 +97,10 @@ describe('PactFlow K3s cleanup', () => {
     expect(API_PROBE_SCRIPT).toMatch(/os\.environ\['(ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY)'\]/)
     expect(API_PROBE_SCRIPT).not.toMatch(/print\s*\(\s*(str\()?headers/)
     expect(API_PROBE_SCRIPT).not.toMatch(/print\s*\(\s*request\)/)
+    // Reasoning models put semantics in reasoning/thinking fields; the probe
+    // must not report a false negative when text is empty but thinking exists.
+    expect(API_PROBE_SCRIPT).toMatch(/reasoning_content/)
+    expect(API_PROBE_SCRIPT).toMatch(/block\.get\('thinking', ''\)/)
     const apiResult = await (async () => {
       Reflect.set(instance, 'batch', {
         createNamespacedJob: vi.fn(async () => ({ metadata: { uid: 'probe-job-uid' } })),
