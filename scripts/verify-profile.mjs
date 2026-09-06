@@ -3,10 +3,13 @@ import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolveProfileRuntime } from './profile-runtime.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const dshSource = resolve(process.env.DSH_SOURCE ?? resolve(root, '../deepseek-harness-pactflow-p0'))
-const dshEntry = resolve(dshSource, 'apps/cli/src/bin.ts')
+const runtime = resolveProfileRuntime({ development: process.argv.includes('--development'),
+  source: process.env.DSH_SOURCE, cliEntry: process.env.DSH_CLI_ENTRY })
+const dshSource = runtime.cwd
+const dshEntry = runtime.entry
 const packageVersion = JSON.parse(readFileSync(resolve(root, 'packages/dsh-pactflow/package.json'), 'utf8')).version
 const tarball = resolve(root, `dist/dsh-pactflow-${packageVersion}.tgz`)
 const testHome = mkdtempSync(join(tmpdir(), 'dsh-pactflow-profile-'))
@@ -14,7 +17,10 @@ const environment = { ...process.env, DSH_HOME: testHome }
 
 try {
   accessSync(dshEntry, constants.R_OK)
-  if (process.env.DSH_SKIP_BUILD !== '1') run('pnpm', ['run', 'build:lib'], dshSource)
+  if (runtime.kind === 'development' && process.env.DSH_SKIP_BUILD !== '1') run('pnpm', ['run', 'build:lib'], dshSource)
+  const runtimeVersion = runDsh(['--version']).trim()
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(runtimeVersion)) throw new Error('DSH CLI returned an invalid version')
+  console.log(`verify-profile runtime: ${runtime.kind} ${runtimeVersion}${runtime.kind === 'development' ? ' (not release evidence)' : ''}`)
   run('pnpm', ['run', 'pack'], root)
   runDsh(['plugin', '--profile', 'web', 'add', tarball])
 
@@ -40,7 +46,7 @@ try {
   rejectText(removed, 'dsh-pactflow')
   rejectText(removed, 'pactflowPresetRoot')
   await bootWeb(false)
-  console.log('verify-profile: install, boot, remove, and clean boot passed')
+  console.log(`verify-profile (${runtime.kind}): install, boot, remove, and clean boot passed`)
 } finally {
   rmSync(testHome, { recursive: true, force: true })
 }
@@ -55,7 +61,7 @@ function run(command, args, cwd) {
 }
 
 function runDsh(args) {
-  return run(process.execPath, ['--import', 'tsx/esm', dshEntry, ...args], dshSource)
+  return run(process.execPath, [...runtime.args, ...args], dshSource)
 }
 
 function requireText(value, expected) {
@@ -68,7 +74,7 @@ function rejectText(value, rejected) {
 
 async function bootWeb(expectPactFlow) {
   const child = spawn(process.execPath, [
-    '--import', 'tsx/esm', dshEntry, '--profile', 'web', '--no-open', '--port', '0',
+    ...runtime.args, '--profile', 'web', '--no-open', '--port', '0',
   ], {
     cwd: dshSource,
     env: environment,
@@ -102,8 +108,11 @@ async function bootWeb(expectPactFlow) {
     const launchUrl = await ready
     await verifyPactFlowRemote(launchUrl, expectPactFlow)
   } finally {
-    child.kill('SIGINT')
-    await new Promise(resolveExit => child.once('exit', resolveExit))
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(resolveExit => child.once('exit', resolveExit))
+      child.kill('SIGINT')
+      await exited
+    }
   }
 }
 
