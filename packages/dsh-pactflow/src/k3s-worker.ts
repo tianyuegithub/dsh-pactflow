@@ -6,11 +6,14 @@ import {
   BatchV1Api,
   CoreV1Api,
   KubeConfig,
+  Observable,
+  type ConfigurationOptions,
   type V1ConfigMap,
   type V1EnvVar,
   type V1Job,
   type V1Pod,
   type V1Secret,
+  type V1ObjectMeta,
 } from '@kubernetes/client-node'
 import type {
   PactFlowApiMode,
@@ -30,10 +33,63 @@ import type {
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const IMAGE_DIGEST = /^.+@sha256:[0-9a-f]{64}$/
 const COMMIT = /^[0-9a-f]{40,64}$/
+/** Cluster-side backstop that GCs probe Jobs (and bound Secrets) after a host crash. */
+const PROBE_FINISHED_JOB_TTL_SECONDS = 3_600
+/** Independent deadline for one Kubernetes create, replace, or delete call. */
+const PACTFLOW_K3S_REQUEST_TIMEOUT_MS = 30_000
+
+/** A create/replace/delete call neither completed nor failed within its independent deadline. */
+export class PactFlowK3sRequestTimeoutError extends Error {
+  readonly timeoutMs: number
+  constructor(timeoutMs: number) {
+    super(`PactFlow K3s request did not complete within ${timeoutMs}ms`)
+    this.name = 'PactFlowK3sRequestTimeoutError'
+    this.timeoutMs = timeoutMs
+  }
+}
+
+/** Persisted resources may never be deleted using only a reusable name. */
+function resourceIdentityError(spec: PactFlowK3sRunSpec): string | undefined {
+  if (typeof spec.jobUid !== 'string' || spec.jobUid.trim() === ''
+    || [spec.runNonceHash, spec.claimTokenHash, spec.specDigest].some(value =>
+      typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value))) {
+    return `PactFlow K3s Run "${spec.jobName}" has incomplete persisted resource identity`
+  }
+  return undefined
+}
+
+/** Result admission is stricter than compensation for a not-yet-bound Job. */
+export function pactFlowK3sResultIdentityError(spec: PactFlowK3sRunSpec): string | undefined {
+  const resourceError = resourceIdentityError(spec)
+  if (resourceError !== undefined) return resourceError
+  if (typeof spec.expectedBranch !== 'string' || spec.expectedBranch.trim() === ''
+    || typeof spec.expectedBaseCommit !== 'string' || !COMMIT.test(spec.expectedBaseCommit)
+    || !IMAGE_DIGEST.test(spec.image)) {
+    return `PactFlow K3s Run "${spec.jobName}" has incomplete result identity`
+  }
+  return undefined
+}
 
 export interface PactFlowK3sRuntimeSecrets {
   readonly runNonce: string
   readonly claimToken: string
+}
+
+/** Durable cleanup responsibility milestones emitted around probe resource creation. */
+export type PactFlowProbeCleanupEvent =
+  | { readonly phase: 'intent'; readonly jobName: string; readonly secretName?: string }
+  | { readonly phase: 'confirmed'; readonly jobName: string; readonly jobUid: string;
+      readonly secretName?: string; readonly secretUid?: string }
+  | { readonly phase: 'cleaned'; readonly jobName: string }
+
+export type PactFlowProbeCleanupRecorder = (event: PactFlowProbeCleanupEvent) => Promise<void>
+
+/** Recorded identity of one probe's external resources; incomplete records fail closed. */
+export interface PactFlowProbeCleanupIdentity {
+  readonly jobName: string
+  readonly jobUid?: string
+  readonly secretName?: string
+  readonly secretUid?: string
 }
 
 export function pactFlowSecretHash(value: string): string {
@@ -103,6 +159,7 @@ export class PactFlowK3sWorker {
   private readonly core: CoreV1Api
   private readonly templates = new Map<string, PactFlowHarnessTemplateConfig>()
   private readonly pendingRuntimeSecrets = new Map<string, PactFlowK3sRuntimeSecrets>()
+  private requestTimeoutMs = PACTFLOW_K3S_REQUEST_TIMEOUT_MS
 
   constructor(private readonly config: PactFlowK3sConfig) {
     this.requireDnsName('namespace', config.namespace)
@@ -129,6 +186,53 @@ export class PactFlowK3sWorker {
   /** Detached non-secret templates safe for Remote and UI consumers. */
   listTemplates(): readonly PactFlowHarnessTemplateConfig[] {
     return [...this.templates.values()]
+  }
+
+  /** Stable non-secret connection identity for durable probe cleanup records. */
+  connectionFingerprint(): string {
+    return createHash('sha256').update(JSON.stringify({
+      namespace: this.config.namespace,
+      kubeconfig: this.config.kubeconfig ?? '(default)',
+      context: this.config.context ?? '(default)',
+    })).digest('hex')
+  }
+
+  /**
+   * Fail one API call closed after an independent deadline. The abort signal
+   * truly closes the request, so the host never keeps a dangling connection
+   * behind the race; the caller decides how the uncertain outcome is tracked.
+   */
+  private async withRequestDeadline<T>(
+    operation: (options: ConfigurationOptions) => Promise<T>,
+  ): Promise<T> {
+    const stop = AbortSignal.timeout(this.requestTimeoutMs)
+    const options: ConfigurationOptions = {
+      middlewareMergeStrategy: 'append',
+      middleware: [{
+        pre(request) {
+          const existing = request.getSignal()
+          request.setSignal(existing === undefined ? stop : AbortSignal.any([existing, stop]))
+          return new Observable(Promise.resolve(request))
+        },
+        post(response) { return new Observable(Promise.resolve(response)) },
+      }],
+    }
+    const call = Promise.resolve().then(() => operation(options))
+    void call.catch(() => { /* a late rejection after the deadline belongs to the timeout report */ })
+    let clearTimer!: () => void
+    const expiration = new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new PactFlowK3sRequestTimeoutError(this.requestTimeoutMs)), this.requestTimeoutMs)
+      clearTimer = () => clearTimeout(timer)
+    })
+    try {
+      return await Promise.race([call, expiration])
+    } finally {
+      clearTimer()
+    }
+  }
+
+  private isTimeout(error: unknown): error is PactFlowK3sRequestTimeoutError {
+    return error instanceof PactFlowK3sRequestTimeoutError
   }
 
   /** Verify namespace access without reading any Secret payload. */
@@ -246,7 +350,7 @@ export class PactFlowK3sWorker {
       if (modelApiKey === undefined || modelApiKey === '') throw new Error('PactFlow model API key is not configured')
       try {
         const modelSecret = this.modelSecret(spec.modelSecretName, spec.namespace, spec.apiMode, modelApiKey)
-        createdModelSecret = await this.core.createNamespacedSecret({
+        createdModelSecret = await this.withRequestDeadline(options => this.core.createNamespacedSecret({
           namespace: spec.namespace,
           body: {
             ...modelSecret,
@@ -256,42 +360,60 @@ export class PactFlowK3sWorker {
               annotations: this.annotations(spec),
             },
           },
-        })
-      } catch {
-        throw new Error(`PactFlow failed to create model Secret "${spec.modelSecretName}"`)
+        }, options))
+      } catch (error) {
+        if (this.isTimeout(error)) {
+          // The request may still have created this per-run Secret; compensate
+          // by its unique name instead of leaving it unowned.
+          await this.deleteModelSecret(spec).catch(() => {})
+        }
+        const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
+        throw new Error(`PactFlow failed to create model Secret "${spec.modelSecretName}"${note}`)
       }
     }
     try {
-      createdInputSecret = await this.core.createNamespacedSecret({
+      createdInputSecret = await this.withRequestDeadline(options => this.core.createNamespacedSecret({
         namespace: spec.namespace,
         body: this.inputSecret(spec, git, prompt, secrets),
-      })
-    } catch {
-      if (createdModelSecret !== undefined) await this.deleteModelSecret(spec)
-      throw new Error(`PactFlow failed to create K3s input Secret "${spec.inputSecretName ?? spec.jobName}"`)
+      }, options))
+    } catch (error) {
+      const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
+      const compensationFailed = await this.compensateCreatedChildren(spec, createdModelSecret)
+      throw new Error(`PactFlow failed to create K3s input Secret "${spec.inputSecretName ?? spec.jobName}"${note}${compensationFailed ? '; compensation of created resources also failed' : ''}`)
     }
     const configMap = this.configMap(spec)
     let createdConfigMap: V1ConfigMap
     try {
-      createdConfigMap = await this.core.createNamespacedConfigMap({ namespace: spec.namespace, body: configMap })
-    } catch {
-      if (createdModelSecret !== undefined) await this.deleteModelSecret(spec)
-      await this.deleteInputSecret(spec)
-      throw new Error(`PactFlow failed to create K3s ConfigMap "${spec.configMapName}"`)
+      createdConfigMap = await this.withRequestDeadline(options => this.core.createNamespacedConfigMap({
+        namespace: spec.namespace, body: configMap,
+      }, options))
+    } catch (error) {
+      const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
+      const compensationFailed = await this.compensateCreatedChildren(spec, createdModelSecret)
+      throw new Error(`PactFlow failed to create K3s ConfigMap "${spec.configMapName}"${note}${compensationFailed ? '; compensation of created resources also failed' : ''}`)
     }
     let createdJob: V1Job
     try {
-      createdJob = await this.batch.createNamespacedJob({ namespace: spec.namespace, body: this.job(spec) })
-    } catch {
-      await this.deleteConfigMap(spec)
-      if (createdModelSecret !== undefined) await this.deleteModelSecret(spec)
-      await this.deleteInputSecret(spec)
-      throw new Error(`PactFlow failed to create K3s Job "${spec.jobName}"`)
+      createdJob = await this.withRequestDeadline(options => this.batch.createNamespacedJob({
+        namespace: spec.namespace, body: this.job(spec),
+      }, options))
+    } catch (error) {
+      const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
+      let compensationFailed = false
+      if (this.isTimeout(error)) {
+        // The Job may exist without a usable UID; compensate our own lineage
+        // by the exact per-run names, children first.
+        try { await this.cancel(spec) } catch { compensationFailed = true }
+      } else {
+        compensationFailed = await this.compensateCreatedChildren(spec, createdModelSecret)
+      }
+      throw new Error(`PactFlow failed to create K3s Job "${spec.jobName}"${note}${compensationFailed ? '; compensation of created resources also failed' : ''}`)
     }
     const jobUid = createdJob.metadata?.uid
     if (jobUid === undefined) {
-      await this.cancel(spec)
-      throw new Error(`PactFlow K3s Job "${spec.jobName}" has no UID`)
+      let compensationFailed = false
+      try { await this.cancel(spec) } catch { compensationFailed = true }
+      throw new Error(`PactFlow K3s Job "${spec.jobName}" has no UID${compensationFailed ? '; compensation of created resources also failed' : ''}`)
     }
     try {
       createdConfigMap.metadata = {
@@ -301,9 +423,9 @@ export class PactFlowK3sWorker {
           controller: true, blockOwnerDeletion: true,
         }],
       }
-      await this.core.replaceNamespacedConfigMap({
+      await this.withRequestDeadline(options => this.core.replaceNamespacedConfigMap({
         name: spec.configMapName, namespace: spec.namespace, body: createdConfigMap,
-      })
+      }, options))
       if (createdModelSecret !== undefined) {
         createdModelSecret.metadata = {
           ...createdModelSecret.metadata,
@@ -312,9 +434,9 @@ export class PactFlowK3sWorker {
             controller: true, blockOwnerDeletion: true,
           }],
         }
-        await this.core.replaceNamespacedSecret({
+        await this.withRequestDeadline(options => this.core.replaceNamespacedSecret({
           name: spec.modelSecretName, namespace: spec.namespace, body: createdModelSecret,
-        })
+        }, options))
       }
       if (createdInputSecret !== undefined) {
         createdInputSecret.metadata = {
@@ -324,21 +446,25 @@ export class PactFlowK3sWorker {
             controller: true, blockOwnerDeletion: true,
           }],
         }
-        await this.core.replaceNamespacedSecret({
+        await this.withRequestDeadline(options => this.core.replaceNamespacedSecret({
           name: spec.inputSecretName!, namespace: spec.namespace, body: createdInputSecret,
-        })
+        }, options))
       }
     } catch {
-      await this.cancel(spec)
+      // Children may lack ownerReferences here, so compensation stays name-based;
+      // the binding failure itself must not be masked by a cleanup error.
+      try { await this.cancel(spec) } catch { /* the failed run leaves a durable cleanup responsibility for the Host */ }
       throw new Error(`PactFlow failed to bind ConfigMap "${spec.configMapName}" to its Job`)
     }
     this.pendingRuntimeSecrets.delete(spec.jobName)
-    let boundSpec = spec
+    const boundSpec: PactFlowK3sRunSpec = { ...spec, jobUid }
     try {
       await onBound?.(jobUid)
-      boundSpec = { ...spec, jobUid }
     } catch (error) {
-      try { await this.cancel(spec) } catch { /* preserve the binding failure; cleanup is retried by Host */ }
+      // Owner binding already succeeded, so compensation must carry the exact
+      // Job UID instead of the reusable name; the not-yet-bound private path
+      // above stays name-based because children may lack ownerReferences.
+      try { await this.cancel(boundSpec) } catch { /* preserve the binding failure; cleanup is retried by Host */ }
       throw error
     }
     return await this.waitForResult(boundSpec, signal)
@@ -347,8 +473,12 @@ export class PactFlowK3sWorker {
   /** Run the real Harness CLI in a short-lived Job and return bounded step logs. */
   async probe(
     templateId: string, prompt: string, timeoutMs: number, modelApiKey?: string,
+    signal: AbortSignal = new AbortController().signal,
+    record?: PactFlowProbeCleanupRecorder,
   ): Promise<PactFlowHarnessProbeResult> {
+    signal.throwIfAborted()
     const startedAt = Date.now()
+    const deadline = performance.now() + timeoutMs
     const stages: PactFlowHarnessProbeStage[] = []
     const template = this.templates.get(templateId)
     if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
@@ -364,22 +494,66 @@ export class PactFlowK3sWorker {
       : { ...template, modelSecretName: `${jobName}-model` }
     let output = ''
     let success = false
+    let jobUid: string | undefined
+    let secretUid: string | undefined
+    let createdModelSecret: V1Secret | undefined
+    let secretState: 'none' | 'confirmed' | 'unconfirmed' = 'none'
+    let jobState: 'none' | 'confirmed' | 'unconfirmed' = 'none'
     try {
+      // Persistence of the cleanup responsibility must succeed before any
+      // external resource is created; a recorder failure keeps the probe closed.
+      await record?.({ phase: 'intent', jobName,
+        ...(modelApiKey === undefined ? {} : { secretName: runtimeTemplate.modelSecretName }) })
       if (modelApiKey !== undefined) {
-        await this.core.createNamespacedSecret({
-          namespace: this.config.namespace,
-          body: this.modelSecret(runtimeTemplate.modelSecretName, this.config.namespace, runtimeTemplate.apiMode, modelApiKey),
-        })
+        let createdSecret: V1Secret
+        try {
+          createdSecret = await this.withRequestDeadline(options => this.core.createNamespacedSecret({
+            namespace: this.config.namespace,
+            body: this.modelSecret(runtimeTemplate.modelSecretName, this.config.namespace, runtimeTemplate.apiMode, modelApiKey),
+          }, options))
+        } catch (error) {
+          if (this.isTimeout(error)) secretState = 'unconfirmed'
+          throw error
+        }
+        createdModelSecret = createdSecret
+        secretUid = createdSecret?.metadata?.uid
+        if (typeof secretUid !== 'string' || secretUid.trim() === '') {
+          secretState = 'unconfirmed'
+          throw new Error('PactFlow probe creation did not return a Secret UID')
+        }
+        secretState = 'confirmed'
       }
-      await this.batch.createNamespacedJob({
-        namespace: this.config.namespace,
-        body: this.probeJob(jobName, runtimeTemplate, prompt, timeoutMs),
-      })
+      this.checkProbeLifetime(signal, deadline)
+      let createdJob: V1Job
+      try {
+        createdJob = await this.withRequestDeadline(options => this.batch.createNamespacedJob({
+          namespace: this.config.namespace,
+          body: this.probeJob(jobName, runtimeTemplate, prompt, timeoutMs),
+        }, options))
+      } catch (error) {
+        if (this.isTimeout(error)) jobState = 'unconfirmed'
+        throw error
+      }
+      jobUid = createdJob?.metadata?.uid
+      if (!jobUid) {
+        jobState = 'unconfirmed'
+        throw new Error('PactFlow probe creation did not return a Job UID')
+      }
+      jobState = 'confirmed'
+      if (createdModelSecret !== undefined) {
+        await this.bindProbeSecretOwner(runtimeTemplate.modelSecretName, createdModelSecret, jobName, jobUid)
+      }
+      await record?.({ phase: 'confirmed', jobName, jobUid,
+        ...(modelApiKey === undefined ? {} : { secretName: runtimeTemplate.modelSecretName, secretUid: secretUid! }) })
       stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
       for (;;) {
-        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace })
+        this.checkProbeLifetime(signal, deadline)
+        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace }, this.probeReadOptions(signal, deadline))
+        this.checkProbeLifetime(signal, deadline)
+        if (job.metadata?.uid !== jobUid) throw new Error('PactFlow probe Job identity changed')
         if ((job.status?.succeeded ?? 0) > 0 || (job.status?.failed ?? 0) > 0) {
-          output = await this.probeLog(jobName)
+          output = await this.probeLog(jobName, jobUid, this.probeReadOptions(signal, deadline))
+          this.checkProbeLifetime(signal, deadline)
           success = (job.status?.succeeded ?? 0) > 0
           if (success && output.trim() === '') success = false
           stages.push({
@@ -389,33 +563,45 @@ export class PactFlowK3sWorker {
           })
           break
         }
-        await new Promise(resolveDelay => setTimeout(resolveDelay, this.config.pollIntervalMs))
+        await this.delay(signal)
       }
     } catch (error) {
-      output = error instanceof Error ? error.message.slice(0, 4_096) : 'Harness probe failed'
+      output = error instanceof Error ? this.redactProbeOutput(error.message, modelApiKey).slice(0, 4_096) : 'Harness probe failed'
       stages.push({ name: 'model-response', state: 'failed', detail: 'Harness probe failed before a result' })
     } finally {
+      // 'leftover' keeps the ledger entry only when a created resource may
+      // still exist without a usable identity or a confirmed delete failed.
+      let leftover = jobState === 'unconfirmed' || secretState === 'unconfirmed'
       try {
-        const deletedPods = await this.cleanupProbeResources(jobName)
+        const deletedPods = await this.cleanupProbeResources(jobName, jobUid)
         stages.push({
           name: 'cleanup', state: 'succeeded',
           detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
       } catch {
         success = false
+        if (jobState === 'confirmed') leftover = true
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
       if (modelApiKey !== undefined) {
         try {
-          await this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace })
+          if (typeof secretUid !== 'string' || secretUid.trim() === '') throw new Error('PactFlow probe Secret identity is unconfirmed')
+          const uid = secretUid
+          await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace,
+            body: { preconditions: { uid } } }, options))
         } catch (error) {
           if (!this.isNotFound(error)) {
             success = false
+            if (secretState === 'confirmed') leftover = true
             stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
           }
         }
       }
+      if (!leftover) {
+        try { await record?.({ phase: 'cleaned', jobName }) } catch { /* startup reconciliation retries entry removal */ }
+      }
     }
+    if (signal.aborted) success = false
     return {
       kind: 'harness',
       templateId: template.id,
@@ -429,14 +615,19 @@ export class PactFlowK3sWorker {
       timeoutMs,
       success,
       durationMs: Date.now() - startedAt,
-      output: this.bounded(output, 16_384),
+      output: this.bounded(this.redactProbeOutput(output, modelApiKey), 16_384),
       stages,
     }
   }
 
   /** Pull and start one Harness image, then verify its CLI without any model or Worker Pool. */
-  async probeImage(templateId: string, timeoutMs: number): Promise<PactFlowHarnessImageProbeResult> {
+  async probeImage(
+    templateId: string, timeoutMs: number, signal: AbortSignal = new AbortController().signal,
+    record?: PactFlowProbeCleanupRecorder,
+  ): Promise<PactFlowHarnessImageProbeResult> {
+    signal.throwIfAborted()
     const startedAt = Date.now()
+    const deadline = performance.now() + timeoutMs
     const stages: PactFlowHarnessProbeStage[] = []
     const template = this.templates.get(templateId)
     if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
@@ -447,16 +638,39 @@ export class PactFlowK3sWorker {
     const jobName = `dsh-pf-image-${randomUUID().slice(0, 20)}`
     let output = ''
     let success = false
+    let jobUid: string | undefined
+    let jobState: 'none' | 'confirmed' | 'unconfirmed' = 'none'
     try {
-      await this.batch.createNamespacedJob({
-        namespace: this.config.namespace,
-        body: this.imageProbeJob(jobName, template, timeoutMs),
-      })
+      // Persistence of the cleanup responsibility must succeed before any
+      // external resource is created; a recorder failure keeps the probe closed.
+      await record?.({ phase: 'intent', jobName })
+      this.checkProbeLifetime(signal, deadline)
+      let createdJob: V1Job
+      try {
+        createdJob = await this.withRequestDeadline(options => this.batch.createNamespacedJob({
+          namespace: this.config.namespace,
+          body: this.imageProbeJob(jobName, template, timeoutMs),
+        }, options))
+      } catch (error) {
+        if (this.isTimeout(error)) jobState = 'unconfirmed'
+        throw error
+      }
+      jobUid = createdJob?.metadata?.uid
+      if (!jobUid) {
+        jobState = 'unconfirmed'
+        throw new Error('PactFlow probe creation did not return a Job UID')
+      }
+      jobState = 'confirmed'
+      await record?.({ phase: 'confirmed', jobName, jobUid })
       stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
       for (;;) {
-        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace })
+        this.checkProbeLifetime(signal, deadline)
+        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace }, this.probeReadOptions(signal, deadline))
+        this.checkProbeLifetime(signal, deadline)
+        if (job.metadata?.uid !== jobUid) throw new Error('PactFlow probe Job identity changed')
         if ((job.status?.succeeded ?? 0) > 0 || (job.status?.failed ?? 0) > 0) {
-          output = await this.probeLog(jobName)
+          output = await this.probeLog(jobName, jobUid, this.probeReadOptions(signal, deadline))
+          this.checkProbeLifetime(signal, deadline)
           success = (job.status?.succeeded ?? 0) > 0
           if (success && output.trim() === '') success = false
           stages.push({
@@ -465,31 +679,43 @@ export class PactFlowK3sWorker {
           })
           break
         }
-        await new Promise(resolveDelay => setTimeout(resolveDelay, this.config.pollIntervalMs))
+        await this.delay(signal)
       }
     } catch (error) {
       output = error instanceof Error ? error.message.slice(0, 4_096) : 'Harness image probe failed'
       stages.push({ name: 'cli-response', state: 'failed', detail: 'Harness image probe failed before a result' })
     } finally {
+      // 'leftover' keeps the ledger entry only when a created resource may
+      // still exist without a usable identity or a confirmed delete failed.
+      let leftover = jobState === 'unconfirmed'
       try {
-        const deletedPods = await this.cleanupProbeResources(jobName)
+        const deletedPods = await this.cleanupProbeResources(jobName, jobUid)
         stages.push({
           name: 'cleanup', state: 'succeeded',
           detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
       } catch {
         success = false
+        if (jobState === 'confirmed') leftover = true
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
+      if (!leftover) {
+        try { await record?.({ phase: 'cleaned', jobName }) } catch { /* startup reconciliation retries entry removal */ }
+      }
     }
+    if (signal.aborted) success = false
     return { success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages }
   }
 
   /** Send one direct protocol request in a short-lived Job without invoking the Harness CLI. */
   async probeApi(
     templateId: string, prompt: string, timeoutMs: number, modelApiKey?: string,
+    signal: AbortSignal = new AbortController().signal,
+    record?: PactFlowProbeCleanupRecorder,
   ): Promise<PactFlowApiProbeResult> {
+    signal.throwIfAborted()
     const startedAt = Date.now()
+    const deadline = performance.now() + timeoutMs
     const stages: PactFlowHarnessProbeStage[] = []
     const template = this.templates.get(templateId)
     if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
@@ -506,67 +732,126 @@ export class PactFlowK3sWorker {
       : { ...template, modelSecretName: `${jobName}-model` }
     let output = ''
     let success = false
+    let jobUid: string | undefined
+    let secretUid: string | undefined
+    let createdModelSecret: V1Secret | undefined
+    let secretState: 'none' | 'confirmed' | 'unconfirmed' = 'none'
+    let jobState: 'none' | 'confirmed' | 'unconfirmed' = 'none'
     try {
+      // Persistence of the cleanup responsibility must succeed before any
+      // external resource is created; a recorder failure keeps the probe closed.
+      await record?.({ phase: 'intent', jobName,
+        ...(modelApiKey === undefined ? {} : { secretName: runtimeTemplate.modelSecretName }) })
       if (modelApiKey !== undefined) {
-        await this.core.createNamespacedSecret({
-          namespace: this.config.namespace,
-          body: this.modelSecret(runtimeTemplate.modelSecretName, this.config.namespace, runtimeTemplate.apiMode, modelApiKey),
-        })
+        let createdSecret: V1Secret
+        try {
+          createdSecret = await this.withRequestDeadline(options => this.core.createNamespacedSecret({
+            namespace: this.config.namespace,
+            body: this.modelSecret(runtimeTemplate.modelSecretName, this.config.namespace, runtimeTemplate.apiMode, modelApiKey),
+          }, options))
+        } catch (error) {
+          if (this.isTimeout(error)) secretState = 'unconfirmed'
+          throw error
+        }
+        createdModelSecret = createdSecret
+        secretUid = createdSecret?.metadata?.uid
+        if (typeof secretUid !== 'string' || secretUid.trim() === '') {
+          secretState = 'unconfirmed'
+          throw new Error('PactFlow probe creation did not return a Secret UID')
+        }
+        secretState = 'confirmed'
       }
-      await this.batch.createNamespacedJob({
-        namespace: this.config.namespace,
-        body: this.apiProbeJob(jobName, runtimeTemplate, request.url, request.payload, timeoutMs),
-      })
+      this.checkProbeLifetime(signal, deadline)
+      let createdJob: V1Job
+      try {
+        createdJob = await this.withRequestDeadline(options => this.batch.createNamespacedJob({
+          namespace: this.config.namespace,
+          body: this.apiProbeJob(jobName, runtimeTemplate, request.url, request.payload, timeoutMs),
+        }, options))
+      } catch (error) {
+        if (this.isTimeout(error)) jobState = 'unconfirmed'
+        throw error
+      }
+      jobUid = createdJob?.metadata?.uid
+      if (!jobUid) {
+        jobState = 'unconfirmed'
+        throw new Error('PactFlow probe creation did not return a Job UID')
+      }
+      jobState = 'confirmed'
+      if (createdModelSecret !== undefined) {
+        await this.bindProbeSecretOwner(runtimeTemplate.modelSecretName, createdModelSecret, jobName, jobUid)
+      }
+      await record?.({ phase: 'confirmed', jobName, jobUid,
+        ...(modelApiKey === undefined ? {} : { secretName: runtimeTemplate.modelSecretName, secretUid: secretUid! }) })
       stages.push({ name: 'create-job', state: 'succeeded', detail: `Job ${jobName} created` })
       for (;;) {
-        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace })
+        this.checkProbeLifetime(signal, deadline)
+        const job = await this.batch.readNamespacedJob({ name: jobName, namespace: this.config.namespace }, this.probeReadOptions(signal, deadline))
+        this.checkProbeLifetime(signal, deadline)
+        if (job.metadata?.uid !== jobUid) throw new Error('PactFlow probe Job identity changed')
         if ((job.status?.succeeded ?? 0) > 0 || (job.status?.failed ?? 0) > 0) {
-          output = await this.probeLog(jobName)
-          success = (job.status?.succeeded ?? 0) > 0
+          output = await this.probeLog(jobName, jobUid, this.probeReadOptions(signal, deadline))
+          this.checkProbeLifetime(signal, deadline)
+          success = (job.status?.succeeded ?? 0) > 0 && output.trim() !== ''
           stages.push({
             name: 'api-response', state: success ? 'succeeded' : 'failed',
-            detail: success ? 'API returned successfully' : 'API request Job failed',
+            detail: success ? 'API returned successfully' : output.trim() === ''
+              ? 'API probe returned no response evidence' : 'API request Job failed',
           })
           break
         }
-        await new Promise(resolveDelay => setTimeout(resolveDelay, this.config.pollIntervalMs))
+        await this.delay(signal)
       }
     } catch (error) {
-      output = error instanceof Error ? error.message.slice(0, 4_096) : 'API probe failed'
+      output = error instanceof Error ? this.redactProbeOutput(error.message, modelApiKey).slice(0, 4_096) : 'API probe failed'
       stages.push({ name: 'api-response', state: 'failed', detail: 'API probe failed before a response' })
     } finally {
+      // 'leftover' keeps the ledger entry only when a created resource may
+      // still exist without a usable identity or a confirmed delete failed.
+      let leftover = jobState === 'unconfirmed' || secretState === 'unconfirmed'
       try {
-        const deletedPods = await this.cleanupProbeResources(jobName)
+        const deletedPods = await this.cleanupProbeResources(jobName, jobUid)
         stages.push({
           name: 'cleanup', state: 'succeeded',
           detail: `Job ${jobName} and ${String(deletedPods)} probe Pods deleted`,
         })
       } catch {
         success = false
+        if (jobState === 'confirmed') leftover = true
         stages.push({ name: 'cleanup', state: 'failed', detail: `Job or Pods for ${jobName} cleanup failed` })
       }
       if (modelApiKey !== undefined) {
         try {
-          await this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace })
+          if (typeof secretUid !== 'string' || secretUid.trim() === '') throw new Error('PactFlow probe Secret identity is unconfirmed')
+          const uid = secretUid
+          await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({ name: runtimeTemplate.modelSecretName, namespace: this.config.namespace,
+            body: { preconditions: { uid } } }, options))
         } catch (error) {
           if (!this.isNotFound(error)) {
             success = false
+            if (secretState === 'confirmed') leftover = true
             stages.push({ name: 'cleanup', state: 'failed', detail: `Secret ${runtimeTemplate.modelSecretName} cleanup failed` })
           }
         }
       }
+      if (!leftover) {
+        try { await record?.({ phase: 'cleaned', jobName }) } catch { /* startup reconciliation retries entry removal */ }
+      }
     }
+    if (signal.aborted) success = false
     return {
       kind: 'api', templateId: template.id, harness: template.harness, apiMode: template.apiMode,
       model: template.model, baseUrl: template.baseUrl, image: template.image,
       modelSecretName: runtimeTemplate.modelSecretName, prompt, timeoutMs,
       requestPath: request.path, requestPayload: request.payload,
-      success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages,
+      success, durationMs: Date.now() - startedAt, output: this.bounded(this.redactProbeOutput(output, modelApiKey), 16_384), stages,
     }
   }
 
   /** Observe an existing Job without creating or mutating resources. */
   async observe(spec: PactFlowK3sRunSpec): Promise<PactFlowK3sObservation> {
+    const missingIdentity = pactFlowK3sResultIdentityError(spec)
+    if (missingIdentity !== undefined) return { state: 'failed', finishedAt: Date.now(), outcome: missingIdentity }
     let job: V1Job
     try {
       job = await this.batch.readNamespacedJob({ name: spec.jobName, namespace: spec.namespace })
@@ -605,51 +890,118 @@ export class PactFlowK3sWorker {
 
   /** Wait for a Job created before the current Host activation. */
   async waitExisting(spec: PactFlowK3sRunSpec, signal: AbortSignal): Promise<PactFlowK3sResult> {
-    return await this.waitForResult(spec, signal)
+    return await this.waitForResult(spec, signal, false)
   }
 
   /** Cancel only the exact Job and ConfigMap owned by one Run. */
   async cancelRun(spec: PactFlowK3sRunSpec): Promise<void> {
-    await this.cancel(spec)
+    const missingIdentity = resourceIdentityError(spec)
+    if (missingIdentity !== undefined) throw new Error(missingIdentity)
+    await this.cleanupRun(spec)
+  }
+
+  /** Precisely remove one recorded probe's resources; unconfirmed identity fails closed. */
+  async cleanupProbeIdentity(identity: PactFlowProbeCleanupIdentity): Promise<void> {
+    const { jobName, jobUid, secretName, secretUid } = identity
+    if (typeof jobUid !== 'string' || jobUid.trim() === '') {
+      throw new Error(`PactFlow probe cleanup for "${jobName}" requires a confirmed Job UID; explicit recovery is required`)
+    }
+    if (secretName !== undefined && (typeof secretUid !== 'string' || secretUid.trim() === '')) {
+      throw new Error(`PactFlow probe cleanup for "${jobName}" requires a confirmed Secret UID; explicit recovery is required`)
+    }
+    if (secretName !== undefined) {
+      try {
+        await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({ name: secretName, namespace: this.config.namespace,
+          body: { preconditions: { uid: secretUid! } } }, options))
+      } catch (error) {
+        if (!this.isNotFound(error)) throw error
+      }
+    }
+    await this.cleanupProbeResources(jobName, jobUid)
   }
 
   /** Delete completed resources owned by one Run; missing resources count as clean. */
   async cleanupRun(spec: PactFlowK3sRunSpec): Promise<void> {
+    const missingIdentity = resourceIdentityError(spec)
+    if (missingIdentity !== undefined) throw new Error(missingIdentity)
     // ConfigMap/model Secret carry an ownerReference to the Job. Deleting all
     // three concurrently races the garbage collector and can return 409 for a
     // child already entering owner-driven deletion. Remove dependants first,
     // then the Job; 404 remains an idempotent clean result at both boundaries.
     if (spec.jobUid !== undefined) {
       try {
-        const job = await this.batch.readNamespacedJob({ name: spec.jobName, namespace: spec.namespace })
+        const job = await this.withRequestDeadline(options => this.batch.readNamespacedJob({
+          name: spec.jobName, namespace: spec.namespace,
+        }, options))
         const identityError = this.validateJobIdentity(spec, job)
         if (identityError !== undefined) throw new Error(identityError)
       } catch (error) {
         if (!this.isNotFound(error)) throw error
       }
     }
-    const childOperations = await Promise.allSettled([
-      this.core.deleteNamespacedConfigMap({ name: spec.configMapName, namespace: spec.namespace }),
-      ...(spec.inputSecretName === undefined ? [] : [
-        this.core.deleteNamespacedSecret({ name: spec.inputSecretName, namespace: spec.namespace }),
-      ]),
-      ...(spec.ephemeralModelSecret === true
-        ? [this.core.deleteNamespacedSecret({ name: spec.modelSecretName, namespace: spec.namespace })]
-        : []),
-    ])
+    const deletions: Array<() => Promise<unknown>> = []
+    const configUid = await this.ownedCleanupUid(spec,
+      () => this.withRequestDeadline(options => this.core.readNamespacedConfigMap({
+        name: spec.configMapName, namespace: spec.namespace,
+      }, options)))
+    if (configUid !== undefined) deletions.push(() => this.withRequestDeadline(options => this.core.deleteNamespacedConfigMap({
+      name: spec.configMapName, namespace: spec.namespace, body: { preconditions: { uid: configUid } },
+    }, options)))
+    for (const name of [spec.inputSecretName, ...(spec.ephemeralModelSecret === true ? [spec.modelSecretName] : [])]) {
+      if (name === undefined) continue
+      const uid = await this.ownedCleanupUid(spec,
+        () => this.withRequestDeadline(options => this.core.readNamespacedSecret({ name, namespace: spec.namespace }, options)))
+      if (uid !== undefined) deletions.push(() => this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
+        name, namespace: spec.namespace, body: { preconditions: { uid } },
+      }, options)))
+    }
+    let pods: readonly V1Pod[] = []
+    try {
+      pods = (await this.withRequestDeadline(options => this.core.listNamespacedPod({
+        namespace: spec.namespace, labelSelector: `job-name=${spec.jobName}`,
+      }, options))).items
+    } catch (error) { if (!this.isNotFound(error)) throw error }
+    for (const pod of pods) {
+      if (!pod.metadata?.ownerReferences?.some(owner => owner.apiVersion === 'batch/v1' && owner.kind === 'Job'
+        && owner.name === spec.jobName && owner.uid === spec.jobUid && owner.controller === true)) continue
+      const uid = await this.ownedCleanupUid(spec, async () => pod)
+      const name = pod.metadata?.name
+      if (uid === undefined || name === undefined) throw new Error('PactFlow owned cleanup Pod lacks identity')
+      deletions.push(() => this.withRequestDeadline(options => this.core.deleteNamespacedPod({ name, namespace: spec.namespace,
+        gracePeriodSeconds: 0, body: { preconditions: { uid } } }, options)))
+    }
+    const childOperations = await Promise.allSettled(deletions.map(remove => remove()))
     const childFailed = childOperations
       .filter(result => result.status === 'rejected' && !this.isNotFound(result.reason))
     if (childFailed.length > 0) {
       throw new Error(`PactFlow failed to clean K3s child resources for Job "${spec.jobName}"`)
     }
     try {
-      await this.batch.deleteNamespacedJob({
+      await this.withRequestDeadline(options => this.batch.deleteNamespacedJob({
         name: spec.jobName, namespace: spec.namespace, gracePeriodSeconds: 0,
-        propagationPolicy: 'Background', body: {},
-      })
+        propagationPolicy: 'Background', body: { preconditions: { uid: spec.jobUid! } },
+      }, options))
     } catch (error) {
       if (!this.isNotFound(error)) throw new Error(`PactFlow failed to clean K3s Job "${spec.jobName}"`)
     }
+  }
+
+  private async ownedCleanupUid(
+    spec: PactFlowK3sRunSpec,
+    read: () => Promise<{ metadata?: V1ObjectMeta }>,
+  ): Promise<string | undefined> {
+    let metadata: V1ObjectMeta | undefined
+    try { metadata = (await read()).metadata } catch (error) {
+      if (this.isNotFound(error)) return undefined
+      throw error
+    }
+    if (typeof metadata?.uid !== 'string' || metadata.uid.trim() === '' || !metadata.ownerReferences?.some(owner => owner.apiVersion === 'batch/v1'
+      && owner.kind === 'Job' && owner.name === spec.jobName && owner.uid === spec.jobUid && owner.controller === true)
+      || !Object.entries(this.labels(spec)).filter(([key]) => key.startsWith('pactflow.')).every(([key, value]) => metadata.labels?.[key] === value)
+      || !Object.entries(this.annotations(spec)).every(([key, value]) => metadata.annotations?.[key] === value)) {
+      throw new Error('PactFlow K3s cleanup child resource identity does not match the Run')
+    }
+    return metadata.uid
   }
 
   private configMap(spec: PactFlowK3sRunSpec): V1ConfigMap {
@@ -759,6 +1111,7 @@ export class PactFlowK3sWorker {
       spec: {
         activeDeadlineSeconds: timeoutSeconds,
         backoffLimit: 0,
+        ttlSecondsAfterFinished: PROBE_FINISHED_JOB_TTL_SECONDS,
         template: {
           metadata: { labels: { 'app.kubernetes.io/name': 'dsh-pactflow-probe' } },
           spec: {
@@ -806,6 +1159,7 @@ export class PactFlowK3sWorker {
       spec: {
         activeDeadlineSeconds: timeoutSeconds,
         backoffLimit: 0,
+        ttlSecondsAfterFinished: PROBE_FINISHED_JOB_TTL_SECONDS,
         template: {
           metadata: { labels: { 'app.kubernetes.io/name': 'dsh-pactflow-api-probe' } },
           spec: {
@@ -850,6 +1204,7 @@ export class PactFlowK3sWorker {
       },
       spec: {
         activeDeadlineSeconds: Math.ceil(timeoutMs / 1_000), backoffLimit: 0,
+        ttlSecondsAfterFinished: PROBE_FINISHED_JOB_TTL_SECONDS,
         template: {
           metadata: { labels: { 'app.kubernetes.io/name': 'dsh-pactflow-image-probe' } },
           spec: {
@@ -922,48 +1277,84 @@ export class PactFlowK3sWorker {
     return { name: key, valueFrom: { secretKeyRef: { name: secretName, key } } }
   }
 
-  private async probeLog(jobName: string): Promise<string> {
+  private ownsProbePod(pod: V1Pod, jobName: string, jobUid: string): boolean {
+    return pod.metadata?.ownerReferences?.some(owner => owner.kind === 'Job'
+      && owner.controller === true && owner.name === jobName && owner.uid === jobUid) === true
+  }
+
+  private async probeLog(jobName: string, jobUid: string, options: ConfigurationOptions): Promise<string> {
     const list = await this.core.listNamespacedPod({
       namespace: this.config.namespace, labelSelector: `job-name=${jobName}`,
-    })
-    const podName = list.items[0]?.metadata?.name
-    if (podName === undefined) return 'Harness probe Pod was not found'
-    return await this.core.readNamespacedPodLog({
+    }, options)
+    const pod = list.items.find(candidate => this.ownsProbePod(candidate, jobName, jobUid))
+    const podName = pod?.metadata?.name
+    if (podName === undefined) throw new Error('Harness probe Pod was not found')
+    const podUid = pod?.metadata?.uid
+    if (!podUid) throw new Error('Harness probe Pod UID was not found')
+    const output = await this.core.readNamespacedPodLog({
       name: podName, namespace: this.config.namespace, container: 'probe',
       limitBytes: 32_768, tailLines: 200,
-    })
+    }, options)
+    const current = await this.core.readNamespacedPod({ name: podName, namespace: this.config.namespace }, options)
+    if (current.metadata?.uid !== podUid || !this.ownsProbePod(current, jobName, jobUid)) {
+      throw new Error('Harness probe Pod identity changed while reading its logs')
+    }
+    return output
   }
 
-  private async cleanupProbeResources(jobName: string): Promise<number> {
-    let jobFailure: unknown
+  /** Best-effort owner binding so a host crash leaves a GC-able probe Secret instead of an orphan. */
+  private async bindProbeSecretOwner(
+    secretName: string, created: V1Secret, jobName: string, jobUid: string,
+  ): Promise<void> {
     try {
-      await this.batch.deleteNamespacedJob({
-        name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
-        propagationPolicy: 'Background', body: {},
-      })
-    } catch (error) {
-      if (!this.isNotFound(error)) jobFailure = error
-    }
-    const list = await this.core.listNamespacedPod({
+      await this.withRequestDeadline(options => this.core.replaceNamespacedSecret({
+        name: secretName, namespace: this.config.namespace,
+        body: {
+          ...created,
+          metadata: {
+            ...created.metadata,
+            ownerReferences: [{
+              apiVersion: 'batch/v1', kind: 'Job', name: jobName, uid: jobUid,
+              controller: true, blockOwnerDeletion: true,
+            }],
+          },
+        },
+      }, options))
+    } catch { /* in-process UID cleanup stays authoritative; this binding only backstops a host crash */ }
+  }
+
+  private async cleanupProbeResources(jobName: string, jobUid?: string): Promise<number> {
+    if (jobUid === undefined || jobUid.trim() === '') throw new Error('PactFlow probe cleanup requires a confirmed Job UID')
+    const list = await this.withRequestDeadline(options => this.core.listNamespacedPod({
       namespace: this.config.namespace, labelSelector: `job-name=${jobName}`,
-    })
-    const names = list.items.map(pod => pod.metadata?.name)
-      .filter((name): name is string => name !== undefined)
-    const deletions = await Promise.allSettled(names.map(name => this.core.deleteNamespacedPod({
-      name, namespace: this.config.namespace, gracePeriodSeconds: 0,
-      propagationPolicy: 'Background', body: {},
-    })))
+    }, options))
+    const owned = list.items.filter(pod => this.ownsProbePod(pod, jobName, jobUid))
+    if (owned.some(pod => !pod.metadata?.name || !pod.metadata.uid)) {
+      throw new Error('PactFlow probe Pod cleanup requires an exact name and UID')
+    }
+    const deletions = await Promise.allSettled(owned.map(pod => this.withRequestDeadline(options => this.core.deleteNamespacedPod({
+      name: pod.metadata!.name!, namespace: this.config.namespace, gracePeriodSeconds: 0,
+      propagationPolicy: 'Background', body: { preconditions: { uid: pod.metadata!.uid! } },
+    }, options))))
     const podFailed = deletions.some(result => result.status === 'rejected' && !this.isNotFound(result.reason))
-    if (jobFailure !== undefined || podFailed) {
+    if (podFailed) {
       throw new Error(`PactFlow failed to clean probe resources for Job "${jobName}"`)
     }
-    return names.length
+    try {
+      await this.withRequestDeadline(options => this.batch.deleteNamespacedJob({
+        name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
+        propagationPolicy: 'Background', body: { preconditions: { uid: jobUid } },
+      }, options))
+    } catch (error) {
+      if (!this.isNotFound(error)) throw error
+    }
+    return owned.length
   }
 
-  private async waitForResult(spec: PactFlowK3sRunSpec, signal: AbortSignal): Promise<PactFlowK3sResult> {
+  private async waitForResult(spec: PactFlowK3sRunSpec, signal: AbortSignal, cancelOnAbort = true): Promise<PactFlowK3sResult> {
     for (;;) {
       if (signal.aborted) {
-        await this.cancel(spec)
+        if (cancelOnAbort) await this.cancel(spec)
         throw new Error(`PactFlow K3s Job "${spec.jobName}" was cancelled`)
       }
       const observation = await this.observe(spec)
@@ -978,6 +1369,8 @@ export class PactFlowK3sWorker {
     spec: PactFlowK3sRunSpec,
     expectSuccess: boolean,
   ): Promise<Extract<PactFlowK3sObservation, { state: 'succeeded' | 'failed' }>> {
+    const missingIdentity = pactFlowK3sResultIdentityError(spec)
+    if (missingIdentity !== undefined) return { state: 'failed', finishedAt: Date.now(), outcome: missingIdentity }
     let pods: readonly V1Pod[]
     try {
       const list = await this.core.listNamespacedPod({
@@ -988,12 +1381,10 @@ export class PactFlowK3sWorker {
       throw new Error(`PactFlow cannot read Pods for K3s Job "${spec.jobName}"`)
     }
     const candidates = pods.filter(candidate => {
-      if (spec.jobUid === undefined) return true
       const owners = candidate.metadata?.ownerReferences ?? []
       return owners.some(owner => owner.apiVersion === 'batch/v1' && owner.kind === 'Job' && owner.name === spec.jobName
         && owner.uid === spec.jobUid && owner.controller === true)
     }).filter(candidate => {
-      if (spec.runNonceHash === undefined && spec.claimTokenHash === undefined && spec.specDigest === undefined) return true
       const labels = candidate.metadata?.labels ?? {}
       const annotations = candidate.metadata?.annotations ?? {}
       return Object.entries(this.labels(spec)).filter(([key]) => key.startsWith('pactflow.'))
@@ -1019,23 +1410,24 @@ export class PactFlowK3sWorker {
         outcome: `PactFlow K3s Job "${spec.jobName}" returned an invalid termination document`,
       }
     }
-    const imageMatches = spec.image.includes('@sha256:')
-      && workerStatus?.imageID?.includes(spec.image.slice(spec.image.indexOf('@'))) === true
-    const bindingMatches = (spec.runNonceHash === undefined || document.runNonceHash === spec.runNonceHash)
-      && (spec.claimTokenHash === undefined || document.claimTokenHash === spec.claimTokenHash)
-      && (spec.specDigest === undefined || document.specDigest === spec.specDigest)
+    const observedDigest = workerStatus?.imageID?.match(/(?:^|@|:\/\/)(sha256:[0-9a-f]{64})$/)?.[1]
+    const imageMatches = observedDigest !== undefined && observedDigest === spec.image.split('@').at(-1)
+    const bindingMatches = document !== null && typeof document === 'object'
+      && document.runNonceHash === spec.runNonceHash
+      && document.claimTokenHash === spec.claimTokenHash
+      && document.specDigest === spec.specDigest
     const valid = document !== null && typeof document === 'object'
       && document.schema === 'dsh_pactflow_k3s_result/v1'
       && typeof document.branch === 'string' && document.branch.length > 0
       && typeof document.commit === 'string' && COMMIT.test(document.commit)
       && typeof document.harnessVersion === 'string'
-      && (spec.expectedBranch === undefined || document.branch === spec.expectedBranch)
-      && (spec.expectedBaseCommit === undefined || document.commit !== spec.expectedBaseCommit)
+      && document.branch === spec.expectedBranch
+      && document.commit !== spec.expectedBaseCommit
       && Number.isInteger(document.agentExitCode) && Number.isInteger(document.pushExitCode)
       && bindingMatches && (spec.runNonceHash === undefined || /^[0-9a-f]{64}$/.test(document.runNonceHash ?? ''))
       && (spec.claimTokenHash === undefined || /^[0-9a-f]{64}$/.test(document.claimTokenHash ?? ''))
       && (spec.specDigest === undefined || /^[0-9a-f]{64}$/.test(document.specDigest ?? ''))
-      && (spec.jobUid === undefined || imageMatches)
+      && imageMatches
     if (!valid || !expectSuccess || document.status !== 'succeeded' || terminated.exitCode !== 0
       || document.agentExitCode !== 0 || document.pushExitCode !== 0) {
       return {
@@ -1060,18 +1452,8 @@ export class PactFlowK3sWorker {
   }
 
   private async cancel(spec: PactFlowK3sRunSpec): Promise<void> {
+    if (spec.jobUid !== undefined) return await this.cleanupRun(spec)
     const failures: unknown[] = []
-    let identityFailure: unknown
-    if (spec.jobUid !== undefined) {
-      try {
-        const job = await this.batch.readNamespacedJob({ name: spec.jobName, namespace: spec.namespace })
-        const identityError = this.validateJobIdentity(spec, job)
-        if (identityError !== undefined) throw new Error(identityError)
-      } catch (error) {
-        if (!this.isNotFound(error)) identityFailure = error
-      }
-    }
-    if (identityFailure !== undefined) throw identityFailure
     for (const operation of [
       () => this.deleteConfigMap(spec),
       () => this.deleteInputSecret(spec),
@@ -1080,41 +1462,64 @@ export class PactFlowK3sWorker {
       try { await operation() } catch (error) { failures.push(error) }
     }
     try {
-      await this.batch.deleteNamespacedJob({
+      await this.withRequestDeadline(options => this.batch.deleteNamespacedJob({
         name: spec.jobName,
         namespace: spec.namespace,
         gracePeriodSeconds: 0,
         propagationPolicy: 'Background',
         body: {},
-      })
+      }, options))
     } catch (error) {
       if (!this.isNotFound(error)) failures.push(error)
     }
     if (failures.length > 0) throw new Error(`PactFlow failed to cancel K3s Job "${spec.jobName}" resources`)
   }
 
+  /** Name-based compensation for children created moments ago inside this call. */
+  private async compensateCreatedChildren(
+    spec: PactFlowK3sRunSpec,
+    createdModelSecret: V1Secret | undefined,
+  ): Promise<boolean> {
+    const failures: unknown[] = []
+    for (const operation of [
+      () => this.deleteConfigMap(spec),
+      ...(createdModelSecret !== undefined ? [() => this.deleteModelSecret(spec)] : []),
+      () => this.deleteInputSecret(spec),
+    ]) {
+      try { await operation() } catch (error) { failures.push(error) }
+    }
+    return failures.length > 0
+  }
+
   private async deleteConfigMap(spec: PactFlowK3sRunSpec): Promise<void> {
     try {
-      await this.core.deleteNamespacedConfigMap({ name: spec.configMapName, namespace: spec.namespace })
+      await this.withRequestDeadline(options => this.core.deleteNamespacedConfigMap({
+        name: spec.configMapName, namespace: spec.namespace,
+      }, options))
     } catch (error) {
-      if (!this.isNotFound(error)) throw error
+      if (!this.isNotFound(error) && !this.isTimeout(error)) throw error
     }
   }
 
   private async deleteInputSecret(spec: PactFlowK3sRunSpec): Promise<void> {
     if (spec.inputSecretName === undefined) return
     try {
-      await this.core.deleteNamespacedSecret({ name: spec.inputSecretName, namespace: spec.namespace })
+      const name = spec.inputSecretName
+      await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
+        name, namespace: spec.namespace,
+      }, options))
     } catch (error) {
-      if (!this.isNotFound(error)) throw error
+      if (!this.isNotFound(error) && !this.isTimeout(error)) throw error
     }
   }
 
   private async deleteModelSecret(spec: PactFlowK3sRunSpec): Promise<void> {
     try {
-      await this.core.deleteNamespacedSecret({ name: spec.modelSecretName, namespace: spec.namespace })
+      await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
+        name: spec.modelSecretName, namespace: spec.namespace,
+      }, options))
     } catch (error) {
-      if (!this.isNotFound(error)) throw error
+      if (!this.isNotFound(error) && !this.isTimeout(error)) throw error
     }
   }
 
@@ -1136,7 +1541,28 @@ export class PactFlowK3sWorker {
     }
   }
 
+  private probeReadOptions(signal: AbortSignal, deadline: number): ConfigurationOptions {
+    const stop = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now())))])
+    return {
+      middlewareMergeStrategy: 'append',
+      middleware: [{
+        pre(request) {
+          const existing = request.getSignal()
+          request.setSignal(existing === undefined ? stop : AbortSignal.any([existing, stop]))
+          return new Observable(Promise.resolve(request))
+        },
+        post(response) { return new Observable(Promise.resolve(response)) },
+      }],
+    }
+  }
+
+  private checkProbeLifetime(signal: AbortSignal, deadline: number): void {
+    signal.throwIfAborted()
+    if (performance.now() >= deadline) throw new Error('PactFlow probe exceeded its Host deadline')
+  }
+
   private delay(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve()
     return new Promise((resolveDelay) => {
       const onAbort = (): void => { clearTimeout(timer); resolveDelay() }
       const timer = setTimeout(() => {
@@ -1193,6 +1619,14 @@ export class PactFlowK3sWorker {
     if (!DNS_LABEL.test(value)) throw new Error(`PactFlow K3s ${label} must be a DNS label`)
   }
 
+  private redactProbeOutput(value: string, secret?: string): string {
+    if (!secret) return value
+    const variants = [...new Set([secret, JSON.stringify(secret).slice(1, -1), Buffer.from(secret).toString('base64')])]
+      .sort((left, right) => right.length - left.length)
+    for (const variant of variants) value = value.split(variant).join('[redacted]')
+    return value
+  }
+
   private bounded(value: string, maximumBytes: number): string {
     const bytes = new TextEncoder().encode(value)
     if (bytes.length <= maximumBytes) return value
@@ -1206,7 +1640,7 @@ export class PactFlowK3sWorker {
   }
 }
 
-const API_PROBE_SCRIPT = String.raw`import json, os, urllib.error, urllib.request
+export const API_PROBE_SCRIPT = String.raw`import json, os, urllib.error, urllib.request
 mode = os.environ['PACTFLOW_API_MODE']
 url = os.environ['PACTFLOW_API_URL']
 payload = os.environ['PACTFLOW_API_PAYLOAD'].encode()

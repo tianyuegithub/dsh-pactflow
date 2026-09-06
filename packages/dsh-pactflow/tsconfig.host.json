@@ -12,15 +12,22 @@
     "src/execution-capacity.ts",
     "src/git-workspace.ts",
     "src/gitea.ts",
+    "src/host/cleanup.ts",
+    "src/host/dispatch.ts",
+    "src/host/probe-recovery.ts",
+    "src/host/recovery.ts",
+    "src/host/settings-adapter.ts",
     "src/harness-discovery.ts",
     "src/infrastructure-health.ts",
     "src/infrastructure.ts",
     "src/infrastructure-probe.ts",
     "src/k3s-worker.ts",
     "src/project-capacity.ts",
+    "src/probe-ledger.ts",
     "src/review-authorization.ts",
     "src/schema.ts",
     "src/types.ts",
-    "src/workspace-project.ts"
+    "src/workspace-project.ts",
+    "src/workspace-lock.ts"
   ]
 }
