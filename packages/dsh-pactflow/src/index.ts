@@ -141,6 +141,9 @@ import type {
   PactFlowKubeconfigView,
   PactFlowWorkerPoolStatus,
   PactFlowWorkspaceProjectConfig,
+  PactFlowRemoteCreation,
+  PactFlowRemoteReconciliation,
+  PactFlowConfirmWorkspaceRemoteRequest,
   PactFlowWorkspaceProjectView,
   PactFlowInitializeWorkspaceGitRequest,
   PactFlowSaveWorkspaceWorkerPolicyRequest,
@@ -1608,6 +1611,80 @@ export class PactFlowService extends TypertRemoteService {
       throw new Error('PactFlow Workspace project revision changed while creating the remote')
     }
     return config
+  }
+
+  /** Read-only candidates for one unknown-result remote creation; nothing is persisted here. */
+  @Remote('listWorkspaceRemoteCandidates')
+  async listWorkspaceRemoteCandidates(workspaceId: string): Promise<PactFlowRemoteReconciliation> {
+    const this_workspace = await this.requireCreatingIntent(workspaceId)
+    const { provider, intent } = this_workspace
+    const token = await this.resolveCredential(provider.tokenCredentialRef, 'Gitea password or token')
+    const candidates = await this.gitea.listCandidateRepositories(provider.baseUrl, provider.username, token,
+      { owner: intent.owner, repo: intent.repo })
+    return {
+      intent: { owner: intent.owner, repo: intent.repo, defaultBranch: intent.defaultBranch,
+        private: intent.private, operationId: intent.id },
+      candidates: candidates.map(candidate => ({
+        ...candidate,
+        matches: {
+          exactName: candidate.fullName === `${intent.owner}/${intent.repo}`,
+          defaultBranch: candidate.defaultBranch === intent.defaultBranch,
+          private: candidate.private === intent.private,
+          descriptionClue: candidate.description.includes(intent.id),
+        },
+      })),
+    }
+  }
+
+  /** Persist one user-confirmed repository as the creation result only after an exact id re-check. */
+  @Remote('confirmWorkspaceRemoteCandidate')
+  async confirmWorkspaceRemoteCandidate(request: PactFlowConfirmWorkspaceRemoteRequest): Promise<PactFlowWorkspaceProjectConfig> {
+    const current_workspace = await this.requireCreatingIntent(request.workspaceId)
+    const { provider, intent, current } = current_workspace
+    this.requireWorkspaceProjectRevision(current, request.expectedRevision)
+    const token = await this.resolveCredential(provider.tokenCredentialRef, 'Gitea password or token')
+    const repository = await this.gitea.getRepositoryById(provider.baseUrl, provider.username, token, request.repoId)
+    if (repository.fullName !== `${intent.owner}/${intent.repo}`) {
+      throw new Error(`PactFlow confirmed repository "${repository.fullName}" does not match the recorded creation owner and name`)
+    }
+    if (repository.private !== intent.private) {
+      throw new Error('PactFlow confirmed repository visibility does not match the recorded creation intent')
+    }
+    if (repository.defaultBranch !== intent.defaultBranch) {
+      throw new Error('PactFlow confirmed repository default branch does not match the recorded creation intent')
+    }
+    const confirmed: PactFlowWorkspaceProjectConfig = { ...current, revision: current.revision + 1,
+      updatedAt: Date.now(), remoteCreation: { ...intent, state: 'created', cloneUrl: repository.cloneUrl } }
+    if (!await this.workspaceProjects.putIfRevision(current.revision, confirmed)) {
+      throw new Error('PactFlow Workspace revision changed during remote creation reconciliation')
+    }
+    return confirmed
+  }
+
+  private async requireCreatingIntent(workspaceId: string): Promise<{
+    readonly current: PactFlowWorkspaceProjectConfig
+    readonly intent: PactFlowRemoteCreation
+    readonly provider: { readonly id: string; readonly baseUrl: string; readonly username?: string; readonly tokenCredentialRef: string }
+  }> {
+    this.requireWorkspace(workspaceId)
+    const current = await this.workspaceProjects.get(workspaceId)
+    const intent = current?.remoteCreation
+    if (intent === undefined || intent.state !== 'creating') {
+      throw new Error('PactFlow Workspace has no unknown-result remote creation to reconcile')
+    }
+    const provider = JSON.parse(intent.providerSnapshot) as { id?: unknown; baseUrl?: unknown; username?: unknown; tokenCredentialRef?: unknown }
+    if (provider.id !== intent.providerId || typeof provider.baseUrl !== 'string' || provider.baseUrl === ''
+      || typeof provider.tokenCredentialRef !== 'string' || provider.tokenCredentialRef === ''
+      || (provider.username !== undefined && typeof provider.username !== 'string')) {
+      throw new Error('PactFlow recorded creation provider snapshot is invalid; explicit recovery is required')
+    }
+    return {
+      current: current!,
+      intent,
+      provider: { id: provider.id as string, baseUrl: provider.baseUrl,
+        ...(provider.username === undefined ? {} : { username: provider.username as string }),
+        tokenCredentialRef: provider.tokenCredentialRef },
+    }
   }
 
   /** Save Workspace-level Worker quotas as references to validated global resources. */

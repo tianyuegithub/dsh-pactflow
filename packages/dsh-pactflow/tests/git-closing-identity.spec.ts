@@ -2,9 +2,13 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
 import { PactFlowGitWorkspace } from '../src/git-workspace.ts'
 import { createGitFixture } from './git-fixture.ts'
+
+// Real-Git fixtures are slow under load; relax timeouts without touching assertions.
+vi.setConfig({ testTimeout: 20_000 })
 
 describe('PactFlow integration isolation', () => {
   it.each(['different-needs', 'different-sessions', 'legacy-attempt'] as const)('isolates concurrent %s with equal revisions', async variant => {

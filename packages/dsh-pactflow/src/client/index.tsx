@@ -183,6 +183,16 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
+      remoteCandidates: async workspaceId => {
+        const result = await pactflow.listWorkspaceRemoteCandidates(workspaceId)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      confirmRemote: async request => {
+        const result = await pactflow.confirmWorkspaceRemoteCandidate(request)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
       migrate: async (workspaceId, sessionId, expectedRevision) => {
         const result = await pactflow.migrateWorkspaceProject({
           workspaceId, sessionId, expectedRevision, confirm: 'migrate-session-project',

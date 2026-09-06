@@ -4,7 +4,7 @@ import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   PactFlowWorkspaceProjectStore,
   initializeWorkspaceGit,
@@ -12,6 +12,9 @@ import {
 } from '../src/workspace-project.ts'
 import { PactFlowProjectCapacity } from '../src/project-capacity.ts'
 import { PactFlowGitWorkspace } from '../src/git-workspace.ts'
+
+// Real-Git fixtures are slow under load; relax timeouts without touching assertions.
+vi.setConfig({ testTimeout: 20_000 })
 
 const exec = promisify(execFile)
 

@@ -369,6 +369,41 @@ export interface PactFlowCreateWorkspaceRemoteRequest {
   readonly confirm: 'create-gitea-repository'
 }
 
+/** One read-only reconciliation candidate compared against the recorded creation intent. */
+export interface PactFlowRemoteCandidate {
+  readonly id: number
+  readonly fullName: string
+  readonly cloneUrl: string
+  readonly defaultBranch: string
+  readonly private: boolean
+  readonly empty: boolean
+  readonly description: string
+  readonly createdAt: string
+  readonly matches: Readonly<{
+    readonly exactName: boolean
+    readonly defaultBranch: boolean
+    readonly private: boolean
+    readonly descriptionClue: boolean
+  }>
+}
+
+export interface PactFlowRemoteReconciliation {
+  readonly intent: Readonly<{
+    readonly owner: string
+    readonly repo: string
+    readonly defaultBranch: string
+    readonly private: boolean
+    readonly operationId: string
+  }>
+  readonly candidates: readonly PactFlowRemoteCandidate[]
+}
+
+export interface PactFlowConfirmWorkspaceRemoteRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  readonly repoId: number
+}
+
 export interface PactFlowAdoptWorkspaceGitRequest {
   readonly workspaceId: string
   readonly expectedRevision: number

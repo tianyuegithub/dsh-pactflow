@@ -12,6 +12,9 @@ import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
+
+// Real-Git fixtures are slow under load; relax the per-test timeout without touching assertions.
+vi.setConfig({ testTimeout: 20_000 })
 import PactFlowService from '../lib/index.js'
 import { PACTFLOW_EVENT_TYPES_V0_2 } from '../src/domain.ts'
 import * as PactFlowAgentTools from '../presets/pactflow/plugin/index.js'

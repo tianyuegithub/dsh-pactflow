@@ -4,6 +4,7 @@ import type { PactFlowGiteaBinding, PactFlowGiteaStatus } from './types.ts'
 import { joinUrlPath } from './infrastructure-probe.ts'
 
 interface RepositoryResponse {
+  readonly id?: unknown
   readonly full_name?: unknown
   readonly default_branch?: unknown
   readonly private?: unknown
@@ -47,6 +48,42 @@ class GiteaRequestError extends Error {
   constructor(readonly status: number, readonly detail: string) {
     super(`PactFlow Gitea API returned HTTP ${String(status)}${detail.length === 0 ? '' : `: ${detail}`}`)
   }
+}
+
+type CandidatePayload = {
+  readonly id?: unknown
+  readonly full_name?: unknown
+  readonly clone_url?: unknown
+  readonly default_branch?: unknown
+  readonly private?: unknown
+  readonly empty?: unknown
+  readonly description?: unknown
+  readonly created_at?: unknown
+}
+
+function parseRepositorySummary(repository: CandidatePayload): PactFlowGiteaRepositorySummary | undefined {
+  if (typeof repository.id !== 'number' || typeof repository.full_name !== 'string'
+    || typeof repository.clone_url !== 'string' || typeof repository.default_branch !== 'string'
+    || typeof repository.private !== 'boolean') return undefined
+  return {
+    id: repository.id, fullName: repository.full_name, cloneUrl: credentialFreeCloneUrl(repository.clone_url),
+    defaultBranch: repository.default_branch, private: repository.private,
+    empty: repository.empty === true,
+    description: typeof repository.description === 'string' ? repository.description : '',
+    createdAt: typeof repository.created_at === 'string' ? repository.created_at : '',
+  }
+}
+
+/** Read-only repository summary used for creation reconciliation; never carries credentials. */
+export interface PactFlowGiteaRepositorySummary {
+  readonly id: number
+  readonly fullName: string
+  readonly cloneUrl: string
+  readonly defaultBranch: string
+  readonly private: boolean
+  readonly empty: boolean
+  readonly description: string
+  readonly createdAt: string
 }
 
 export class PactFlowGiteaClient {
@@ -101,14 +138,77 @@ export class PactFlowGiteaClient {
     }
   }
 
+  /** Read-only candidate listing for creation reconciliation; exact repo plus owner-scoped name matches. */
+  async listCandidateRepositories(
+    baseUrl: string,
+    username: string | undefined,
+    token: string,
+    input: { readonly owner: string; readonly repo: string },
+  ): Promise<PactFlowGiteaRepositorySummary[]> {
+    const auth = username === undefined
+      ? { authorization: `token ${token}` }
+      : { authorization: `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}` }
+    const endpoints = [
+      joinUrlPath(baseUrl, `/api/v1/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`),
+      joinUrlPath(baseUrl, `/api/v1/users/${encodeURIComponent(input.owner)}/repos`),
+      joinUrlPath(baseUrl, `/api/v1/orgs/${encodeURIComponent(input.owner)}/repos`),
+    ]
+    const summaries = new Map<number, PactFlowGiteaRepositorySummary>()
+    for (const endpoint of endpoints) {
+      let response: Response
+      try {
+        response = await fetch(endpoint, { method: 'GET', signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json', ...auth } })
+      } catch {
+        continue
+      }
+      if (!response.ok) continue
+      const payload = await response.json() as unknown
+      for (const item of Array.isArray(payload) ? payload : [payload]) {
+        const summary = parseRepositorySummary(item as CandidatePayload)
+        if (summary === undefined || !summary.fullName.toLowerCase().includes(input.repo.toLowerCase())) continue
+        if (summaries.has(summary.id)) continue
+        summaries.set(summary.id, summary)
+      }
+      if (summaries.size >= 20) break
+    }
+    return [...summaries.values()].sort((left, right) => {
+      const exactLeft = left.fullName === `${input.owner}/${input.repo}` ? 0 : 1
+      const exactRight = right.fullName === `${input.owner}/${input.repo}` ? 0 : 1
+      return exactLeft - exactRight || left.id - right.id
+    })
+  }
+
+  /** Fetch one repository by its exact numeric id; the caller owns identity verification against the intent. */
+  async getRepositoryById(
+    baseUrl: string,
+    username: string | undefined,
+    token: string,
+    id: number,
+  ): Promise<PactFlowGiteaRepositorySummary> {
+    const auth = username === undefined
+      ? { authorization: `token ${token}` }
+      : { authorization: `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}` }
+    const endpoint = joinUrlPath(baseUrl, `/api/v1/repositories/${String(Number(id))}`)
+    let response: Response
+    try {
+      response = await fetch(endpoint, { method: 'GET', signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json', ...auth } })
+    } catch {
+      throw new Error('PactFlow could not connect to the configured Gitea API')
+    }
+    if (response.status === 404) throw new GiteaRequestError(404, 'confirmed repository does not exist')
+    if (!response.ok) throw new GiteaRequestError(response.status, '')
+    const summary = parseRepositorySummary(await response.json() as CandidatePayload)
+    if (summary === undefined) throw new Error('PactFlow Gitea repository response is invalid')
+    return summary
+  }
+
   /** Verify repository identity, default branch, and protection without changing Gitea. */
   async verify(
     binding: PactFlowGiteaBinding,
     token: string,
     expectedDefaultBranch: string,
     signal?: AbortSignal,
-  ): Promise<PactFlowGiteaStatus> {
-    const cancellation = signal === undefined ? {} : { signal }
+  ): Promise<PactFlowGiteaStatus> {    const cancellation = signal === undefined ? {} : { signal }
     const repository = await this.request<RepositoryResponse>(binding, token, '', cancellation)
     if (repository.full_name !== `${binding.owner}/${binding.repo}`
       || repository.default_branch !== expectedDefaultBranch

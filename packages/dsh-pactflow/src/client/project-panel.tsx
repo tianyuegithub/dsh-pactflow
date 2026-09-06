@@ -9,9 +9,11 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives/src/icons/index.tsx'
 import type {
   PactFlowAgentProfile,
+  PactFlowConfirmWorkspaceRemoteRequest,
   PactFlowHarnessProfileSettings,
   PactFlowModelConnectionSettings,
   PactFlowProjectWorkerPolicy,
+  PactFlowRemoteReconciliation,
   PactFlowWorkerPoolStatus,
   PactFlowWorkspaceProjectConfig,
   PactFlowWorkspaceProjectView,
@@ -43,6 +45,8 @@ export interface PactFlowProjectPanelFace {
     readonly private: boolean
     readonly defaultBranch: string
   }): Promise<PactFlowWorkspaceProjectConfig>
+  remoteCandidates(workspaceId: string): Promise<PactFlowRemoteReconciliation>
+  confirmRemote(request: PactFlowConfirmWorkspaceRemoteRequest): Promise<PactFlowWorkspaceProjectConfig>
   migrate(workspaceId: string, sessionId: string, expectedRevision: number): Promise<PactFlowWorkspaceProjectConfig>
 }
 
@@ -72,7 +76,7 @@ function friendlyProtocol(value: string): string {
   } as Readonly<Record<string, string>>)[value] ?? value
 }
 
-export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, createRemote, migrate }: ProjectPanelProps) {
+export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<readonly PactFlowWorkspaceProjectView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -83,6 +87,8 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   const { feedback, showFeedback, clearFeedback } = useActionFeedback()
   const [confirmInit, setConfirmInit] = useState(false)
   const [remotePreview, setRemotePreview] = useState(false)
+  const [reconcile, setReconcile] = useState<PactFlowRemoteReconciliation | null>(null)
+  const [confirmRepoId, setConfirmRepoId] = useState('')
   const [providerId, setProviderId] = useState('')
   const [owner, setOwner] = useState('')
   const [repo, setRepo] = useState('')
@@ -238,6 +244,18 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                 </div> : !selected.gitStatus.hasCommit ? <p style={warningStyle}>请先检查 .gitignore、未跟踪文件并完成初始提交；零脉不会自动 git add。</p>
                   : selected.gitStatus.remoteUrl !== undefined ? <div style={actionsStyle}>
                     {selected.config?.git === undefined ? <button type="button" disabled={busy} onClick={() => act(() => adoptGit(selected.workspaceId, selected.config?.revision ?? 0))} style={primaryButtonStyle}>绑定现有远程仓库</button> : <span style={okStyle}>项目仓库已绑定</span>}
+                  </div> : selected.config?.remoteCreation?.state === 'creating' ? <div style={actionsStyle}>
+                    <p style={warningStyle}>上一次创建远程仓库的结果未知（操作编号 {selected.config.remoteCreation.id.slice(0, 8)}…）。请查询候选并人工确认精确仓库编号后接续推送；描述与编号只是线索，不是所有权证明。</p>
+                    {reconcile === null ? <button type="button" disabled={busy} onClick={() => act(() => remoteCandidates(selected.workspaceId).then(result => { setReconcile(result); return result }))} style={primaryButtonStyle}>查询候选仓库</button> : <>
+                      {reconcile.candidates.map(candidate => <p key={String(candidate.id)} style={mutedStyle}>
+                        编号 {String(candidate.id)} · {candidate.fullName} · {candidate.defaultBranch} · {candidate.private ? '私有' : '公开'}{candidate.empty ? ' · 空仓库' : ''}
+                        · {['exactName', 'defaultBranch', 'private', 'descriptionClue'].filter(key => candidate.matches[key as keyof typeof candidate.matches]).length}/4 项匹配
+                      </p>)}
+                      {reconcile.candidates.length === 0 ? <p style={warningStyle}>未发现候选仓库；请核对该 Gitea 实例与所有者。</p> : null}
+                      <Field label="精确仓库编号"><input value={confirmRepoId} onChange={event => setConfirmRepoId(event.currentTarget.value)} style={inputStyle} /></Field>
+                      <button type="button" disabled={busy || confirmRepoId.trim() === ''} onClick={() => act(() => confirmRemote({ workspaceId: selected.workspaceId, expectedRevision: selected.config?.revision ?? 0, repoId: Number(confirmRepoId.trim()) }), { id: 'remote-reconcile-confirm', success: '已确认仓库；再次点击“确认创建并推送”完成推送' })} style={primaryButtonStyle}>确认编号</button>
+                      <button type="button" onClick={() => { setReconcile(null); setConfirmRepoId('') }} style={secondaryButtonStyle}>取消</button>
+                    </>}
                   </div> : <div style={formGridStyle}>
                     <Field label="Gitea 配置"><select value={providerId} onChange={event => setProviderId(event.currentTarget.value)} style={inputStyle}>{catalog?.giteaProviders.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>
                     <Field label="所有者"><input value={owner} onChange={event => setOwner(event.currentTarget.value)} style={inputStyle} /></Field>

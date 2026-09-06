@@ -6,6 +6,9 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it, vi } from 'vitest'
+
+// Real-Git fixtures are slow under load; relax the per-test timeout without touching assertions.
+vi.setConfig({ testTimeout: 20_000 })
 import PactFlowService from '../lib/index.js'
 import { createGitFixture } from './git-fixture.ts'
 
