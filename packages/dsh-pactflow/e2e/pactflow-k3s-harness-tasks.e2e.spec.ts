@@ -42,6 +42,7 @@ describe.skipIf(!enabled)('PactFlow K3s full Harness task matrix', { timeout: 90
   let root: string
   let ctx: Context
   let priorDshHome: string | undefined
+  const workspaces: { readonly id: string; readonly path: string; readonly title: string; readonly sessionIds: string[] }[] = []
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-k3s-matrix-'))
@@ -50,6 +51,12 @@ describe.skipIf(!enabled)('PactFlow K3s full Harness task matrix', { timeout: 90
     ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
+    // Registered once; each matrix case appends its own workspace entry and
+    // the host matches sessions to workspaces by path.
+    ctx.provide('workspaceRegistry', {
+      list: () => workspaces,
+      get: id => workspaces.find(item => item.id === id),
+    } as never)
     await ctx.plugin(PactFlowService, {
       k3s: {
         namespace: 'pactflow', imagePullSecret: 'pactflow-registry-home-harbor', pollIntervalMs: 1_000,
@@ -78,8 +85,9 @@ describe.skipIf(!enabled)('PactFlow K3s full Harness task matrix', { timeout: 90
     try {
       const initialized = ctx.pactflow.initialize(session.id, { name: `Matrix ${template.id}` })
       // Validation now runs only through user-registered profiles; raw commands are refused at bind time.
-      const registeredWorkspace = { id: `k3s-matrix-${template.id}`, path: workspace, title: `K3s matrix ${template.id}`, sessionIds: [session.id] }
-      ctx.provide('workspaceRegistry', { list: () => [registeredWorkspace], get: () => registeredWorkspace } as never)
+      workspaces.length = 0
+      workspaces.push({ id: `k3s-matrix-${template.id}`, path: workspace, title: `K3s matrix ${template.id}`, sessionIds: [session.id] })
+      const registeredWorkspace = workspaces[0]!
       await ctx.pactflow.saveValidationProfiles({ workspaceId: registeredWorkspace.id, expectedRevision: 0,
         profiles: [{ id: 'diff-check', displayName: 'Diff check', command: 'git',
           args: ['diff', '--check', 'HEAD~1..HEAD'], timeoutMs: 10_000 }] })

@@ -6,7 +6,8 @@ import yaml from 'js-yaml'
 
 const credentialFile = resolve(process.env.DSH_CREDENTIAL_FILE ?? resolve(homedir(), '.dsh/.credentials.yaml'))
 const document = yaml.load(readFileSync(credentialFile, 'utf8'))
-const key = document?.refs?.DEEPSEEK_API_KEY
+// The ref may live under `refs:` (namespaced layout) or at the document top level.
+const key = document?.refs?.DEEPSEEK_API_KEY ?? document?.DEEPSEEK_API_KEY
 if (typeof key !== 'string' || key.length === 0) {
   throw new Error('real Worker E2E requires the DEEPSEEK_API_KEY credential ref')
 }
