@@ -140,19 +140,17 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
           .map(event => ({ type: event.type, data: event.data }))
         console.log(`spawnTrace=${JSON.stringify(spawnTrace)?.slice(0, 6_000)}`)
         console.log(`assistant=${JSON.stringify(session?.events.findLast(event => event.type === 'assistant/message')?.data)?.slice(0, 2_000)}`)
-        const spawnSessions = (scaffold.ctx.sessions as unknown as {
-          [Symbol.iterator]?: unknown
-        } & { values?: () => Iterable<{ header?: { id?: unknown; origin?: unknown } }> })
         try {
-          for (const other of spawnSessions.values?.() ?? []) {
-            const header = (other as { header?: { id?: unknown; origin?: unknown } }).header
-            if (header?.origin !== 'subagent') continue
-            const otherSession = scaffold.ctx.sessions.get(header.id as never)
-            if (otherSession === undefined) continue
-            const trace = otherSession.events
-              .filter(event => event.type === 'tool/call' || event.type === 'tool/result' || event.type === 'assistant/message')
+          // The Worker runs as its own child Session. Dump every non-root session
+          // (cwd, origin, tool calls/results, assistant text) so a silent Worker is
+          // visible: did it attempt a write and get denied, or never attempt one?
+          for (const other of scaffold.ctx.sessions.list()) {
+            if (other.id === session?.id) continue
+            const trace = other.events
+              .filter(event => event.type === 'tool/call' || event.type === 'tool/result'
+                || event.type === 'assistant/message' || event.type === 'turn/end')
               .map(event => ({ type: event.type, data: event.data }))
-            console.log(`subagent=${JSON.stringify(String(header.id))} trace=${JSON.stringify(trace).slice(0, 6_000)}`)
+            console.log(`child=${String(other.id)} cwd=${String(other.header.cwd)} origin=${String(other.header.origin)} trace=${JSON.stringify(trace).slice(0, 8_000)}`)
           }
         } catch { /* diagnostics only */ }
       }

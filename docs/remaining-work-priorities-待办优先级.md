@@ -39,7 +39,7 @@
 | --- | --- | --- |
 | 11 ◑ | 多宿主并发、真实依赖链矩阵 | **真实依赖链矩阵已完成**（`test:real-k3s-batch` suites 6/6 + 两节点 dogfood）；**跨进程锁互斥**已用真实 4 进程验证；剩**跨主机**（NFS/共享盘）语义未验证 |
 | 12 ✅ | 完整 `run-real-k3s-batch` 的 `suites` 阶段 | 2026-09-11 已运行：3 套件 6/6 + TTL 回收 + 零残留归零，全通过 |
-| 13 ◑ | 真实 worker 支线（当前 **blocked**） | 2026-09-11 取证：Worker 子会话 `completed` 但零文件改动——继承只读 orchestrator persona 与**宿主所有沙箱/批准策略**（批准固定 `never`）。已落地正确但不充分的一步（提供方支持时用 Worker persona 遮蔽只读 persona，单元测试覆盖）；**剩余阻塞在本仓之外**（需宿主沙箱策略允许委派 Worker 在隔离工作树写入） |
+| 13 ◑ | 真实 worker 支线（当前 **blocked**） | 2026-09-11 取证：Worker 子会话 `completed` 但零文件改动。已**排除**：沙箱边界（base bundle 默认 `workspace-write`，边界取 `session.header.cwd`，子会话 cwd 即工作树、在边界内）。已落地**部分**修复：提供方支持时用 Worker persona 遮蔽只读 persona（单元测试覆盖），复跑仍不产出提交。**剩余根因未定**——需在子会话 dispose 前捕获其 transcript，区分「未尝试写入」与「被拒」 |
 | 14 | A8 剩余：跨卡片未保存草稿并存 + 移动端 | 需资源卡夹具，构造与维护成本高 |
 | 15 | `check:release` 完整真实运行 | 网页零跳过 + 官方安装验证；需**已安装的官方 DSH CLI**（`DSH_CLI_ENTRY`，且禁止用源码回落）与全武装真实环境——属**上游阻断**（见 C） |
 
