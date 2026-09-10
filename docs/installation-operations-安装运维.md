@@ -120,7 +120,7 @@ pnpm run service:generate -- --platform systemd --dsh /absolute/path/to/dsh --pr
 
 ## 7. 升级、卸载与恢复
 
-升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 当前写入 13 类外部事件，同时以 read-only registration 读取 0.1.0 的 12 类词汇和 0.2.0 的 13 类词汇；升级不重写历史日志。
+升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 当前写入 **17** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_3`），同时以 read-only registration 读取 0.1.0 的 12 类词汇与 0.2.0 的 13 类词汇；升级不重写历史日志。
 
 卸载：
 
