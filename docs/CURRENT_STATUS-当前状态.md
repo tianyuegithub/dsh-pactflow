@@ -75,6 +75,11 @@
 - **A04**：Gitea 保护分支的 `waiting-review/waiting-checks` 协作闭环（当前遇 required approvals/status checks 即拒绝自动收口）；需真实受保护仓库的审核/CI 状态，属 B 类环境前置。
 - **R12/J9 窄接口重构**：四个宿主端口（`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost`）均已剥离整个 `ctx`，改为窄端口；剩余未做的是「跨进程锁/时钟/环境」的显式可注入端口（D 类设计建议），属更大重构。
 - **A09**：本文件即该建议的落地；历史批次记录未合并（保留在实施状态与 archive）。
+- **「已实现但未强制执行」的脚本（诚实清点，2026-09-11 穷尽扫描）**：
+  - `scripts/impact-list.schema.mjs`：实现 `development-plan` §380「B 类执行前给出精确影响清单（目标/分支/合并/清理）」的**结构校验**，但**无任何导入方**（全仓零引用、不在 package.json scripts）；即该要求目前靠人工遵循、无机器校验。**未删**（它对齐计划要求，属可用工具），改由此处显式记录为「未强制执行」。
+  - `scripts/evidence-schema.mjs`：`validateAcceptanceEvidenceFile`、`ACCEPTANCE_EVIDENCE_VERDICTS`、`ACCEPTANCE_EVIDENCE_CONCLUSIONS` 三个导出**零消费者**（其余导出在用：`validateAcceptanceEvidence`/`validateZeroProof`/`ACCEPTANCE_EVIDENCE_TARGETS`）。
+  - `src/validation-integrity.ts` 的 `validationExecutedCount`：零生产引用；其接线属 A03 提案待裁决项（见 `docs/decisions-a03-a12-裁决提案.md`），故**暂留不删**。
+  - 说明：`tests/` 与 `scripts/` 中「断言可空转」的形态已抽查（`toBeDefined()` 仅 6 处，均伴随失败路径断言，非空转）；未做穷尽式变异测试——那属工具链改动，不在本批。
 
 ## 5. 证据可靠性说明
 
