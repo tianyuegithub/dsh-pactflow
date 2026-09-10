@@ -2,6 +2,15 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 69 文件 / 543 测试、42 个 change 已归档、工作树干净、未推送）。
 
+## 2026-09-11 打包产物与源码一致性核对（发布产物不漂移）
+
+`presets/pactflow/plugin/index.js` 是**构建产物**（gitignore 第 10 行），也是发布 tarball 的一部分——若它与源码漂移，用户运行的就不是当前代码。核对结果：
+
+- **构建确定性**：先取产物 SHA256，`pnpm run build` 后再取，两次**完全相同**（`1e57c80b…`）→ 产物即「当前源码的构建结果」，不存在陈旧。
+- **修复确在产物内**：本会话的编排器守卫修复在产物中可见——`if (agent.session.header.origin === "subagent") return;`。
+- **测试跑的是产物而非 src**：`tests/domain.spec.ts` 与 `tests/review-authorization.spec.ts` 均 `import … from '../presets/pactflow/plugin/index.js'`，故编排器守卫等断言实际验证的是**发布产物**（比只测 src 更强）。
+- 结论：发布产物与源码一致，且该一致性由「构建确定性 + 测试导入产物 + `pnpm run check` 先构建」共同保证。
+
 ## 2026-09-11 核对计划的两条完成条件（静态可验部分）
 
 `docs/development-plan-开发计划.md` §1 列出「才能声称完成」的硬条件。对其**静态可验**的两条做了核对：
