@@ -25,9 +25,21 @@ describe('PactFlow project handover summary', () => {
     expect(summary.pendingCleanups).toHaveLength(1)
     expect(summary.pendingCleanups[0]).toMatchObject({ target: 'git:pactflow/need/node/x', retain: true })
     // Exact Git artifacts are referenced so the work is recoverable elsewhere.
+    // `validationsExecuted: 0` is the first-class "no automatic verification" signal
+    // (validation-integrity-signals), readable here rather than inferred elsewhere.
     expect(summary.artifacts).toEqual([
-      { runId: 'run', branch: 'pactflow/need/node/x', commit: 'b'.repeat(40) },
+      { runId: 'run', branch: 'pactflow/need/node/x', commit: 'b'.repeat(40), validationsExecuted: 0 },
     ])
+  })
+
+  it('reports the executed validation count per delivered artifact', () => {
+    const withValidations = structuredClone(snapshot) as typeof snapshot
+    withValidations.runs.byId.run.gitResult.validations = [
+      { command: 'git', args: ['diff', '--check'], timeoutMs: 1000, exitCode: 0, durationMs: 5 },
+      { command: 'node', args: ['test.js'], timeoutMs: 1000, exitCode: 0, durationMs: 7 },
+    ]
+    const summary = projectHandoverSummary(withValidations as never)
+    expect(summary.artifacts[0]?.validationsExecuted).toBe(2)
   })
 
   it('reports no project cleanly when none is bound', () => {

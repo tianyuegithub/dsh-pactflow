@@ -977,7 +977,17 @@ export interface PactFlowHandoverSummary {
   readonly needs: readonly { readonly id: string; readonly title: string; readonly phase: string; readonly revision: number }[]
   readonly nodes: readonly { readonly id: string; readonly needId: string; readonly state: string }[]
   /** Exact Git artifacts produced, so the work is recoverable without this plugin. */
-  readonly artifacts: readonly { readonly runId: string; readonly branch: string; readonly commit: string }[]
+  readonly artifacts: readonly {
+    readonly runId: string
+    readonly branch: string
+    readonly commit: string
+    /**
+     * Registered validation commands that actually ran for this delivery. Zero means
+     * the delivery carries NO automatic verification and must be read as such
+     * (validation-integrity-signals: "零自动验证必须可识别").
+     */
+    readonly validationsExecuted: number
+  }[]
   /** Responsibilities still open (pending/failed), including retained failure scenes. */
   readonly pendingCleanups: readonly {
     readonly id: string

@@ -16,7 +16,7 @@
 
 ### 已交付的部分
 - ②「验证基础设施改动可见」：`validation-integrity.ts` 记录 `validationSensitiveChanges`（已入 `gitResult`），`validation-integrity.spec.ts` 覆盖。
-- ③的一半「零验证可识别」：数据层可识别（`validations` 为空即零验证）；**但 UI/release 未做显式标识**（**未接线**：`validationExecutedCount` 有实现与单测但零生产引用——本文件即其裁决入口）。
+- ③的一半「零验证可识别」：**已交付**（change `harden-wire-validation-count`）——复核合同后确认「Host SHALL 能报告执行数量、零可识别」属**既有合同未接线**（非新目标），故已把 `validationExecutedCount` 接进只读移交摘要（`artifacts[].validationsExecuted`）。**前端 UI 的视觉标记仍未做**（属本提案 A03-a 的 UI 部分）。
 
 ### 未交付（需裁决的最小切片）
 

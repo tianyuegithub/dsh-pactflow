@@ -5,7 +5,7 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 65 文件 / 525 测试 / 13 包产物，全绿；`git diff --check` 通过；
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 65 文件 / 526 测试 / 13 包产物，全绿；`git diff --check` 通过；
 `openspec validate --all --strict` 通过（**29 个 spec / 35 个已归档 change**）。**本批已提交到本地分支，尚未推送**（提交数随改动增长，故不在此写死）。
 
 ## 1. 隔离层能力（A 类，已有证据）
@@ -78,7 +78,7 @@
 - **「已实现但未强制执行」的脚本（诚实清点，2026-09-11 穷尽扫描）**：
   - `scripts/impact-list.schema.mjs`：**已接线**（change `harden-enforce-impact-list-gate`）——`run-real-k3s-batch` 现对变更型运行施加门禁：提供清单则要求**已授权**（`pending` 被拒），未提供则**显式告警**门禁未施加。
   - `scripts/evidence-schema.mjs`：`validateAcceptanceEvidenceFile`、`ACCEPTANCE_EVIDENCE_VERDICTS`、`ACCEPTANCE_EVIDENCE_CONCLUSIONS` 三个导出**零消费者**（其余导出在用：`validateAcceptanceEvidence`/`validateZeroProof`/`ACCEPTANCE_EVIDENCE_TARGETS`）。
-  - `src/validation-integrity.ts` 的 `validationExecutedCount`：零生产引用；其接线属 A03 提案待裁决项（见 `docs/decisions-a03-a12-裁决提案.md`），故**暂留不删**。
+  - `src/validation-integrity.ts` 的 `validationExecutedCount`：**已接线**（change `harden-wire-validation-count`）——复核合同后确认「零自动验证必须可识别」属**既有合同未接线**（非新目标），已接入只读移交摘要（`artifacts[].validationsExecuted`，零即表示无自动验证）。前端 UI 的视觉标记仍未做。
   - 说明：`tests/` 与 `scripts/` 中「断言可空转」的形态已抽查（`toBeDefined()` 仅 6 处，均伴随失败路径断言，非空转）；未做穷尽式变异测试——那属工具链改动，不在本批。
   - **静默吞错排查（2026-09-11）**：对 `src/` 全部 catch 块做穷尽扫描（28 处候选），逐一核对后**未发现真正静默吞错的块**——其中「租约续期失败」`catch { controller.abort(...) }`、探针清理失败 `catch { success=false; stages.push(...) }`、取消路径 `catch { failures.push(error) }` 等均**有显式动作**（中止/记失败/入集合）。**结论：本仓 `src/` 无「catch 后什么都不做」的块**（此前修复的静默吞错在 `scripts/` 的 crash-restart runner，已由 `real-suite-hygiene` 处置）。
 

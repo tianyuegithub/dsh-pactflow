@@ -7,6 +7,7 @@
  * mutates state and never writes anything.
  */
 import type { PactFlowHandoverSummary } from './types.ts'
+import { validationExecutedCount } from './validation-integrity.ts'
 
 export type { PactFlowHandoverSummary }
 
@@ -22,7 +23,12 @@ export function projectHandoverSummary(snapshot: AnyRecord): PactFlowHandoverSum
 
   const artifacts = runs
     .filter(run => run?.gitResult?.branch !== undefined && run?.gitResult?.commit !== undefined)
-    .map(run => ({ runId: String(run.id), branch: String(run.gitResult.branch), commit: String(run.gitResult.commit) }))
+    .map(run => ({
+      runId: String(run.id), branch: String(run.gitResult.branch), commit: String(run.gitResult.commit),
+      // Zero is a first-class signal here: "delivered but nothing was verified" must be
+      // readable from the handover, not inferred from an empty array elsewhere.
+      validationsExecuted: validationExecutedCount({ validations: run.gitResult.validations ?? [] }),
+    }))
     .sort((left, right) => left.runId.localeCompare(right.runId))
 
   const pendingCleanups = cleanups
