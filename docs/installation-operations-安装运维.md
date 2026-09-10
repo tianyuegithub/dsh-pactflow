@@ -37,7 +37,9 @@ dsh --profile web
 
 `dump-config` 必须出现 `# == dsh-pactflow`、`pactflowPresetRoot`、一个 `pactflow` Host row 和现有 `agent-presets` row。启动后，新会话模式列表必须出现 PactFlow；Standard 等其它模式不应出现 PactFlow 工具或控制台入口。
 
-离线交付目录还包含 `dsh-pactflow-0.2.1-source.bundle` 和 `deepseek-harness-pactflow-prerequisites-aa888ad0fb.bundle`：前者保存插件截至发布提交的完整 Git 历史，后者保存尚未进入官方 DSH 的三提交上游前置分支。安装或恢复前，在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`；安装包或任一源码包校验失败都必须停止。
+**离线交付目录（发布时打包，非本仓构建产物）**：正式离线交付目录除 tarball 外还包含 `dsh-pactflow-<version>-source.bundle`（插件截至发布提交的完整 Git 历史）与 `deepseek-harness-pactflow-prerequisites-<hash>.bundle`（尚未进入官方 DSH 的上游前置分支），以及校验清单 `SHA256SUMS`；安装或恢复前在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`，安装包或任一源码包校验失败都必须停止。
+
+> 现状说明（2026-09-11 核实）：`pnpm run pack` 只产出 `dist/dsh-pactflow-<version>.tgz`；**上述 source bundle 与 `SHA256SUMS` 由发布流程另行生成，本仓当前没有生成它们的脚本**。因此本地 `dist/` 内通常看不到它们——请勿对不存在的 `SHA256SUMS` 执行校验，也不要据本节误认为它们已随构建产出。
 
 ## 3. 非密钥 Settings
 
