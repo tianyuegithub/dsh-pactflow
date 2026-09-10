@@ -158,6 +158,8 @@ Host 重启期间 K3s Job 可以继续。PactFlow Agent 重新成为 live 后，
 
 判定要点：审批弹窗的摘要必须与调用参数一一对应（防「批准 A 却记录 B」）；任何自动化代替点击都会使该验收失去意义。
 
+**可行性已核实（2026-09-11）**：相邻 DSH 开发仓的 Web 测试脚手架**已具备完整的审批 UI 交互能力**——`apps/web/tests/approval-composer.e2e.ts:122` 使用 `panel.getByRole('button', { name: 'Allow once' }).click()` 驱动原生审批弹窗，且支持切换 Access mode（`:70`）。因此该验收的**断言部分是自动化就绪的**；**唯一需要你本人的是「作出批准决定」这一步**（不可由脚本代按）。若需要，可把 `e2e/pactflow-real-approval.e2e.spec.ts` 从 `expect.fail` 骨架扩成「脚本驱动 UI 到弹窗 → 你点击 → 脚本断言落账」的半自动形态——**该扩写尚未做**。
+
 ### 9.2 推送与合并（需显式授权）
 
 本地提交已完成，**推送属外发动作，需你显式授权**。授权后执行：
