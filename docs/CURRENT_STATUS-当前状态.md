@@ -36,6 +36,7 @@
 | 保留窗口与陈旧标记（A05 扩展） | passed | `failure-scene-retention-policy`；`retention-policy.spec.ts`（10：窗口/陈旧 + 容量汇总 + 有界测量 + 端到端体积） |
 | 保留现场磁盘容量（A05 扩展） | passed | `failure-scene-retention-policy`；`retainedBytes`/`measured`/`overBudget` 只读呈现，`sizeBytes` 有界测量（未测量不谎报总量）；绝不自动删除 |
 | 跨进程工作区文件锁 | passed | `multiprocess-workspace-lock`；`workspace-lock-multiprocess.spec.ts`（2：**真实 4 进程**×15 迭代经锁精确=60，无锁对照 <60，防止空转断言）。此前该锁零测试 |
+| Worker 工具作用域（A08） | passed | `worker-tool-scope`；`domain.spec.ts#readonly-orchestrator`（Worker 子会话保留 `bash/write/edit` 且 `write` 可执行；编排器仍被拒）+ 真实 `test:real-worker` 通过 |
 
 ## 2. 真实环境（B 类）
 
@@ -43,7 +44,7 @@
 | --- | --- | --- |
 | 真实 K3s（`test:real-k3s`） | passed | 2026-09-11 复跑：首次 5/6（负载偶发）、立即复跑 6/6；真实模型 + 真实 Job/Pod |
 | 真实 Gitea 收口（`test:real-gitea`） | passed | 2026-09-11 **F05 之后复跑**：真实受保护 PR 合并，断言 `merge_commit_sha === release.commit`（精确 merge SHA）且隔离复验路径成立，临时 ref 清零；见 `docs/b-class-k3s-acceptance-20260911.md` §6 |
-| 真实 worker 支线（`test:real-worker`） | **blocked**（根因已缩小） | 稳定 `PactFlow Worker produced no commit`。2026-09-11 取证：Worker 子会话以 `stopReason=completed` 结束但**未改动任何文件**（连未提交改动都没有）。已**排除**两个假设并逐一**核实机制**：① 沙箱边界不是原因——base bundle 默认 `workspace-write`，其边界取 `session.header.cwd`，而子会话 cwd 即任务工作树（在边界内、写入被允许）；② 只读 persona 是**部分**原因——已用 `PACTFLOW_WORKER_PERSONA` 在支持时遮蔽只读 persona（单元测试覆盖），但复跑仍不产生提交。**剩余根因未定**：需在子会话 dispose **之前**捕获其 transcript，以区分「模型根本没尝试写入」与「尝试但被拒」。 |
+| 真实 worker 支线（`test:real-worker`） | **passed** | 2026-09-11 **修复后通过**。根因是本仓缺陷：`agent/session-start` 的编排器只读守卫**错误地施加到被委派的 Worker 子会话**，拦截其全部修改类工具（Worker 原话：`every mutating tool in my scope is blocked by the orchestrator guard before it reaches the filesystem`）。修复：守卫仅作用于编排器（`origin='subagent'` 直接返回）；并把 Worker 自身报告折入失败原因以便诊断。change `harden-worker-tool-scope`（已归档） |
 | 真实探针账本对账（`test:real-probe-ledger`） | **passed** | 2026-09-11 真实集群 2/2（UID 前置删除 + 404 幂等 + 未确认身份失败关闭）；骨架已实现 |
 | 真实跨进程崩溃重启（`test:real-crash-restart`） | **passed** | 2026-09-11 多进程基建（独立宿主子进程 + SIGKILL + 同 DSH_HOME 重启）两次稳定通过；非终态 Run 及精确 K3s 身份从持久事实恢复 |
 | 真实人工审批界面（`test:real-approval`） | **not-run** | 需用户本人在原生 UI 操作 |

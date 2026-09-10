@@ -609,9 +609,14 @@ describe('PactFlow domain foundation', () => {
         nodeId: noCommit.id, expectedRevision: noCommit.revision, provider: 'spawn',
         leaseDurationMs: 60_000, prompt: 'no commit',
       })
+      // A Git-side rejection must also carry the Worker's own report, so a silent
+      // no-op Worker is distinguishable from one that claimed success.
       expect(missingCommit).toMatchObject({
         node: { state: 'failed' },
-        run: { state: 'failed', outcome: 'PactFlow Worker produced no commit' },
+        run: {
+          state: 'failed',
+          outcome: expect.stringMatching(/^PactFlow Worker produced no commit — Worker reported: done$/),
+        },
       })
 
       const currentProject = ctx.pactflow.project(session.id).project!
@@ -898,15 +903,24 @@ describe('PactFlow domain foundation', () => {
     expect(ctx.tools.schemas(ordinary).map(schema => schema.name).sort()).toEqual(['bash', 'read', 'write'])
 
     const workerSession = ctx.sessions.create(SessionId('pactflow-worker'), {
-      meta: { agentPreset: 'standard' },
+      meta: { agentPreset: 'standard', origin: 'subagent' },
     })
     const worker = { id: workerSession.id, session: workerSession } as Agent
     const workerScope = await scopeUnder(worker, agent)
     Reflect.set(worker, 'ctx', workerScope.ctx)
     for (const name of ['bash', 'write', 'edit']) workerScope.ctx.tools.register(tool(name))
+    // A delegated Worker child (origin `subagent`) must NOT receive the read-only
+    // orchestrator guard, or every mutating tool is denied before the filesystem and
+    // the Worker can never deliver its commit.
+    agentEvents(ctx, worker).emit('agent/session-start', { source: 'start' })
     expect(ctx.tools.schemas(worker).map(schema => schema.name)).toEqual(expect.arrayContaining([
       'bash', 'write', 'edit',
     ]))
+    const workerWrite = await ctx.tools.execute({
+      callId: ToolCallId('worker-write'), name: 'write', arguments: {}, agent: worker,
+      signal: new AbortController().signal,
+    })
+    expect(workerWrite).toMatchObject({ isError: false })
 
     await workerScope.dispose()
     await ordinaryScope.dispose()

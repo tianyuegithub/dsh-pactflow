@@ -1,5 +1,17 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 修复真实 worker 支线（本仓缺陷；OpenSpec change harden-worker-tool-scope，已归档）
+
+- 现象：`test:real-worker` 长期稳定失败于 `PactFlow Worker produced no commit`；子会话 `stopReason=completed`、工作树零改动。
+- **先补可诊断性**（本轮关键突破）：Git 侧结算被拒时把 Worker 自身有界 outcome 折入失败原因。真实运行随即给出 Worker 原话：`every mutating tool in my scope is blocked by the orchestrator guard before it reaches the filesystem.`
+- **真因（本仓缺陷）**：`src/agent/index.ts` 的 `agent/session-start` 钩子对**所有** Agent 施加「编排器只读守卫」（deny `bash`/`pwsh`/`write`/`edit`），未区分被委派的 **Worker 子会话**，于是 Worker 的修改类工具在到达文件系统前被拒。
+- 更正此前错误结论：早前记录的「宿主沙箱/批准策略」经机制核实不成立（base bundle 默认 `workspace-write`，边界取会话 cwd，子会话 cwd 即任务工作树），已在 `6518f37` 更正。
+- 修复：守卫在 `agent.session.header.origin === 'subagent'` 时直接返回；编排器自身只读语义不变。保留 `PACTFLOW_WORKER_PERSONA`（解决独立的只读 persona 文本叠加因素）。
+- 对抗性验证：把 origin 判定改为 `false &&` → 回归断言失败（`write` 返回 `isError: true`）；已还原。
+- 真实复跑：`pnpm run test:real-worker` **1/1 通过（exit 0）**，此前稳定失败。
+- 验证：`pnpm run check` 62 文件 / 514 测试 / 13 包产物；`pnpm run typecheck`；`git diff --check`；`openspec validate --all --strict` 24/24。
+- 未推送。
+
 ## 2026-09-11 真实 K3s 全批次 + 跨进程锁验证（P3-11/12 推进）
 
 - **P3-12 完整 `test:real-k3s-batch` 真实集群运行**：`suites` 阶段 3 套件 **6/6 通过**（k3s-worker 1/1、harness-probes 2/2、harness-tasks 3/3：claude/codex/opencode）→ `ttl` 阶段观测到 `ttl-after-finished` 回收（`pf-ttl-probe-mtvxhcnk`）→ `zero-proof` 阶段 `{"zero":true,"remaining":[]}`。全程真实模型 + 真实 Job/Pod。

@@ -617,12 +617,16 @@ export async function executeClaimedImpl(
           await host.resolveGitAuth(git),
         )
       } catch (error) {
+        // Diagnosability: a Git-side rejection alone ("produced no commit") hides
+        // whether the Worker reported success or silently did nothing. Fold the
+        // Worker's own bounded outcome into the failure so a human can tell them apart.
+        const workerReport = host.subagentOutcome(result)
         const settled = host.settleRunInSession(session, {
           runId: owned.run.id,
           claimId: owned.run.claimId,
           expectedNodeRevision: owned.node.revision,
           state: 'failed',
-          outcome: host.boundedOutcome(error),
+          outcome: host.boundedOutcome(`${host.boundedOutcome(error)} — Worker reported: ${workerReport}`),
         })
         host.retainLocalFailure(session, settled.run)
         return settled

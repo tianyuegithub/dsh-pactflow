@@ -33,6 +33,11 @@ export function apply(ctx: Context): void {
   const policies = new Map<string, () => void>()
   ctx.on('agent/session-start', ({ agent }) => {
     if (policies.has(agent.id)) return
+    // The read-only orchestrator guard belongs to the pactflow orchestrator session
+    // alone. A delegated Worker is its own `subagent`-origin session running in an
+    // isolated task worktree: it MUST be able to write and commit there, so applying
+    // this deny list to it would block every mutating tool before the filesystem.
+    if (agent.session.header.origin === 'subagent') return
     const visible = new Set(agent.ctx.tools.schemas(agent).map(tool => tool.name))
     const deny = ORCHESTRATOR_DIRECT_TOOLS.filter(tool => visible.has(tool))
     const disposeRestriction = deny.length === 0
