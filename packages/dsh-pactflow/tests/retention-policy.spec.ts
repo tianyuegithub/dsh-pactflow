@@ -13,7 +13,6 @@ import {
   PACTFLOW_DEFAULT_RETENTION_MS,
   isRetentionOverdue,
   measureRetainedSceneBytes,
-  retentionRemainingMs,
   summarizeRetainedScenes,
   summarizeRetentionCapacity,
 } from '../src/retention-policy.ts'
@@ -21,14 +20,6 @@ import {
 const DAY = 24 * 60 * 60 * 1_000
 
 describe('PactFlow failure-scene retention policy', () => {
-  it('reports the remaining retention window', () => {
-    const record = { id: 'c1', retain: true, retainUntil: 1_000 + 5 * DAY }
-    expect(retentionRemainingMs(record, 1_000)).toBe(5 * DAY)
-    expect(retentionRemainingMs(record, 1_000 + 4 * DAY)).toBe(DAY)
-    // Once past the window there is nothing left to wait for.
-    expect(retentionRemainingMs(record, 1_000 + 6 * DAY)).toBe(0)
-  })
-
   it('marks a retained scene overdue only past its retention window', () => {
     const record = { id: 'c1', retain: true, retainUntil: 1_000 + DAY }
     expect(isRetentionOverdue(record, 1_000 + DAY)).toBe(false)

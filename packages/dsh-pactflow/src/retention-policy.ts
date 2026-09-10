@@ -25,12 +25,6 @@ export interface PactFlowRetainedScene {
   readonly sizeBytes?: number
 }
 
-/** Remaining retention window in ms (0 once the window has passed). */
-export function retentionRemainingMs(record: PactFlowRetainedScene, now: number): number {
-  if (record.retainUntil === undefined) return 0
-  return Math.max(0, record.retainUntil - now)
-}
-
 /**
  * Whether a retained scene has passed its retention window. Non-retained records
  * are never overdue; a retained record without a window never expires.
