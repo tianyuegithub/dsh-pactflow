@@ -92,6 +92,15 @@ export interface PactFlowHarnessTemplateView {
   readonly memoryLimit: string
 }
 
+/** Declared capability of one configured Harness (A10); serializable for the Remote boundary. */
+export interface PactFlowHarnessCapabilityView {
+  readonly templateId: string
+  readonly harness: PactFlowHarness
+  readonly apiMode: PactFlowApiMode
+  readonly structuredOutput: 'native' | 'text'
+  readonly maxLevel: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
+}
+
 /** User-facing Harness image and resource profile, independent of any model. */
 export interface PactFlowHarnessProfileSettings {
   readonly id: string

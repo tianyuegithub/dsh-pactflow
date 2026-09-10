@@ -102,6 +102,7 @@ import { PactFlowProjectCapacity } from './project-capacity.ts'
 import { PactFlowExecutionCapacity } from './execution-capacity.ts'
 import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
 import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAttemptBudget } from './run-budget.ts'
+import { harnessCapabilityProfile } from './harness-capabilities.ts'
 import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
 import { staleCodeInputs } from './input-staleness.ts'
 import { PACTFLOW_DEFAULT_RETENTION_BYTES, PACTFLOW_DEFAULT_RETENTION_MS, measureRetainedSceneBytes, summarizeRetentionCapacity } from './retention-policy.ts'
@@ -132,6 +133,7 @@ import type {
   PactFlowHealth,
   PactFlowHarnessTemplateView,
   PactFlowHarnessProfileSettings,
+  PactFlowHarnessCapabilityView,
   PactFlowHarborArtifactOption,
   PactFlowInfrastructureSettings,
   PactFlowInfrastructureProbeRequest,
@@ -1981,6 +1983,32 @@ export class PactFlowService extends TypertRemoteService {
   listK3sTemplates(signal?: AbortSignal): readonly (PactFlowHarnessTemplateView | PactFlowHarnessProfileSettings)[] {
     signal?.throwIfAborted()
     return this.infrastructure?.listTemplates() ?? this.k3s?.listTemplates() ?? []
+  }
+
+  /**
+   * A10: the declared capability profile of each configured Harness (protocol,
+   * structured output, highest supported level). This is the queryable form of the
+   * declaration, so a capability claim is inspectable rather than implicit.
+   */
+  @Remote('harnessCapabilities')
+  listHarnessCapabilities(signal?: AbortSignal): readonly PactFlowHarnessCapabilityView[] {
+    signal?.throwIfAborted()
+    const templates = this.infrastructure?.listTemplates() ?? this.k3s?.listTemplates() ?? []
+    const seen = new Set<string>()
+    const views: PactFlowHarnessCapabilityView[] = []
+    for (const template of templates) {
+      if (seen.has(template.id)) continue
+      seen.add(template.id)
+      const profile = harnessCapabilityProfile(template.harness)
+      views.push({
+        templateId: template.id,
+        harness: profile.harness,
+        apiMode: profile.apiMode,
+        structuredOutput: profile.structuredOutput,
+        maxLevel: profile.maxLevel,
+      })
+    }
+    return views
   }
 
   /** List model endpoints independently selectable from compatible Harness profiles. */

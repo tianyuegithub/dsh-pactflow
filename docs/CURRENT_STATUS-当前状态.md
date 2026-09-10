@@ -5,7 +5,7 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 62 文件 / 514 测试 / 13 包产物，全绿；`git diff --check` 通过；
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 62 文件 / 515 测试 / 13 包产物，全绿；`git diff --check` 通过；
 `openspec validate --all --strict` 通过（spec 数见下）。**本批已提交到本地分支（2 个提交：OpenSpec 治理与文档 / 实现与测试），尚未推送。**
 
 ## 1. 隔离层能力（A 类，已有证据）
@@ -28,7 +28,7 @@
 | 验证完整性信号（A03 部分） | passed | `validation-integrity-signals`；`validation-integrity.spec.ts`（5） |
 | 本地失败保留（A05） | passed | `local-failure-retention`；`local-failure-retention.spec.ts`（2）、`cleanup-retention-guard.spec.ts`（2） |
 | 运行预算（A11） | passed | `run-budgets`；`run-budgets.spec.ts`（6，含 `retryNode` 强制 + **输出上限由预算单一权威决定并实际生效**） |
-| Harness 能力分级（A10） | passed | `harness-capability-levels`；`harness-capabilities.spec.ts`（8，含**不可证级别不虚报**对抗性守卫）+ `k3s-cleanup.spec.ts#capability-level`（镜像/API 探针均报级别）+ **真实集群** `pactflow-harness-probes`（四模板 2/2，级别断言成立） |
+| Harness 能力分级（A10） | passed | `harness-capability-levels`；`harness-capabilities.spec.ts`（9：级别推导 + **不可证级别不虚报**对抗守卫 + **声明可查询**）+ `k3s-cleanup.spec.ts#capability-level`（镜像/API 探针均报级别）+ **真实集群** `pactflow-harness-probes`（四模板 2/2） |
 | 只读项目移交（A12） | passed | `project-handover`；`project-handover.spec.ts`（3） |
 | 代码输入过期追踪（F03 增强） | **partial** | `code-input-staleness`；检测器与记录已就位并通过测试，但**触发路径当前不可达**（成功节点不可重跑）——见 §4 |
 | 宿主窄端口（R12/J9） | passed | `host-narrow-ports`；`host-narrow-ports.spec.ts`（4：cleanup/probe + 派发/恢复均在不含 `ctx` 的宿主替身上驱动）+ `cleanup-retention-guard.spec.ts`（2）。`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost` 四个端口均已剥离整个 `ctx` |

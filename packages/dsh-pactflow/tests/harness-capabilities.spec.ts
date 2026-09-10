@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import PactFlowService from '../lib/index.js'
 import {
   PACTFLOW_HARNESS_CAPABILITY_LEVELS,
   PACTFLOW_HOST_ATTESTABLE_LEVELS,
@@ -86,5 +90,42 @@ describe('PactFlow harness capability levels', () => {
       { name: 'verification', state: 'succeeded' },
       { name: 'some-future-stage', state: 'succeeded' },
     ] })).toBe('connection')
+  })
+})
+
+describe('PactFlow declared harness capability query', () => {
+  it('exposes the declared capability profile of each configured Harness', async () => {
+    // The declaration is only meaningful if it is queryable; this asserts the
+    // service actually wires `harnessCapabilityProfile` for configured templates.
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(PactFlowService, {
+      infrastructure: {
+        clusters: [], registries: [], modelConnections: [], workerPools: [], gitProviders: [],
+        templates: [
+          { id: 'claude', harness: 'claude', apiMode: 'anthropic-messages',
+            image: `harbor.example/worker@sha256:${'a'.repeat(64)}`, model: 'm', baseUrl: 'https://m.invalid',
+            modelSecretName: 'sec', cpuRequest: '1', memoryRequest: '1Gi', cpuLimit: '1', memoryLimit: '1Gi' },
+          { id: 'codex', harness: 'codex', apiMode: 'openai-responses',
+            image: `harbor.example/worker@sha256:${'b'.repeat(64)}`, model: 'm', baseUrl: 'https://m.invalid',
+            modelSecretName: 'sec', cpuRequest: '1', memoryRequest: '1Gi', cpuLimit: '1', memoryLimit: '1Gi' },
+        ],
+      },
+    })
+    try {
+      const declared = ctx.pactflow.listHarnessCapabilities()
+      expect(declared.map(view => view.templateId).sort()).toEqual(['claude', 'codex'])
+      const byId = Object.fromEntries(declared.map(view => [view.templateId, view]))
+      // Claude returns structured tool-call output natively; codex does not.
+      expect(byId.claude?.structuredOutput).toBe('native')
+      expect(byId.codex?.structuredOutput).toBe('text')
+      // The declared ceiling is the highest *attestable* level, never an aspiration.
+      expect(byId.claude?.maxLevel).toBe(harnessProbeMaxLevel())
+      expect(byId.codex?.maxLevel).toBe(harnessProbeMaxLevel())
+      expect(byId.codex?.apiMode).toBe('openai-responses')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })

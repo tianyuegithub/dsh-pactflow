@@ -1,5 +1,14 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 接线 Harness 能力声明查询 + 未接线助手排查（change harden-harness-capability-query，已归档）
+
+- **排查方法**：逐模块统计「每个导出符号在自身文件之外的引用数」，找「导出且被单测引用、但生产未接线」的助手（对照基线：本轮早前发现的死代码 `maxOutputBytes`）。
+- **发现真实缺口**：`harnessCapabilityProfile` 零生产引用，而 `harness-capability-levels` 的场景以「**查询**任一受支持 Harness 的能力声明」表述——声明无法查询，测试在死代码上通过。
+- 修复：新增 `PactFlowHarnessCapabilityView`（可序列化）与 `@Remote('harnessCapabilities') listHarnessCapabilities()`（按模板 id 去重，上限取可证级别）；`harness-capabilities.spec.ts` 新增断言（claude `native` / codex `text` / `maxLevel===harnessProbeMaxLevel()`）。
+- **非缺口判定（诚实）**：`validationExecutedCount` 与 `retentionRemainingMs` 同为未接线，但经核对**不构成缺口**——契约要求的「运行结果」与「保留清单」已由 `snapshot()`（含 `gitResult.validations`）与 `retentionStatus()`（含 `retainUntil`）提供，计数/剩余时间可据数据得出；属薄包装，**刻意不加线也不删**（加线冗字段、删线破坏既有单测），已在 change 内记录理由。
+- 验证：`pnpm run check` 62 文件 / 515 测试 / 13 包产物；`pnpm run typecheck`；`git diff --check`；`openspec validate --all --strict` 24/24。
+- 未推送。
+
 ## 2026-09-11 修复真实 worker 支线（本仓缺陷；OpenSpec change harden-worker-tool-scope，已归档）
 
 - 现象：`test:real-worker` 长期稳定失败于 `PactFlow Worker produced no commit`；子会话 `stopReason=completed`、工作树零改动。
