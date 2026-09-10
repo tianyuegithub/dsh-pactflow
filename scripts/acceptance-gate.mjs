@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { ACCEPTANCE_EVIDENCE_TARGETS, validateAcceptanceEvidence, validateZeroProof } from './evidence-schema.mjs'
+import { ACCEPTANCE_EVIDENCE_TARGETS, validateAcceptanceEvidenceFile, validateZeroProof } from './evidence-schema.mjs'
 import { resolveEvidenceBatch, walkEvidence } from './evidence-path.mjs'
 
 function evidenceRoot() {
@@ -47,9 +47,7 @@ export function collectForGate(batch) {
   let zeroProof
   walkEvidence(batchDir, (name, full) => {
     if (name === 'evidence.json') {
-      const parsed = JSON.parse(readFileSync(full, 'utf8'))
-      validateAcceptanceEvidence(parsed)
-      evidences.push(parsed)
+      evidences.push(validateAcceptanceEvidenceFile(full))
     } else if (name === 'zero-proof.json') {
       const parsed = JSON.parse(readFileSync(full, 'utf8'))
       validateZeroProof(parsed)

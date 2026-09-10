@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   ACCEPTANCE_EVIDENCE_TARGETS,
-  validateAcceptanceEvidence,
+  validateAcceptanceEvidenceFile,
   validateZeroProof,
 } from './evidence-schema.mjs'
 import { resolveEvidenceBatch, walkEvidence } from './evidence-path.mjs'
@@ -14,9 +14,7 @@ function evidenceRoot() {
 }
 
 function readEvidenceFile(path) {
-  const parsed = JSON.parse(readFileSync(path, 'utf8'))
-  validateAcceptanceEvidence(parsed)
-  return parsed
+  return validateAcceptanceEvidenceFile(path)
 }
 
 /** 扫描某批次证据目录，汇总每个 target 的证据；缺字段/出枚举即抛错（复用 release-web-report 严格语义）。 */
