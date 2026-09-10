@@ -5,8 +5,8 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 66 文件 / 530 测试 / 13 包产物，全绿；`git diff --check` 通过；
-`openspec validate --all --strict` 通过（**31 个 spec / 38 个已归档 change**）。**本批已提交到本地分支，尚未推送**（提交数随改动增长，故不在此写死）。
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 67 文件 / 534 测试 / 13 包产物，全绿；`git diff --check` 通过；
+`openspec validate --all --strict` 通过（**32 个 spec / 39 个已归档 change**）。**本批已提交到本地分支，尚未推送**（提交数随改动增长，故不在此写死）。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
