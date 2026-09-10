@@ -80,6 +80,7 @@
   - `scripts/evidence-schema.mjs`：`validateAcceptanceEvidenceFile`、`ACCEPTANCE_EVIDENCE_VERDICTS`、`ACCEPTANCE_EVIDENCE_CONCLUSIONS` 三个导出**零消费者**（其余导出在用：`validateAcceptanceEvidence`/`validateZeroProof`/`ACCEPTANCE_EVIDENCE_TARGETS`）。
   - `src/validation-integrity.ts` 的 `validationExecutedCount`：零生产引用；其接线属 A03 提案待裁决项（见 `docs/decisions-a03-a12-裁决提案.md`），故**暂留不删**。
   - 说明：`tests/` 与 `scripts/` 中「断言可空转」的形态已抽查（`toBeDefined()` 仅 6 处，均伴随失败路径断言，非空转）；未做穷尽式变异测试——那属工具链改动，不在本批。
+  - **静默吞错排查（2026-09-11）**：对 `src/` 全部 catch 块做穷尽扫描（28 处候选），逐一核对后**未发现真正静默吞错的块**——其中「租约续期失败」`catch { controller.abort(...) }`、探针清理失败 `catch { success=false; stages.push(...) }`、取消路径 `catch { failures.push(error) }` 等均**有显式动作**（中止/记失败/入集合）。**结论：本仓 `src/` 无「catch 后什么都不做」的块**（此前修复的静默吞错在 `scripts/` 的 crash-restart runner，已由 `real-suite-hygiene` 处置）。
 
 ## 5. 证据可靠性说明
 
