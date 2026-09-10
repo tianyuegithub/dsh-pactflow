@@ -1,5 +1,15 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 真实 K3s 全批次 + 跨进程锁验证（P3-11/12 推进）
+
+- **P3-12 完整 `test:real-k3s-batch` 真实集群运行**：`suites` 阶段 3 套件 **6/6 通过**（k3s-worker 1/1、harness-probes 2/2、harness-tasks 3/3：claude/codex/opencode）→ `ttl` 阶段观测到 `ttl-after-finished` 回收（`pf-ttl-probe-mtvxhcnk`）→ `zero-proof` 阶段 `{"zero":true,"remaining":[]}`。全程真实模型 + 真实 Job/Pod。
+- **P3-11 跨进程锁互斥（新增能力 verified）**：OpenSpec change `harden-multiprocess-lock-verification`（已归档）。发现 `src/workspace-lock.ts` 的 `withWorkspaceFileLock`（跨进程互斥的**唯一**实现）**此前零测试**。新增 `tests/workspace-lock-multiprocess.spec.ts`：**真实 4 个子进程** × 15 次迭代经锁递增共享计数 → 精确 **60**；并配**无锁对照**必须 **<60**，证明断言非空转。
+  - 过程缺陷（测试自身）：首版用 `execFileSync`（子进程**顺序**执行），对照用例失败 `expected 60 to be less than 60` → 暴露测试根本不并发；改为 `spawn` + `Promise.all` 后通过。连续 3 次运行稳定 2/2。
+  - 归档时 `openspec archive` 写入占位 `## Purpose`（TBD）导致 `validate --all` 失败；已直接改写主 spec 的 Purpose 修复。
+- 验证：`pnpm run check` 62 文件 / 514 测试 / 13 包产物；`pnpm run typecheck`；`git diff --check`；`openspec validate --all --strict` **23/23**。
+- 已知边界：**跨主机**（NFS/共享盘）锁语义未验证；`check:release` 仍阻断于上游（需已安装官方 DSH CLI）。
+- 未推送。
+
 ## 2026-09-11 OpenSpec change harden-harness-capability-honesty（A10 有界增量：能力级别诚实性，已归档）
 
 - 修复两处诚实性缺口：① 级别推导在 `k3s-worker.ts` 有一份本地镜像，与 `harness-capabilities.ts` 并列维护（存在漂移风险）；② `tool-invocation`/`verification` 无探针证据，此前仅靠「无对应分支」隐式不虚报，无常量/测试守护。

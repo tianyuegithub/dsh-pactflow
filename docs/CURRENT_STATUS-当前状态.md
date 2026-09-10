@@ -5,7 +5,7 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 61 文件 / 512 测试 / 13 包产物，全绿；`git diff --check` 通过；
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 62 文件 / 514 测试 / 13 包产物，全绿；`git diff --check` 通过；
 `openspec validate --all --strict` 通过（spec 数见下）。**本批已提交到本地分支（2 个提交：OpenSpec 治理与文档 / 实现与测试），尚未推送。**
 
 ## 1. 隔离层能力（A 类，已有证据）
@@ -35,6 +35,7 @@
 | K3s 批次收尾阶段（R04） | **passed** | `k3s-batch-finalization`；2026-09-11 真实集群验证 TTL 回收（两次）与零残留归零（两态）；见 `docs/b-class-k3s-acceptance-20260911.md` |
 | 保留窗口与陈旧标记（A05 扩展） | passed | `failure-scene-retention-policy`；`retention-policy.spec.ts`（10：窗口/陈旧 + 容量汇总 + 有界测量 + 端到端体积） |
 | 保留现场磁盘容量（A05 扩展） | passed | `failure-scene-retention-policy`；`retainedBytes`/`measured`/`overBudget` 只读呈现，`sizeBytes` 有界测量（未测量不谎报总量）；绝不自动删除 |
+| 跨进程工作区文件锁 | passed | `multiprocess-workspace-lock`；`workspace-lock-multiprocess.spec.ts`（2：**真实 4 进程**×15 迭代经锁精确=60，无锁对照 <60，防止空转断言）。此前该锁零测试 |
 
 ## 2. 真实环境（B 类）
 
@@ -48,7 +49,8 @@
 | 真实人工审批界面（`test:real-approval`） | **not-run** | 需用户本人在原生 UI 操作 |
 | `run-real-k3s-batch` 的 TTL/ZeroProof 阶段 | **passed** | 2026-09-11 真实集群运行通过（含修复 namespace 缺失与假阳性风险后复跑） |
 | 真实待办网页 dogfood（`test:real-todo`，两节点依赖链） | **passed** | 2026-09-11 真实模型 + 真实 Job/Pod + 真实 Git：A 建 `todo.html`，B 以 A 为代码输入在其基线上文档化；宿主验证 `node test-todo-smoke.js` exit 0；真实浏览器驱动增/勾选/删除/刷新持久通过。**此运行发现并修复 K3s 代码输入断链**；见 `docs/b-class-k3s-acceptance-20260911.md` §7 |
-| 多宿主并发、真实依赖链矩阵 | **not-run** | 未在真实集群运行 |
+| 真实依赖链矩阵（真实集群） | **passed** | 2026-09-11 完整 `test:real-k3s-batch`：`suites` 阶段 3 套件 6/6（k3s-worker / harness-probes / harness-tasks×3）+ TTL 回收 + 零残留归零；两节点依赖链另见 `test:real-todo` |
+| 多宿主并发 | **partial** | 跨进程文件锁已用**真实 4 进程**验证互斥（`workspace-lock-multiprocess.spec.ts`）；跨主机（NFS/共享盘）语义未验证 |
 
 ## 3. 上游与决策边界
 
