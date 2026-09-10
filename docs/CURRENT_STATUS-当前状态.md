@@ -21,8 +21,8 @@
 | 展示/错误脱敏（A10） | passed | `credential-safe-display`；`display-redaction.spec.ts`（6） |
 | 工具链卫生（A3/A1/A4） | passed | `tooling-hygiene`；`script-hygiene.spec.ts`（5）、`acceptance-gate.spec.ts`（6） |
 | 发布产物完整性（A2） | passed | `release-artifact-integrity`；`release-artifact.spec.ts`（14）+ 注入验证 |
-| 前端请求顺序（A06） | passed | `client-request-ordering`；`client-request-ordering.spec.ts`（6） |
-| 运行时数据新鲜度（R11） | passed | `runtime-data-freshness`；`runtime-freshness.spec.ts`（7） |
+| 前端请求顺序（A06） | passed | `client-request-ordering`；`client-request-ordering.spec.ts`（6）。**接线已核实**：`project-panel.tsx` 用独立 `refreshGate`/`gitSecretsGate`（`invalidate→next→isLatest`）——即评审点名的 refresh 与 gitSecrets 两个 effect 已有请求身份/取消检查 |
+| 运行时数据新鲜度（R11） | passed | `runtime-data-freshness`；`runtime-freshness.spec.ts`（7）。**接线已核实**：`overlay.tsx` 实际调用 `createFreshnessTracker` 与 `PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS` |
 | 集群连接身份（A07） | passed | `cluster-connection-identity`；`cluster-identity.spec.ts`（3） |
 | 时间合同分离（A02） | passed | `run-time-contracts`；`run-time-contracts.spec.ts`（3） |
 | 验证完整性信号（A03 部分） | passed | `validation-integrity-signals`；`validation-integrity.spec.ts`（5） |
