@@ -1,5 +1,12 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 本批提交后的真实环境回归验证（22 提交后）
+
+- 目的：本批提交改动了真实路径代码（`k3s-worker.ts` 的代码输入折入与清理、`host/dispatch.ts`、`project-handover.ts` 等），需确认**无回归**。
+- 真实集群复跑 `pnpm run test:real-k3s`（真实模型 + 真实 Job/Pod）：**3 个套件 6/6 全通过**——k3s-harness-tasks 3/3（claude/codex/opencode）、harness-probes 2/2、k3s-worker 1/1。
+- 残留核对：`pactflow` namespace 无本轮 Job/Pod；验收远程 `pactflow/need/node/*` 分支数**未增加**（仍为 7 个历史残留），即本轮未产生新的分支泄漏。
+- 结论：本批改动在真实路径上行为正确、无回归。
+
 ## 2026-09-11 证据管线端到端验证（补：收敛重构的真实执行验证）
 
 - 背景：上一项「收敛证据读取/校验为唯一路径」（change `harden-consolidate-evidence-validation`）改动了会被真实命令使用的 `acceptance-gate.mjs` 与 `evidence-collect.mjs`，但当时**只有单测**覆盖。
