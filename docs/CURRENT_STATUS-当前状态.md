@@ -5,8 +5,8 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 65 文件 / 526 测试 / 13 包产物，全绿；`git diff --check` 通过；
-`openspec validate --all --strict` 通过（**29 个 spec / 35 个已归档 change**）。**本批已提交到本地分支，尚未推送**（提交数随改动增长，故不在此写死）。
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 65 文件 / 528 测试 / 13 包产物，全绿；`git diff --check` 通过；
+`openspec validate --all --strict` 通过（**30 个 spec / 37 个已归档 change**）。**本批已提交到本地分支，尚未推送**（提交数随改动增长，故不在此写死）。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
@@ -38,6 +38,7 @@
 | 跨进程工作区文件锁 | passed | `multiprocess-workspace-lock`；`workspace-lock-multiprocess.spec.ts`（2：**真实 4 进程**×15 迭代经锁精确=60，无锁对照 <60，防止空转断言）。此前该锁零测试 |
 | Worker 工具作用域（A08） | passed | `worker-tool-scope`；`domain.spec.ts#readonly-orchestrator`（Worker 子会话保留 `bash/write/edit` 且 `write` 可执行；编排器仍被拒）+ 真实 `test:real-worker` 通过 |
 | 真实套件自清理（新） | passed | `real-suite-hygiene`；`test:real-crash-restart` 清理可验证且失败可见（此前静默泄漏远程分支） |
+| 验证脚本可运行（新） | passed | `verification-script-runnability`；`script-hygiene.spec.ts`（7：逐个 `node --check` + 超时常量先于顶层 try）；**`verify:profile:dev` 真实跑通**（此前因 TDZ `ReferenceError` 从未运行） |
 
 ## 2. 真实环境（B 类）
 
@@ -58,7 +59,7 @@
 
 | 项 | 类型 | 说明 |
 | --- | --- | --- |
-| 官方 DSH 安装/启动/升级/卸载验收 | C（上游） | 兼容性受 `externalEventProducers` 等能力约束；每次官方新版本发布时复核 |
+| 官方 DSH 安装/启动/升级/卸载验收 | C（上游） | 完整发布通道需**已安装的官方 JavaScript CLI**（`verify:profile` 禁止源码回落）。本机 `dsh` 为源码版包装（`0.1.5-rc.2`），故 release 通道仍阻断；**但开发通道 `verify:profile:dev` 本轮已真实跑通**（install→boot→upgrade→remove→clean boot），见 §1 |
 | 远程企业平台（kubeconfig 托管/多租户/中心服务端） | D（已裁决非目标） | 目标架构 §5 永久非目标 |
 | 节点准入时机、严格全局 FIFO | D（已裁决） | 决策 1B / §15-A6；不得收紧/静默更改 |
 | `deployed` 枚举语义（merged vs deployed） | D（**已裁决：保持现状** 2026-09-11） | 仍表示「已合并/已交付」；不擅改领域枚举 |

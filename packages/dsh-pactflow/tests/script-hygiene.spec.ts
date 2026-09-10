@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -62,5 +63,34 @@ describe('PactFlow typecheck entry hygiene', () => {
     expect(source).toContain('--noEmit')
     expect(source).not.toContain('rmSync')
     expect(source).not.toContain('tsdown')
+  })
+})
+
+describe('PactFlow verification-script hygiene', () => {
+  const packageRoot = resolve(import.meta.dirname, '..', '..', '..')
+  const scriptsRoot = join(packageRoot, 'scripts')
+
+  it('parses every verification script (a syntactically broken gate never runs)', () => {
+    // A gate that cannot even be parsed is worse than no gate: it reports failure
+    // (or hangs) for reasons unrelated to what it verifies. Parse them all.
+    for (const name of readdirSync(scriptsRoot)) {
+      if (!name.endsWith('.mjs')) continue
+      const file = join(scriptsRoot, name)
+      // Throws on a syntax error.
+      execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })
+    }
+  })
+
+  it('does not reference timeout constants before their declaration', () => {
+    // `verify-profile.mjs` once used COMMAND_TIMEOUT_MS inside a top-level try that
+    // precedes its `const` — a temporal-dead-zone ReferenceError that made the whole
+    // gate unrunnable. Guard the invariant: a timeout const must be declared before
+    // the first top-level `try {` that could call `run(...)`.
+    const source = readFileSync(join(scriptsRoot, 'verify-profile.mjs'), 'utf8')
+    const declIndex = source.indexOf('const COMMAND_TIMEOUT_MS')
+    const tryIndex = source.indexOf('try {')
+    expect(declIndex, 'COMMAND_TIMEOUT_MS must be declared').toBeGreaterThan(-1)
+    expect(tryIndex, 'expected a top-level try block').toBeGreaterThan(-1)
+    expect(declIndex).toBeLessThan(tryIndex)
   })
 })

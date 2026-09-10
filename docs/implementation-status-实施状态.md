@@ -1,5 +1,14 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 修复不可运行的发布门禁 verify-profile（TDZ；change harden-verify-profile-tdz，已归档）
+
+- **发现**：`scripts/verify-profile.mjs` 从第一次调用即抛 `ReferenceError: Cannot access 'COMMAND_TIMEOUT_MS' before initialization`——常量声明在顶层 `try`（首个 `runDsh` 调用处）**之后**，属暂时性死区。
+- **影响面**：`pnpm run verify:profile` 与 `verify:profile:dev` **从未真正运行过**；`check:release` 的首个真实步骤即 `verify:profile`，故该发布门禁同样从未跨过此点。比「缺门禁」更糟：它以与验证对象无关的原因报错。
+- **修复**：两常量上移至顶层 `try` 之前。此后 `verify:profile:dev` **真实跑通**：`install → boot → upgrade → remove → clean boot passed`；release 通道不再 TDZ 崩溃，而给出设计好的明确错误（`Set DSH_CLI_ENTRY …`）。
+- **守卫**：`tests/script-hygiene.spec.ts` 新增 2 项——逐个 `node --check` 全部 `scripts/*.mjs`；断言 `COMMAND_TIMEOUT_MS` 声明早于首个顶层 `try {`。
+- 验证：`pnpm run check` 65 文件 / 528 测试；`openspec validate --all --strict` 30/30。
+- 未推送。
+
 ## 2026-09-11 本批提交后的真实环境回归验证（22 提交后）
 
 - 目的：本批提交改动了真实路径代码（`k3s-worker.ts` 的代码输入折入与清理、`host/dispatch.ts`、`project-handover.ts` 等），需确认**无回归**。

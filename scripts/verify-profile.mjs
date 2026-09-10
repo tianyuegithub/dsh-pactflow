@@ -15,6 +15,13 @@ const tarball = resolve(root, `dist/dsh-pactflow-${packageVersion}.tgz`)
 const testHome = mkdtempSync(join(tmpdir(), 'dsh-pactflow-profile-'))
 const environment = { ...process.env, DSH_HOME: testHome }
 
+// Bound every child process: no verification step may wait forever.
+// Declared BEFORE the top-level try below: these are read by the first runDsh()
+// call inside it. While they sat after the try, the module's temporal dead zone
+// threw a ReferenceError, so this gate never actually ran.
+const COMMAND_TIMEOUT_MS = 120_000
+const BOOT_TIMEOUT_MS = 120_000
+
 try {
   accessSync(dshEntry, constants.R_OK)
   if (runtime.kind === 'development' && process.env.DSH_SKIP_BUILD !== '1') run('pnpm', ['run', 'build:lib'], dshSource)
@@ -52,8 +59,7 @@ try {
 }
 
 // Bound every child process: no verification step may wait forever.
-const COMMAND_TIMEOUT_MS = 120_000
-const BOOT_TIMEOUT_MS = 120_000
+// (Declared above the top-level try — see note there.)
 
 function run(command, args, cwd) {
   return execFileSync(command, args, {
