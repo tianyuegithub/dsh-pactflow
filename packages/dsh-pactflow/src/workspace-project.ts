@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { withWorkspaceFileLock } from './workspace-lock.ts'
+import { redactUrlCredentials } from './redaction.ts'
 import { pactFlowWorkspaceProjectSchema } from './schema.ts'
 import type {
   PactFlowWorkspaceGitStatus,
@@ -47,7 +48,7 @@ export async function inspectWorkspaceGit(path: string): Promise<PactFlowWorkspa
   return {
     initialized: true,
     ...(branch === undefined || branch === '' ? {} : { branch }),
-    ...(remoteUrl === undefined || remoteUrl === '' ? {} : { remoteUrl }),
+    ...(remoteUrl === undefined || remoteUrl === '' ? {} : { remoteUrl: redactUrlCredentials(remoteUrl) }),
     hasCommit: await gitOptional(path, ['rev-parse', '--verify', 'HEAD']) !== undefined,
     clean: entries.length === 0,
     changedFiles: entries.length - untrackedFiles,

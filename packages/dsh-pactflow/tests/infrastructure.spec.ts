@@ -262,6 +262,46 @@ describe('PactFlow infrastructure resources', () => {
     }))).toThrow(/Credential ref is invalid/)
   })
 
+  it('permits cleartext HTTP only for a loopback endpoint and rejects a remote cleartext provider', () => {
+    // A local loopback endpoint is an explicit local exception.
+    expect(() => new PactFlowInfrastructure(settings({
+      gitProviders: [{
+        id: 'local', displayName: 'Local', kind: 'gitea', baseUrl: 'http://127.0.0.1:3000',
+        tokenCredentialRef: 'LOCAL_TOKEN',
+      }],
+    }))).not.toThrow()
+    // A remote endpoint must use HTTPS.
+    expect(() => new PactFlowInfrastructure(settings({
+      gitProviders: [{
+        id: 'remote', displayName: 'Remote', kind: 'gitea', baseUrl: 'http://git.example:3000',
+        tokenCredentialRef: 'REMOTE_TOKEN',
+      }],
+    }))).toThrow(/HTTPS unless it is a local loopback/)
+  })
+
+  it('matches a remote to its provider by host and registered API subpath, ignoring transport ports', () => {
+    // A registered subpath must be an exact prefix of the remote path.
+    const subpath = new PactFlowInfrastructure(settings({
+      gitProviders: [{
+        id: 'gitea', displayName: 'Gitea', kind: 'gitea', baseUrl: 'https://git.example/gitea',
+        tokenCredentialRef: 'GITEA_TOKEN',
+      }],
+    }))
+    expect(subpath.matchGitea('https://git.example/gitea/owner/repo.git'))
+      .toMatchObject({ owner: 'owner', repo: 'repo' })
+    // A remote outside the registered subpath must not resolve to that provider.
+    expect(subpath.matchGitea('https://git.example/other/owner/repo.git')).toBeUndefined()
+    // SSH remote (port 22) vs HTTPS provider (port 443): ports must not be compared.
+    const ssh = new PactFlowInfrastructure(settings({
+      gitProviders: [{
+        id: 'gitea', displayName: 'Gitea', kind: 'gitea', baseUrl: 'https://git.example:3000',
+        tokenCredentialRef: 'GITEA_TOKEN',
+      }],
+    }))
+    expect(ssh.matchGitea('ssh://git@git.example:22/owner/repo.git'))
+      .toMatchObject({ owner: 'owner', repo: 'repo' })
+  })
+
   it('enforces FIFO capacity, exposes counters, and removes cancelled waiters', async () => {
     const infrastructure = new PactFlowInfrastructure(settings())
     const releaseFirst = await infrastructure.acquire('default')

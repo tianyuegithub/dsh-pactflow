@@ -69,11 +69,7 @@ export function apply(ctx: Context): void {
       username: { type: 'string', description: 'HTTPS Git username; configure together with credential_ref.' },
       credential_ref: { type: 'string', description: 'DSH Credentials reference containing the HTTPS token; never the token value.' },
       k3s_git_secret_name: { type: 'string', description: 'Existing K3s Secret containing id_ed25519 and known_hosts for remote Workers.' },
-      gitea_base_url: { type: 'string', description: 'Credential-free Gitea base URL; configure with all gitea_* fields.' },
-      gitea_owner: { type: 'string', description: 'Gitea repository owner.' },
-      gitea_repo: { type: 'string', description: 'Gitea repository name.' },
-      gitea_token_credential_ref: { type: 'string', description: 'DSH Credentials reference containing a Gitea API token.' },
-      gitea_username: { type: 'string', description: 'Optional Gitea account name when the Credential stores a password instead of an API token.' },
+      gitea_provider_id: { type: 'string', description: 'Registered Git Provider id; the Host resolves endpoint, credential ref and repository identity from it. Never pass a raw endpoint.' },
       validation_profile_ids: {
         type: 'array',
         description: 'User-owned validation profile IDs; the Host resolves commands and never accepts command text from the model.',
@@ -89,13 +85,7 @@ export function apply(ctx: Context): void {
         ...args.username === undefined ? {} : { username: args.username },
         ...args.credential_ref === undefined ? {} : { credentialRef: args.credential_ref },
         ...args.k3s_git_secret_name === undefined ? {} : { k3sGitSecretName: args.k3s_git_secret_name },
-        ...args.gitea_base_url === undefined ? {} : { giteaBaseUrl: args.gitea_base_url },
-        ...args.gitea_owner === undefined ? {} : { giteaOwner: args.gitea_owner },
-        ...args.gitea_repo === undefined ? {} : { giteaRepo: args.gitea_repo },
-        ...args.gitea_token_credential_ref === undefined
-          ? {}
-          : { giteaTokenCredentialRef: args.gitea_token_credential_ref },
-        ...args.gitea_username === undefined ? {} : { giteaUsername: args.gitea_username },
+        ...args.gitea_provider_id === undefined ? {} : { giteaProviderId: args.gitea_provider_id },
         ...args.validation_profile_ids === undefined ? {} : { validationProfileIds: args.validation_profile_ids },
       }).then(jsonObject)
     },

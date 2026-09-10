@@ -1,6 +1,6 @@
-import type { Context } from '@deepseek-ai/cordis'
 import type { PactFlowK3sWorker, PactFlowProbeCleanupRecorder } from '../k3s-worker.ts'
 import type { PactFlowProbeCleanupLedger } from '../probe-ledger.ts'
+import type { PactFlowRunCleanupLedger } from '../run-ledger.ts'
 
 /**
  * Host surface required by the probe cleanup responsibility seam. The service
@@ -8,9 +8,11 @@ import type { PactFlowProbeCleanupLedger } from '../probe-ledger.ts'
  */
 export interface ProbeRecoveryHost {
   readonly probeLedger: PactFlowProbeCleanupLedger
+  readonly runLedger: PactFlowRunCleanupLedger
   readonly k3s: PactFlowK3sWorker | undefined
   readonly k3sByPool: Map<string, PactFlowK3sWorker>
-  readonly ctx: Context
+  /** Narrow log port instead of the whole Cordis Context (R12). */
+  readonly logger: { warn(message: string, ...args: unknown[]): void }
   boundedOutcome(value: unknown): string
 }
 
@@ -27,7 +29,8 @@ export function probeCleanupRecorderImpl(
 /** Reconcile persisted probe cleanup responsibilities with the configured providers. */
 export async function reconcileProbeCleanupsImpl(host: ProbeRecoveryHost): Promise<boolean> {
   const entries = await host.probeLedger.list()
-  if (entries.length === 0) return true
+  const runEntries = await host.runLedger.list()
+  if (entries.length === 0 && runEntries.length === 0) return true
   const workers = [
     ...(host.k3s === undefined ? [] : [host.k3s]),
     ...host.k3sByPool.values(),
@@ -37,7 +40,7 @@ export async function reconcileProbeCleanupsImpl(host: ProbeRecoveryHost): Promi
   for (const entry of entries) {
     const worker = workers.find(candidate => candidate.connectionFingerprint() === entry.fingerprint)
     if (worker === undefined) {
-      host.ctx.logger.warn('PactFlow probe cleanup "%s" has no matching configured provider; responsibility retained', entry.jobName)
+      host.logger.warn('PactFlow probe cleanup "%s" has no matching configured provider; responsibility retained', entry.jobName)
       continue
     }
     try {
@@ -45,7 +48,27 @@ export async function reconcileProbeCleanupsImpl(host: ProbeRecoveryHost): Promi
       await host.probeLedger.remove(entry.jobName)
     } catch (error) {
       failed += 1
-      host.ctx.logger.warn('PactFlow probe cleanup "%s" failed: %s', entry.jobName, host.boundedOutcome(error))
+      host.logger.warn('PactFlow probe cleanup "%s" failed: %s', entry.jobName, host.boundedOutcome(error))
+    }
+  }
+  // Run creation intents: only a confirmed UID is auto-reconciled; an intent that
+  // never got a UID keeps an explicit unknown responsibility (no name-based delete).
+  for (const entry of runEntries) {
+    const worker = workers.find(candidate => candidate.connectionFingerprint() === entry.fingerprint)
+    if (worker === undefined) {
+      host.logger.warn('PactFlow run cleanup "%s" has no matching configured provider; responsibility retained', entry.jobName)
+      continue
+    }
+    if (entry.jobUid === undefined) {
+      host.logger.warn('PactFlow run cleanup "%s" has no confirmed UID; explicit recovery required', entry.jobName)
+      continue
+    }
+    try {
+      await worker.cleanupRunIdentity(entry)
+      await host.runLedger.remove(entry.jobName)
+    } catch (error) {
+      failed += 1
+      host.logger.warn('PactFlow run cleanup "%s" failed: %s', entry.jobName, host.boundedOutcome(error))
     }
   }
   return failed === 0

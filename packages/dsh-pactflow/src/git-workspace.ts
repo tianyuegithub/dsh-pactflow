@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { validationSensitiveChanges } from './validation-integrity.ts'
 import type {
   BindPactFlowGitRequest,
   PactFlowGitAuth,
@@ -20,6 +21,7 @@ import type {
 } from './types.ts'
 
 const GIT_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/
+const COMMIT = /^[0-9a-f]{40,64}$/
 const K8S_NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/
 const VALIDATION_ENV_KEYS = [
   'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'CI', 'GIT_TERMINAL_PROMPT',
@@ -34,6 +36,7 @@ interface PactFlowGitCommitEvidence {
   readonly branch: string
   readonly commit: string
   readonly validations: readonly PactFlowValidationEvidence[]
+  readonly validationSensitiveChanges?: readonly string[]
 }
 
 export interface PactFlowClosingTaskRef {
@@ -113,6 +116,7 @@ export class PactFlowGitWorkspace {
     runId: PactFlowRunId,
     node: PactFlowNode,
     binding: PactFlowGitBinding,
+    codeInputs: readonly { readonly dependency?: string; readonly branch: string; readonly commit: string }[] = [],
   ): Promise<PactFlowGitRunSpec> {
     const root = await this.requireWorkspaceRoot(workspace)
     const currentUrl = this.credentialFreeRemote(await this.git(root, ['remote', 'get-url', binding.remote]))
@@ -130,6 +134,12 @@ export class PactFlowGitWorkspace {
       remoteUrl: binding.remoteUrl,
       defaultBranch: binding.defaultBranch,
       baseCommit,
+      // F03: predecessor code inputs become part of this Run's immutable execution
+      // baseline, fetched by exact commit so no moving branch can drift underneath.
+      ...(codeInputs.length === 0 ? {} : { codeInputs: codeInputs.map(input => ({
+        ...input.dependency === undefined ? {} : { dependency: input.dependency },
+        branch: input.branch, commit: input.commit,
+      })) }),
       branch,
       worktreePath,
       validationCommands: binding.validationCommands,
@@ -141,17 +151,49 @@ export class PactFlowGitWorkspace {
     }
   }
 
-  /** Materialize the exact branch and worktree named by a claimed Run. */
-  async materialize(workspace: string | undefined, spec: PactFlowGitRunSpec): Promise<void> {
+  /**
+   * Materialize the exact branch and worktree named by a claimed Run.
+   *
+   * Local Workers run *in* this worktree, so declared code inputs are folded here.
+   * A remote (K3s) Worker instead receives the exact input commits and folds them
+   * inside its own container (it alone holds the Git credentials there); the local
+   * worktree then only needs to fast-forward to the returned commit, so folding is
+   * suppressed to keep that fast-forward exact.
+   */
+  async materialize(
+    workspace: string | undefined,
+    spec: PactFlowGitRunSpec,
+    options: { readonly foldCodeInputs?: boolean } = {},
+  ): Promise<void> {
     const root = await this.requireWorkspaceRoot(workspace)
     if (await this.exists(spec.worktreePath)) throw new Error('PactFlow Git worktree path already exists')
     await mkdir(dirname(spec.worktreePath), { recursive: true, mode: 0o700 })
     await this.git(root, ['worktree', 'add', '-b', spec.branch, spec.worktreePath, spec.baseCommit])
+    // F03: fold each declared code input (exact predecessor commit) into the task
+    // baseline before the Worker starts, so a dependent task can build on it.
+    if (options.foldCodeInputs !== false) {
+      for (const input of spec.codeInputs ?? []) {
+        try {
+          await this.git(root, ['fetch', '--no-tags', spec.remote, input.commit])
+        } catch {
+          throw new Error(`PactFlow code input ${input.branch} is not available at ${input.commit}`)
+        }
+        try {
+          await this.git(spec.worktreePath, ['merge', '--no-ff', '--no-edit', input.commit])
+        } catch {
+          throw new Error(`PactFlow code input ${input.branch} conflicts with the task baseline`)
+        }
+      }
+    }
     const branch = await this.git(spec.worktreePath, ['branch', '--show-current'])
     const commit = await this.git(spec.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
-    if (branch !== spec.branch || commit !== spec.baseCommit) {
+    if (branch !== spec.branch) {
       throw new Error('PactFlow Git worktree materialized with unexpected identity')
     }
+    // The Worktree HEAD now includes the code inputs; the Worker's commit must still
+    // descend from this combined baseline.
+    const expectedBase = await this.git(spec.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
+    if (commit !== expectedBase) throw new Error('PactFlow Git worktree materialized with unexpected identity')
   }
 
   /** Validate a clean commit, run Host commands, then prove the commit and tree stayed unchanged. */
@@ -165,7 +207,13 @@ export class PactFlowGitWorkspace {
     }
     const after = await this.validateCommit(spec)
     if (after.commit !== before.commit) throw new Error('PactFlow validation changed the Worker commit')
-    return { ...after, validations }
+    // Surface (do not block on) task commits that rewrite the verification wiring.
+    let sensitive: readonly string[] = []
+    try {
+      const diff = await this.git(spec.worktreePath, ['diff', '--name-only', `${before.commit}~1..${before.commit}`])
+      sensitive = validationSensitiveChanges(diff)
+    } catch { sensitive = [] }
+    return { ...after, validations, ...(sensitive.length === 0 ? {} : { validationSensitiveChanges: sensitive }) }
   }
 
   private async validateCommit(spec: PactFlowGitRunSpec): Promise<Omit<PactFlowGitCommitEvidence, 'validations'>> {
@@ -413,7 +461,17 @@ export class PactFlowGitWorkspace {
     }
   }
 
-  /** Verify the integration branch still contains exactly the expected merge set. */
+  /**
+   * Verify the integration branch contains exactly the authorized delivery: every
+   * expected task commit is an ancestor of the integration commit, no commit
+   * outside the expected commits' ancestry closure (plus the first-parent merge
+   * commits) was introduced, and every first-parent merge's extra parent is an
+   * expected commit.
+   *
+   * A code-input dependency makes one task's history contain another's, so the
+   * expected set is a dependency closure rather than a set of independent
+   * one-merge-per-task commits.
+   */
   private async verifyTaskSet(
     repository: string,
     branches: readonly { readonly branch: string; readonly expectedCommit?: string }[],
@@ -424,30 +482,62 @@ export class PactFlowGitWorkspace {
     if (expected.length === 0 || expected.length !== branches.length) {
       throw new Error('PactFlow integration task-set requires an expected commit for every task')
     }
-    const lines = await this.git(repository, ['rev-list', '--first-parent', '--parents', `${baseCommit}..${integrationCommit}`])
     const expectedSet = new Set(expected)
-    const merged = new Set<string>()
-    let cursor = integrationCommit
-    for (const line of lines.split('\n').filter(Boolean)) {
-      const [commit, firstParent, taskParent, ...extraParents] = line.trim().split(/\s+/u)
-      if (commit !== cursor || firstParent === undefined || taskParent === undefined || extraParents.length !== 0
-        || !expectedSet.has(taskParent) || merged.has(taskParent)) {
+    for (const commit of expected) {
+      try {
+        await this.git(repository, ['merge-base', '--is-ancestor', commit, integrationCommit])
+      } catch {
+        throw new Error(`PactFlow integration branch does not contain verified task ${commit}`)
+      }
+    }
+    // Commits reachable from the base are pre-existing; everything else must be
+    // authorized (an expected commit's ancestry) or a first-parent merge commit.
+    const baseAncestors = new Set(
+      (await this.git(repository, ['rev-list', baseCommit])).split('\n').filter(Boolean),
+    )
+    const allowed = new Set<string>()
+    for (const commit of expected) {
+      for (const ancestor of (await this.git(repository, ['rev-list', commit])).split('\n').filter(Boolean)) {
+        if (!baseAncestors.has(ancestor)) allowed.add(ancestor)
+      }
+    }
+    const firstParentLines = (await this.git(repository, [
+      'rev-list', '--first-parent', '--parents', `${baseCommit}..${integrationCommit}`,
+    ])).split('\n').filter(Boolean)
+    for (const line of firstParentLines) {
+      const [commit, firstParent, ...extraParents] = line.trim().split(/\s+/u)
+      if (commit === undefined || firstParent === undefined || extraParents.length === 0) {
+        // Every new first-parent commit must be a merge; a plain commit means an
+        // unauthorized change slipped onto the integration branch.
         throw new Error('PactFlow integration task-set contains an unexpected commit')
       }
-      merged.add(taskParent)
-      cursor = firstParent
+      allowed.add(commit)
+      for (const parent of extraParents) {
+        if (!expectedSet.has(parent)) {
+          throw new Error('PactFlow integration task-set merges an unexpected commit')
+        }
+      }
     }
-    if (cursor !== baseCommit || merged.size !== expectedSet.size || [...expectedSet].some(commit => !merged.has(commit))) {
-      throw new Error('PactFlow integration branch task-set digest changed after verification')
+    const introduced = (await this.git(repository, [
+      'rev-list', `${baseCommit}..${integrationCommit}`,
+    ])).split('\n').filter(Boolean)
+    if (introduced.some(commit => !allowed.has(commit))) {
+      throw new Error('PactFlow integration task-set contains an unexpected commit')
     }
   }
 
-  /** Fetch the default branch after Gitea merge and require the integration commit in its ancestry. */
+  /**
+   * Fetch the default branch after a Gitea merge, then verify the exact merge
+   * commit the provider reported. The delivery identity must be that commit,
+   * never the (mutable) default-branch tip: an ancestor check alone would bind a
+   * commit that was never validated. Returns the exact merge commit.
+   */
   async verifyClosingMerged(
     workspace: string | undefined,
     binding: PactFlowGitBinding,
     integrationCommit: string,
     secret?: PactFlowGitAuthSecret,
+    mergeCommit?: string,
   ): Promise<string> {
     const root = await this.requireWorkspaceRoot(workspace)
     await this.withAuthentication(secret, async (environment) => {
@@ -456,15 +546,76 @@ export class PactFlowGitWorkspace {
         `refs/heads/${binding.defaultBranch}:refs/remotes/${binding.remote}/${binding.defaultBranch}`,
       ], environment)
     })
-    const merged = await this.git(root, [
+    const defaultTip = await this.git(root, [
       'rev-parse', '--verify', `refs/remotes/${binding.remote}/${binding.defaultBranch}^{commit}`,
     ])
+    // The integration commit must be reachable from the default branch.
     try {
-      await this.git(root, ['merge-base', '--is-ancestor', integrationCommit, merged])
+      await this.git(root, ['merge-base', '--is-ancestor', integrationCommit, defaultTip])
     } catch {
       throw new Error('PactFlow Gitea default branch does not contain the integration commit')
     }
-    return merged
+    if (mergeCommit === undefined) {
+      // Without a provider-reported merge commit there is no exact delivery identity.
+      throw new Error('PactFlow Gitea merge did not report an exact merge commit')
+    }
+    if (!COMMIT.test(mergeCommit)) throw new Error('PactFlow Gitea reported an invalid merge commit')
+    // The exact merge commit must itself be reachable on the default branch.
+    try {
+      await this.git(root, ['merge-base', '--is-ancestor', mergeCommit, defaultTip])
+    } catch {
+      throw new Error('PactFlow Gitea default branch does not contain the reported merge commit')
+    }
+    // The integration commit must be contained in the exact merge commit.
+    try {
+      await this.git(root, ['merge-base', '--is-ancestor', integrationCommit, mergeCommit])
+    } catch {
+      throw new Error('PactFlow Gitea merge commit does not contain the integration commit')
+    }
+    return mergeCommit
+  }
+
+  /**
+   * Re-run the registered validation commands against the exact merge commit in a
+   * throwaway detached worktree, proving the delivered tree — not merely an
+   * ancestor — passed validation.
+   */
+  async revalidateMergeCommit(
+    workspace: string | undefined,
+    binding: PactFlowGitBinding,
+    mergeCommit: string,
+    secret?: PactFlowGitAuthSecret,
+    authorizedCommands: readonly PactFlowValidationCommand[] = [],
+  ): Promise<PactFlowGitCommitEvidence> {
+    assertPactFlowValidationAuthorization(binding, authorizedCommands)
+    const root = await this.requireWorkspaceRoot(workspace)
+    const fetchRef = `refs/pactflow/merge/${mergeCommit}`
+    await this.withAuthentication(secret, async (environment) => {
+      await this.git(root, ['fetch', '--no-tags', binding.remote, mergeCommit], environment)
+      // Name the fetched object under a temporary ref so `worktree add` can resolve
+      // it; the ref is removed in the finally below and never accumulates.
+      await this.git(root, ['update-ref', fetchRef, mergeCommit])
+    })
+    const worktreePath = join(this.worktreeRoot, 'merge-verify', mergeCommit)
+    if (await this.exists(worktreePath)) throw new Error('PactFlow merge validation worktree already exists')
+    await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
+    await this.git(root, ['worktree', 'add', '--detach', worktreePath, mergeCommit])
+    try {
+      const head = await this.git(worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
+      if (head !== mergeCommit) throw new Error('PactFlow merge validation worktree does not match the merge commit')
+      const dirty = await this.git(worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
+      if (dirty.length > 0) throw new Error('PactFlow merge validation left local changes')
+      const validations: PactFlowValidationEvidence[] = []
+      for (const command of this.validationCommands(authorizedCommands)) {
+        validations.push(await this.runValidation(worktreePath, command))
+      }
+      const after = await this.git(worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
+      if (after !== mergeCommit) throw new Error('PactFlow merge validation changed the merge commit')
+      return { branch: binding.defaultBranch, commit: mergeCommit, validations }
+    } finally {
+      await this.git(root, ['worktree', 'remove', '--force', worktreePath]).catch(() => undefined)
+      await this.git(root, ['update-ref', '-d', fetchRef]).catch(() => undefined)
+    }
   }
 
   /** Remove only the clean local worktree and branch created for closing. */

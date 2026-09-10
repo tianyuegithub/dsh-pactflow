@@ -1,5 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle } from '@deepseek-ai/dsh-session'
 import type { PACTFLOW_EVENT_TYPES } from '../domain.ts'
 import type { PactFlowExecutionCapacity } from '../execution-capacity.ts'
@@ -27,7 +26,9 @@ import type {
  * exposed through a live getter rather than a snapshot.
  */
 export interface RecoveryHost {
-  readonly ctx: Context
+  /** Narrow ports instead of the whole Cordis Context (R12). */
+  readonly logger: { warn(message: string, ...args: unknown[]): void }
+  readonly liveSession: (sessionId: SessionId) => Session | undefined
   readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
   readonly git: PactFlowGitWorkspace
   readonly executionCapacity: PactFlowExecutionCapacity
@@ -117,10 +118,10 @@ export function reconcileLocalRunImpl(host: RecoveryHost, session: Session, init
   const timer = setTimeout(() => {
     host.localExpiryTimers.delete(key)
     try {
-      const live = host.ctx.sessions.get(session.id)
+      const live = host.liveSession(session.id)
       if (live !== undefined) host.reconcileLocalRun(live, initial)
     } catch (error: unknown) {
-      host.ctx.logger.warn('PactFlow local Run recovery failed for "%s": %s', initial.id, host.boundedOutcome(error))
+      host.logger.warn('PactFlow local Run recovery failed for "%s": %s', initial.id, host.boundedOutcome(error))
     }
   }, remainingMs)
   host.localExpiryTimers.set(key, timer)
@@ -228,11 +229,11 @@ export async function reconcileK3sRunImpl(host: RecoveryHost, session: Session, 
         })
         await host.ensureK3sCleanup(session, settled.run)
       } catch (settleError) {
-        host.ctx.logger.warn('PactFlow K3s capacity failure left Run unsettled "%s": %s', initial.id, host.boundedOutcome(settleError))
+        host.logger.warn('PactFlow K3s capacity failure left Run unsettled "%s": %s', initial.id, host.boundedOutcome(settleError))
       }
     }
     host.reconcilingK3s.delete(key)
-    host.ctx.logger.warn('PactFlow K3s capacity recovery failed for "%s": %s', initial.id, host.boundedOutcome(error))
+    host.logger.warn('PactFlow K3s capacity recovery failed for "%s": %s', initial.id, host.boundedOutcome(error))
     return
   }
   const controller = new AbortController()
@@ -357,7 +358,7 @@ export async function reconcileK3sRunImpl(host: RecoveryHost, session: Session, 
       if (!controller.signal.aborted && !host.isPermanentK3sError(error)) {
         host.deferK3sRecovery(session, current, releaseCapacity!, (deferred?.attempt ?? 0) + 1)
         rescheduled = true
-        host.ctx.logger.warn('PactFlow K3s Run "%s" recovery deferred after transient failure: %s', current.id, host.boundedOutcome(error))
+        host.logger.warn('PactFlow K3s Run "%s" recovery deferred after transient failure: %s', current.id, host.boundedOutcome(error))
         return
       }
       try {
@@ -373,7 +374,7 @@ export async function reconcileK3sRunImpl(host: RecoveryHost, session: Session, 
           await host.ensureK3sCleanup(session, settled.run)
         }
       } catch (settleError) {
-        host.ctx.logger.warn('PactFlow K3s Run "%s" could not be settled after recovery failure: %s', initial.id, host.boundedOutcome(settleError))
+        host.logger.warn('PactFlow K3s Run "%s" could not be settled after recovery failure: %s', initial.id, host.boundedOutcome(settleError))
       }
     }
   } finally {
@@ -401,7 +402,7 @@ export function deferK3sRecoveryImpl(host: RecoveryHost, session: Session, run: 
         release()
       }
     }).catch(error => {
-      host.ctx.logger.warn('PactFlow deferred recovery failed for "%s": %s', run.id, host.boundedOutcome(error))
+      host.logger.warn('PactFlow deferred recovery failed for "%s": %s', run.id, host.boundedOutcome(error))
     })
   }, Math.min(60_000, 1_000 * (2 ** Math.min(attempt - 1, 6))))
   timer.unref()

@@ -65,6 +65,10 @@ describe.skipIf(!enabled)('PactFlow real Harness probes', { timeout: 900_000 }, 
         expect.objectContaining({ name: 'model-response', state: 'succeeded' }),
         expect.objectContaining({ name: 'cleanup', state: 'succeeded' }),
       ]))
+      // A10: the CLI ran and cleanup succeeded, so the attested level is
+      // `cancellation` — not a bare connectivity claim.
+      expect(result.achievedLevel, `${result.templateId} achievedLevel`).toBe('cancellation')
+      expect(result.maxLevel).toBe('cancellation')
     }
   })
 
@@ -80,6 +84,9 @@ describe.skipIf(!enabled)('PactFlow real Harness probes', { timeout: 900_000 }, 
         expect.objectContaining({ name: 'api-response', state: 'succeeded' }),
         expect.objectContaining({ name: 'cleanup', state: 'succeeded' }),
       ]))
+      // A10: a direct API probe never runs the CLI, so it can never claim `artifact`.
+      expect(result.stages.some(stage => stage.name === 'cli-response')).toBe(false)
+      expect(result.achievedLevel, `${result.templateId} achievedLevel`).toBe('cancellation')
     }
   })
 })

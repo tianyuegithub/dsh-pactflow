@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -19,6 +19,7 @@ import type {
   PactFlowWorkspaceProjectView,
 } from '../types.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
+import { createRequestGate } from './request-gate.ts'
 import { ValidationProfileEditor } from './validation-profile-editor.tsx'
 import type { PactFlowValidationProfileInput } from '../types.ts'
 
@@ -106,15 +107,25 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [migrationPreview, setMigrationPreview] = useState<string | null>(null)
   const selected = rows.find(row => row.workspaceId === selectedId) ?? rows[0]
+  // Rapid workspace/cluster switches must not let a slow earlier response land on
+  // the newer selection.
+  const refreshGate = useRef(createRequestGate())
+  const gitSecretsGate = useRef(createRequestGate())
 
   const refresh = (): void => {
     setBusy(true); setError(null)
+    refreshGate.current.invalidate()
+    const token = refreshGate.current.next()
     void Promise.all([list(), catalogs()]).then(([nextRows, nextCatalog]) => {
+      if (!refreshGate.current.isLatest(token)) return
       setRows(nextRows); setCatalog(nextCatalog)
       setSelectedId(current => current !== null && nextRows.some(row => row.workspaceId === current)
         ? current : nextRows[0]?.workspaceId ?? null)
       setBusy(false)
-    }, failure => { setBusy(false); setError(message(failure)) })
+    }, failure => {
+      if (!refreshGate.current.isLatest(token)) return
+      setBusy(false); setError(message(failure))
+    })
   }
 
   useEffect(() => { if (open) refresh() }, [open])
@@ -139,14 +150,21 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
 
   useEffect(() => {
     if (!open || clusterId === '' || selected === undefined) return
+    // A cluster switch supersedes any in-flight secret lookup.
+    gitSecretsGate.current.invalidate()
+    const token = gitSecretsGate.current.next()
     void gitSecrets(clusterId).then(values => {
+      if (!gitSecretsGate.current.isLatest(token)) return
       setGitSecretOptions(values)
       setGitSecretName(current => {
         if (current !== '' && values.includes(current)) return current
         const expected = `pactflow-git-${slug(selected.title)}`
         return values.includes(expected) ? expected : values.length === 1 ? values[0]! : ''
       })
-    }, failure => setError(message(failure)))
+    }, failure => {
+      if (!gitSecretsGate.current.isLatest(token)) return
+      setError(message(failure))
+    })
   }, [open, clusterId, selected?.workspaceId, gitSecrets])
 
   const clusterPools = catalog?.pools.filter(item => item.clusterId === clusterId) ?? []

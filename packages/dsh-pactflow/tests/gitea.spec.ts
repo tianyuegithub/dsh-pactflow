@@ -96,6 +96,30 @@ describe('PactFlow Gitea admission', () => {
     await expect(client.createRepository(baseUrl, 'owner', 'isolated-test-token', input)).resolves.toMatchObject({ private: requestedPrivate })
   })
 
+  it('refuses to follow a redirect so the credential never reaches another origin', async () => {
+    let authorizedHits = 0
+    const target = createServer((request, response) => {
+      if (request.headers.authorization !== undefined) authorizedHits += 1
+      response.setHeader('content-type', 'application/json')
+      response.end('{}')
+    })
+    servers.push(target)
+    await new Promise<void>(resolve => target.listen(0, '127.0.0.1', resolve))
+    const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}`
+    const redirector = createServer((_request, response) => {
+      response.writeHead(302, { location: `${targetUrl}/api/v1/repos/owner/repo` })
+      response.end()
+    })
+    servers.push(redirector)
+    await new Promise<void>(resolve => redirector.listen(0, '127.0.0.1', resolve))
+    const baseUrl = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`
+
+    await expect(new PactFlowGiteaClient().verify({
+      baseUrl, owner: 'owner', repo: 'repo', tokenCredentialRef: 'TEST_TOKEN',
+    }, 'isolated-test-token', 'main')).rejects.toThrow(/redirect refused/)
+    expect(authorizedHits).toBe(0)
+  })
+
   it('reports an unprotected branch and rejects repository identity drift', async () => {
     const client = new PactFlowGiteaClient()
     await expect(client.verify(await fixture(false), 'test-token', 'main'))

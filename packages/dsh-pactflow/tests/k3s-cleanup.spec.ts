@@ -696,4 +696,33 @@ describe('PactFlow K3s cleanup', () => {
       ])
     } finally { vi.useRealTimers() }
   })
+
+  it('reports the capability level reached by each probe, capped at the attestable maximum', async () => {
+    // Image probe: the CLI ran (artifact) and cleanup succeeded (cancellation).
+    const image = probeWorker()
+    Reflect.set(image, 'batch', {
+      createNamespacedJob: vi.fn(async () => ({ metadata: { uid: 'probe-job-uid' } })),
+      readNamespacedJob: vi.fn(async () => ({ metadata: { uid: 'probe-job-uid' }, status: { succeeded: 1 } })),
+    })
+    Reflect.set(image, 'core', { listNamespacedPod: vi.fn(async () => ({ items: [] })) })
+    Reflect.set(image, 'probeLog', vi.fn(async () => 'claude 1.0'))
+    Reflect.set(image, 'cleanupProbeResources', vi.fn(async () => 0))
+    const imageResult = await image.probeImage('claude', 10_000)
+    expect(imageResult.achievedLevel).toBe('cancellation')
+    expect(imageResult.maxLevel).toBe('cancellation')
+
+    // API probe: only a protocol response (no CLI), so it must never claim artifact.
+    const api = probeWorker()
+    Reflect.set(api, 'batch', {
+      createNamespacedJob: vi.fn(async () => ({ metadata: { uid: 'probe-job-uid' } })),
+      readNamespacedJob: vi.fn(async () => ({ metadata: { uid: 'probe-job-uid' }, status: { succeeded: 1 } })),
+    })
+    Reflect.set(api, 'core', { listNamespacedPod: vi.fn(async () => ({ items: [] })) })
+    Reflect.set(api, 'probeLog', vi.fn(async () => '{"content":[{"text":"hi"}]}'))
+    Reflect.set(api, 'cleanupProbeResources', vi.fn(async () => 0))
+    const apiResult = await api.probeApi('claude', 'hello', 10_000)
+    expect(apiResult.achievedLevel).toBe('cancellation')
+    expect(apiResult.maxLevel).toBe('cancellation')
+    expect(apiResult.stages.some(stage => stage.name === 'cli-response')).toBe(false)
+  })
 })

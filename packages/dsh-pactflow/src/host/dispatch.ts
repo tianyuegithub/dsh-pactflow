@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle } from '@deepseek-ai/dsh-session'
 import type { PACTFLOW_EVENT_TYPES } from '../domain.ts'
@@ -8,7 +7,7 @@ import type { SubagentResult, SubagentRun, SubagentRuntime } from '@deepseek-ai/
 import type { PactFlowExecutionCapacity } from '../execution-capacity.ts'
 import type { PactFlowGitWorkspace, PactFlowGitAuthSecret } from '../git-workspace.ts'
 import type { PactFlowInfrastructure } from '../infrastructure.ts'
-import type { PactFlowK3sWorker } from '../k3s-worker.ts'
+import type { PactFlowK3sWorker, PactFlowRunCleanupRecorder } from '../k3s-worker.ts'
 import { pactFlowK3sSpecDigest } from '../k3s-worker.ts'
 import {
   PactFlowRunId,
@@ -38,7 +37,9 @@ import {
  * instance-level overrides (tests) remain authoritative.
  */
 export interface DispatchHost {
-  readonly ctx: Context
+  /** Narrow ports instead of the whole Cordis Context (R12). */
+  readonly agents: () => AgentRegistry | undefined
+  readonly subagents: () => SubagentRuntime | undefined
   readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
   readonly git: PactFlowGitWorkspace
   readonly executionCapacity: PactFlowExecutionCapacity
@@ -78,8 +79,14 @@ export interface DispatchHost {
     resultAt?: number,
   ): PactFlowClaimResult
   ensureK3sCleanup(session: Session, run: PactFlowRun): Promise<void>
+  /** Register a discoverable, never-auto-cleaned responsibility for a failed local run. */
+  retainLocalFailure(session: Session, run: PactFlowRun): void
   resolveGitAuth(spec: PactFlowGitRunSpec): Promise<PactFlowGitAuthSecret | undefined>
   workerForRun(spec: PactFlowK3sRunSpec): PactFlowK3sWorker
+  /** Successful predecessor commits declared as code inputs for one node. */
+  codeInputCommits(session: Session, node: PactFlowNode): readonly { readonly dependency: string; readonly branch: string; readonly commit: string }[]
+  /** Durable creation-intent recorder for one Run, bound to the worker's connection identity. */
+  runCleanupRecorder(k3s: PactFlowK3sWorker): PactFlowRunCleanupRecorder
   resolveK3sDispatch(poolId: string | undefined, templateId: string, modelConnectionId?: string): K3sDispatchRoute
   acquireExecutionOrCancel(
     session: Session,
@@ -94,11 +101,11 @@ export interface DispatchHost {
     session: Session,
     request: DispatchPactFlowLocalNodeRequest,
     requiresCwd: boolean,
-  ): { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string }
+  ): PactFlowLocalExecution
   executeClaimed(
     session: Session,
     request: DispatchPactFlowLocalNodeRequest,
-    execution: { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string },
+    execution: PactFlowLocalExecution,
     claimed: PactFlowClaimResult,
     git?: PactFlowGitRunSpec,
     externalSignal?: AbortSignal,
@@ -216,7 +223,7 @@ export async function dispatchK3sNodeWithSignalImpl(
   const worker = resolved.worker
   await worker.preflight()
   const runId = PactFlowRunId(`run-${randomUUID()}`)
-  const git = await host.git.plan(session.header.cwd, session.id, runId, node, projectGit)
+  const git = await host.git.plan(session.header.cwd, session.id, runId, node, projectGit, host.codeInputCommits(session, node))
   worker.preflightRun(git, prompt)
   const planned = worker.plan(
     runId, resolved.executionTemplateId, projectGit.k3sGitSecretName, leaseDurationMs, git, prompt,
@@ -252,6 +259,10 @@ export async function dispatchK3sNodeWithSignalImpl(
     v: 1, queueId, sessionId: String(session.id), nodeId: node.id, requestedAt: Date.now(),
   })
   let releaseCapacity: (() => void) | undefined
+  let runStarted = false
+  // Any failure before `worker.run()` self-cleans discards the prepared Run's
+  // in-memory secrets; a discarded plan never created external resources.
+  const discardPrepared = (): void => { (worker as { discard?: (name: string) => void }).discard?.(planned.jobName) }
   try {
     releaseCapacity = await host.acquireExecutionOrCancel(
       session, queueId,
@@ -263,6 +274,7 @@ export async function dispatchK3sNodeWithSignalImpl(
     )
   } catch (error) {
     releaseCapacity?.()
+    discardPrepared()
     throw error
   }
   try {
@@ -295,7 +307,9 @@ export async function dispatchK3sNodeWithSignalImpl(
       leaseDurationMs,
     }, { runId, git, k3s })
     try {
-      await host.git.materialize(session.header.cwd, git)
+      // The remote container folds declared code inputs itself, so the local
+      // worktree stays on the plain base and can fast-forward to its result.
+      await host.git.materialize(session.header.cwd, git, { foldCodeInputs: false })
     } catch (error) {
       return host.settleRunInSession(session, {
         runId: owned.run.id,
@@ -334,11 +348,15 @@ export async function dispatchK3sNodeWithSignalImpl(
       }, Math.max(1_000, Math.floor(leaseDurationMs / 2)))
       let remoteResult: PactFlowK3sResult
       try {
+        // From here `run()` owns the prepared secrets and releases them on every
+        // terminal path, so the discard guard must stand down.
+        runStarted = true
         remoteResult = await worker.run(
           k3s, git, prompt, controller.signal, modelApiKey, undefined,
           async (jobUid) => {
             owned = host.bindK3sRunInSession(session, owned, jobUid)
           },
+          host.runCleanupRecorder(worker),
         )
         if (remoteResult.branch !== git.branch) throw new Error('PactFlow K3s Worker returned another branch')
       } catch (error) {
@@ -384,8 +402,33 @@ export async function dispatchK3sNodeWithSignalImpl(
       if (signal !== undefined) signal.removeEventListener('abort', forwardAbort)
     }
   } finally {
+    if (!runStarted) discardPrepared()
     releaseCapacity?.()
   }
+}
+
+/**
+ * A08: the PactFlow preset's persona is a *read-only orchestrator* that explicitly
+ * forbids writing, editing and Bash. A spawned Worker inherits that composition, so
+ * without an override it obeys the orchestrator and produces no commit. When the
+ * provider supports a per-child persona, the Host shadows that persona for the
+ * child so the delegated task can actually run in its isolated task worktree.
+ */
+export const PACTFLOW_WORKER_PERSONA = [
+  'You are a PactFlow Worker executing one bounded task in an isolated Git worktree.',
+  'Your current working directory is already the task worktree on a dedicated task branch.',
+  'You may read and modify files there, run commands, and commit your change to that branch.',
+  'Do not merge, rebase, or switch branches, and do not push to the default branch.',
+  'When the task is done, leave the worktree clean with your change committed.',
+].join(' ')
+
+/** A resolved local execution: the parent, the runtime, the prompt, and the worker persona when supported. */
+export interface PactFlowLocalExecution {
+  readonly parent: Agent
+  readonly subagents: SubagentRuntime
+  readonly prompt: string
+  /** Present only when the provider advertises the `persona` capability. */
+  readonly persona?: string
 }
 
 export function localExecutionImpl(
@@ -393,9 +436,9 @@ export function localExecutionImpl(
   session: Session,
   request: DispatchPactFlowLocalNodeRequest,
   requiresCwd: boolean,
-): { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string } {
-  const agents = host.ctx.get('agents') as AgentRegistry | undefined
-  const subagents = host.ctx.get('subagents') as SubagentRuntime | undefined
+): PactFlowLocalExecution {
+  const agents = host.agents()
+  const subagents = host.subagents()
   const parent = agents?.get(session.id)
   if (parent === undefined) throw new Error(`session "${session.id}" has no live parent Agent`)
   if (subagents === undefined) throw new Error('PactFlow local dispatch requires the Subagent runtime')
@@ -403,12 +446,16 @@ export function localExecutionImpl(
   if (provider === undefined) {
     throw new Error(`PactFlow Subagent provider "${request.provider}" is not registered`)
   }
-  if (requiresCwd && !provider.capabilities.cwd) {
+  if (requiresCwd && provider.capabilities?.cwd !== true) {
     throw new Error(`PactFlow Subagent provider "${request.provider}" cannot select a task worktree`)
   }
   const prompt = request.prompt.trim()
   if (prompt.length === 0) throw new Error('PactFlow local Worker prompt must be non-empty')
-  return { parent, subagents, prompt }
+  return {
+    parent, subagents, prompt,
+    // Only request a persona when the provider supports it; DSH rejects it otherwise.
+    ...provider.capabilities?.persona === true ? { persona: PACTFLOW_WORKER_PERSONA } : {},
+  }
 }
 
 export async function dispatchGitNodeWithSignalImpl(
@@ -421,35 +468,78 @@ export async function dispatchGitNodeWithSignalImpl(
   const session = host.livePactFlowSession(sessionId)
   const execution = host.localExecution(session, request, true)
   const project = host.requireProject(session)
-  const binding = project.git ?? host.workspaceGitBinding(await host.workspaceProjectForSession(session))
+  const workspaceProject = await host.workspaceProjectForSession(session)
+  const binding = project.git ?? host.workspaceGitBinding(workspaceProject)
   if (binding === undefined) throw new Error('PactFlow project has no Git binding')
   await host.assertValidationProfilesCurrent(session, binding)
   const node = host.node(session, request.nodeId)
   host.requireRevision('node', node.id, node.revision, request.expectedRevision)
   if (node.state !== 'ready') throw new Error(`PactFlow node "${node.id}" is not ready`)
-  const runId = PactFlowRunId(`run-${randomUUID()}`)
-  const git = await host.git.plan(session.header.cwd, session.id, runId, node, binding)
-  host.requireRevision('project', project.id, host.requireProject(session).revision, project.revision)
-  const owned = host.claimNodeInSession(session, request, { runId, git })
+  // F07: the local path shares the same admission as K3s — queue, acquire a slot,
+  // then recheck cancellation and revisions before claiming.
+  const workspaceSnapshot = JSON.stringify(workspaceProject)
+  const queueId = `queue-${randomUUID()}`
+  host.events.append(session, 'pactflow/run-queued', {
+    v: 1, queueId, sessionId: String(session.id), nodeId: node.id, requestedAt: Date.now(),
+  })
+  let releaseCapacity: (() => void) | undefined
   try {
-    await host.git.materialize(session.header.cwd, git)
+    releaseCapacity = await host.acquireExecutionOrCancel(
+      session, queueId,
+      workspaceProject?.worker === undefined ? undefined : workspaceProject.workspaceId,
+      workspaceProject?.worker,
+      undefined,
+      undefined,
+      signal,
+    )
   } catch (error) {
-    return host.settleRunInSession(session, {
-      runId: owned.run.id,
-      claimId: owned.run.claimId,
-      expectedNodeRevision: owned.node.revision,
-      state: 'failed',
-      outcome: host.boundedOutcome(error),
-    })
+    releaseCapacity?.()
+    throw error
   }
-  return await host.executeClaimed(session, request, execution, owned, git, signal)
+  try {
+    try {
+      await host.assertValidationProfilesCurrent(session, binding)
+      if (workspaceSnapshot !== JSON.stringify(await host.workspaceProjectForSession(session))) {
+        throw new Error('PactFlow dispatch Workspace configuration changed while waiting')
+      }
+      host.requireRevision('node', node.id, host.node(session, request.nodeId).revision, request.expectedRevision)
+      host.requireRevision('project', project.id, host.requireProject(session).revision, project.revision)
+      if (signal?.aborted) throw new Error('PactFlow Git dispatch was cancelled before claim')
+    } catch (error) {
+      host.events.append(session, 'pactflow/run-queue-cancelled', {
+        v: 1, queueId, reason: host.boundedOutcome(error), cancelledAt: Date.now(),
+      })
+      throw error
+    }
+    const runId = PactFlowRunId(`run-${randomUUID()}`)
+    const git = await host.git.plan(session.header.cwd, session.id, runId, node, binding, host.codeInputCommits(session, node))
+    host.requireRevision('project', project.id, host.requireProject(session).revision, project.revision)
+    const owned = host.claimNodeInSession(session, request, { runId, git })
+    try {
+      await host.git.materialize(session.header.cwd, git)
+    } catch (error) {
+      const settled = host.settleRunInSession(session, {
+        runId: owned.run.id,
+        claimId: owned.run.claimId,
+        expectedNodeRevision: owned.node.revision,
+        state: 'failed',
+        outcome: host.boundedOutcome(error),
+      })
+      // A05: keep the failed scene discoverable without auto-deleting it.
+      host.retainLocalFailure(session, settled.run)
+      return settled
+    }
+    return await host.executeClaimed(session, request, execution, owned, git, signal)
+  } finally {
+    releaseCapacity?.()
+  }
 }
 
 export async function executeClaimedImpl(
   host: DispatchHost,
   session: Session,
   request: DispatchPactFlowLocalNodeRequest,
-  execution: { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string },
+  execution: PactFlowLocalExecution,
   claimed: PactFlowClaimResult,
   git?: PactFlowGitRunSpec,
   externalSignal?: AbortSignal,
@@ -469,15 +559,19 @@ export async function executeClaimedImpl(
       parent: execution.parent,
       signal: controller.signal,
       ...git === undefined ? {} : { cwd: git.worktreePath },
+      // A08: shadow the read-only orchestrator persona so the Worker can write.
+      ...execution.persona === undefined ? {} : { persona: execution.persona },
     })
   } catch (error) {
-    return host.settleRunInSession(session, {
+    const settled = host.settleRunInSession(session, {
       runId: owned.run.id,
       claimId: owned.run.claimId,
       expectedNodeRevision: owned.node.revision,
       state: 'failed',
       outcome: host.boundedOutcome(error),
     })
+    host.retainLocalFailure(session, settled.run)
+    return settled
   }
   let timer: ReturnType<typeof setInterval> | undefined
   try {
@@ -502,13 +596,15 @@ export async function executeClaimedImpl(
     try {
       result = await child.result
     } catch (error) {
-      return host.settleRunInSession(session, {
+      const settled = host.settleRunInSession(session, {
         runId: owned.run.id,
         claimId: owned.run.claimId,
         expectedNodeRevision: owned.node.revision,
         state: 'failed',
         outcome: host.boundedOutcome(error),
       })
+      host.retainLocalFailure(session, settled.run)
+      return settled
     }
     let gitResult: PactFlowGitResult | undefined
     if (result.stopReason === 'completed' && git !== undefined) {
@@ -521,13 +617,15 @@ export async function executeClaimedImpl(
           await host.resolveGitAuth(git),
         )
       } catch (error) {
-        return host.settleRunInSession(session, {
+        const settled = host.settleRunInSession(session, {
           runId: owned.run.id,
           claimId: owned.run.claimId,
           expectedNodeRevision: owned.node.revision,
           state: 'failed',
           outcome: host.boundedOutcome(error),
         })
+        host.retainLocalFailure(session, settled.run)
+        return settled
       }
     }
     return host.settleRunInSession(session, {

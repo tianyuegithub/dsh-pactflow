@@ -8,3 +8,8 @@ coverage/
 *.tgz
 dist/
 packages/dsh-pactflow/presets/pactflow/plugin/index.js
+
+# Tool/session state — never part of the source tree.
+.arts/
+.mimosa/
+.zcode/

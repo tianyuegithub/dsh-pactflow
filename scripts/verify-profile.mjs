@@ -51,12 +51,18 @@ try {
   rmSync(testHome, { recursive: true, force: true })
 }
 
+// Bound every child process: no verification step may wait forever.
+const COMMAND_TIMEOUT_MS = 120_000
+const BOOT_TIMEOUT_MS = 120_000
+
 function run(command, args, cwd) {
   return execFileSync(command, args, {
     cwd,
     env: environment,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: COMMAND_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   })
 }
 
@@ -84,23 +90,30 @@ async function bootWeb(expectPactFlow) {
   let stderr = ''
   const ready = new Promise((resolveReady, rejectReady) => {
     const timeout = setTimeout(() => {
-      rejectReady(new Error(`dsh web did not become ready: ${stderr.slice(-2000)}`))
+      rejectReady(new Error(`dsh web did not become ready within ${BOOT_TIMEOUT_MS}ms: ${stderr.slice(-2000)}`))
     }, 30_000)
+    // Overall grace period: even if readiness never resolves, the boot must not
+    // wait forever.
+    const grace = setTimeout(() => {
+      child.kill('SIGKILL')
+      rejectReady(new Error(`dsh web did not become ready within ${BOOT_TIMEOUT_MS}ms: ${stderr.slice(-2000)}`))
+    }, BOOT_TIMEOUT_MS)
+    const clear = () => { clearTimeout(timeout); clearTimeout(grace) }
     child.stdout.on('data', (chunk) => {
       stdout += String(chunk)
       const match = /dsh web: (http:\/\/[^\s]+)/u.exec(stdout)
       if (match?.[1] === undefined) return
-      clearTimeout(timeout)
+      clear()
       resolveReady(match[1])
     })
     child.stderr.on('data', (chunk) => { stderr += String(chunk) })
     child.once('error', (error) => {
-      clearTimeout(timeout)
+      clear()
       rejectReady(error)
     })
     child.once('exit', (code) => {
       if (stdout.includes('dsh web:')) return
-      clearTimeout(timeout)
+      clear()
       rejectReady(new Error(`dsh web exited before readiness with ${String(code)}: ${stderr.slice(-2000)}`))
     })
   })

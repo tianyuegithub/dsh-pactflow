@@ -50,6 +50,19 @@ class GiteaRequestError extends Error {
   }
 }
 
+/**
+ * Authenticated Gitea API requests never follow redirects: a cross-origin
+ * redirect must not receive the Authorization header we attached to the request.
+ * Refusing the redirect keeps the credential bound to its registered endpoint.
+ */
+async function giteaFetch(url: string, init: RequestInit): Promise<Response> {
+  const response = await fetch(url, { ...init, redirect: 'manual' })
+  if (response.status >= 300 && response.status < 400) {
+    throw new GiteaRequestError(response.status, 'redirect refused')
+  }
+  return response
+}
+
 type CandidatePayload = {
   readonly id?: unknown
   readonly full_name?: unknown
@@ -99,7 +112,7 @@ export class PactFlowGiteaClient {
       : joinUrlPath(baseUrl, `/api/v1/orgs/${encodeURIComponent(input.owner)}/repos`)
     let response: Response
     try {
-      response = await fetch(endpoint, {
+      response = await giteaFetch(endpoint, {
         method: 'POST', signal: AbortSignal.timeout(10_000),
         headers: {
           accept: 'application/json', 'content-type': 'application/json',
@@ -157,7 +170,7 @@ export class PactFlowGiteaClient {
     for (const endpoint of endpoints) {
       let response: Response
       try {
-        response = await fetch(endpoint, { method: 'GET', signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json', ...auth } })
+        response = await giteaFetch(endpoint, { method: 'GET', signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json', ...auth } })
       } catch {
         continue
       }
@@ -191,7 +204,7 @@ export class PactFlowGiteaClient {
     const endpoint = joinUrlPath(baseUrl, `/api/v1/repositories/${String(Number(id))}`)
     let response: Response
     try {
-      response = await fetch(endpoint, { method: 'GET', signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json', ...auth } })
+      response = await giteaFetch(endpoint, { method: 'GET', signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json', ...auth } })
     } catch {
       throw new Error('PactFlow could not connect to the configured Gitea API')
     }
@@ -328,7 +341,7 @@ export class PactFlowGiteaClient {
     const repo = encodeURIComponent(binding.repo)
     let response: Response
     try {
-      response = await fetch(joinUrlPath(binding.baseUrl, `/api/v1/repos/${owner}/${repo}${suffix}`), {
+      response = await giteaFetch(joinUrlPath(binding.baseUrl, `/api/v1/repos/${owner}/${repo}${suffix}`), {
         method: options.method ?? 'GET',
         headers: {
           accept: 'application/json',
@@ -341,8 +354,10 @@ export class PactFlowGiteaClient {
         signal: options.signal === undefined ? AbortSignal.timeout(10_000)
           : AbortSignal.any([options.signal, AbortSignal.timeout(10_000)]),
       })
-    } catch {
+    } catch (error) {
       options.signal?.throwIfAborted()
+      // A refused redirect is a deliberate safety decision, not a connectivity failure.
+      if (error instanceof GiteaRequestError) throw error
       throw new Error('PactFlow could not connect to the configured Gitea API')
     }
     if (options.allowNotFound === true && response.status === 404) return undefined as T

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
@@ -6,6 +6,8 @@ import type { PactFlowHealth, PactFlowSnapshot, PactFlowHarnessTemplateView, Pac
 import { harnessProbeAvailability } from '../harness-discovery.ts'
 import { NS, type PactFlowLocaleKey } from './locale.ts'
 import { isHarnessProfile } from './resource-model.ts'
+import { createRequestGate } from './request-gate.ts'
+import { createFreshnessTracker, PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS, type PactFlowFreshnessState } from './runtime-freshness.ts'
 import { PactFlowDagGraph } from './dag-graph.tsx'
 import { buttonStyle, backdropStyle, panelStyle, headerStyle, titleStyle, subtitleStyle, bodyStyle, preStyle, diagnosticStyle, errorStyle, probeStyle, hintStyle, probeActionsStyle, disabledProbeButtonStyle, probeReasonStyle, gridStyle, cardStyle, sectionTitleStyle, tableStyle, cellStyle } from './styles.ts'
 
@@ -110,6 +112,38 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
   // Capacity and workspace data live outside the Session event log, so they are
   // refreshed whenever the run/cleanup/need shape of the live projection moves.
   const runtimeSignatureRef = useRef<string | null>(null)
+  // Only the most recent runtime refresh may apply: a slow earlier refresh must not
+  // overwrite a newer one within the same session/generation.
+  const runtimeGate = useRef(createRequestGate())
+  // Runtime data lives outside the Session log, so its freshness is tracked apart
+  // from the projection-driven snapshot.
+  const freshness = useRef(createFreshnessTracker())
+  const [freshnessState, setFreshnessState] = useState<PactFlowFreshnessState>({ stale: false, lastSuccessAt: null })
+
+  const refreshRuntime = (): void => {
+    const current = overlay.getSnapshot()
+    if (!current.open || current.phase !== 'ready' || current.sessionId === null) return
+    const { sessionId, generation } = current
+    // Supersede any in-flight runtime refresh so its late response cannot win.
+    runtimeGate.current.invalidate()
+    const token = runtimeGate.current.next()
+    void startRequest(signal => loadRuntime(sessionId, signal)).then(
+      value => {
+        if (!isCurrent(sessionId, generation) || !runtimeGate.current.isLatest(token)) return
+        freshness.current.onSuccess()
+        setFreshnessState(freshness.current.state())
+        overlay.set({ ...overlay.getSnapshot(), ...value })
+      },
+      error => {
+        if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
+        // Keep the last known values but mark them stale; the next interval or
+        // projection change retries instead of failing the open overlay.
+        freshness.current.onFailure()
+        setFreshnessState(freshness.current.state())
+        runtimeSignatureRef.current = null
+      },
+    )
+  }
   const runtimeSignature = projections === undefined ? null : JSON.stringify({
     runs: Object.values(projections.pactflowRuns?.byId ?? {}).map(run => run.state).sort(),
     cleanups: Object.values(projections.pactflowDelivery?.cleanups ?? {}).map(record => record.state).sort(),
@@ -145,7 +179,12 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
     overlay.set({ ...state, phase: 'loading', error: null })
     void startRequest(signal => load(sessionId, signal)).then(
       value => {
-        if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), phase: 'ready', ...value })
+        if (!isCurrent(sessionId, generation)) return
+        // The initial load already fetched fresh runtime data; record that so the
+        // overlay does not briefly claim it has no confirmed data.
+        freshness.current.onSuccess()
+        setFreshnessState(freshness.current.state())
+        overlay.set({ ...overlay.getSnapshot(), phase: 'ready', ...value })
       },
       error => {
         if (isCurrent(sessionId, generation) && !(error instanceof DOMException && error.name === 'AbortError')) {
@@ -164,11 +203,14 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
     // The component stays mounted across open/close; a stale signature from
     // the previous owner must not suppress the next session's first refresh.
     runtimeSignatureRef.current = null
+    runtimeGate.current.invalidate()
+    // Freshness belongs to the previous owner; do not show its timestamp next.
+    freshness.current = createFreshnessTracker()
+    setFreshnessState(freshness.current.state())
   }, [state.sessionId, state.generation])
 
   useEffect(() => {
     if (!state.open || state.phase !== 'ready' || state.sessionId === null) return
-    const { sessionId, generation } = state
     if (runtimeSignature === null) return
     // The initial load already fetched fresh runtime data; remember its shape
     // so only later projection movements trigger a refresh.
@@ -178,18 +220,16 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
     }
     if (runtimeSignature === runtimeSignatureRef.current) return
     runtimeSignatureRef.current = runtimeSignature
-    void startRequest(signal => loadRuntime(sessionId, signal)).then(
-      value => {
-        if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), ...value })
-      },
-      error => {
-        if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
-        // A failed runtime refresh keeps the last known values; the next
-        // projection change retries instead of failing the open overlay.
-        runtimeSignatureRef.current = null
-      },
-    )
+    refreshRuntime()
   }, [loadRuntime, runtimeSignature, state.open, state.phase, state.sessionId, state.generation])
+
+  // Pure configuration changes do not move the projection, so requery on a
+  // bounded interval while the overlay is open and ready.
+  useEffect(() => {
+    if (!state.open || state.phase !== 'ready' || state.sessionId === null) return
+    const timer = setInterval(() => { refreshRuntime() }, PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [loadRuntime, state.open, state.phase, state.sessionId, state.generation])
 
   if (!state.open) return null
   return (
@@ -232,6 +272,15 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
             <p style={hintStyle}>{state.workspaceProject === null
               ? '当前会话尚未关联工作区级项目配置；请使用左侧“零脉项目”。'
               : `${state.workspaceProject.workspaceTitle} · 修订 ${String(state.workspaceProject.revision)}`}</p>
+            {/* Capacity and workspace config live outside the Session log; make their
+                freshness explicit instead of showing possibly-stale values as fresh. */}
+            <p style={hintStyle}>
+              {freshnessState.lastSuccessAt === null
+                ? '运行时数据尚未确认'
+                : freshnessState.stale
+                  ? `运行时数据可能已过期 · 最近确认 ${new Date(freshnessState.lastSuccessAt).toLocaleTimeString()}`
+                  : `运行时数据已于 ${new Date(freshnessState.lastSuccessAt).toLocaleTimeString()} 确认`}
+            </p>
           </section>
           {snapshot !== null && (
             <PactFlowProjectionTables

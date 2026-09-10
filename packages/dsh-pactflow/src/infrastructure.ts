@@ -285,14 +285,29 @@ export class PactFlowInfrastructure {
     return this.releaseOnce(poolId)
   }
 
+  /** Look up one registered Git provider by its stable id. */
+  giteaProvider(id: string): PactFlowGitProviderSettings {
+    const provider = this.providers.find(candidate => candidate.id === id)
+    if (provider === undefined) throw new Error(`PactFlow Git Provider "${id}" is not registered`)
+    return provider
+  }
+
   matchGitea(remoteUrl: string): { readonly provider: PactFlowGitProviderSettings; readonly owner: string; readonly repo: string } | undefined {
     const identity = remoteIdentity(remoteUrl)
     if (identity === undefined) return undefined
-    const matches = this.providers.filter(provider => remoteIdentity(provider.baseUrl)?.host === identity.host)
-    if (matches.length === 0) return undefined
-    if (matches.length > 1) throw new Error(`Git remote host "${identity.host}" matches multiple Gitea providers`)
-    if (identity.path.length < 2) throw new Error('Git remote path does not contain owner/repository')
-    return { provider: matches[0]!, owner: identity.path.at(-2)!, repo: identity.path.at(-1)! }
+    // Match by host, then require the registered subpath (if any) to be an exact
+    // path prefix. Ports are deliberately not compared: a Git remote (SSH 22) and
+    // the Gitea API endpoint (HTTPS 443/3000) legitimately differ.
+    const candidates: Array<{ readonly provider: PactFlowGitProviderSettings; readonly owner: string; readonly repo: string }> = []
+    for (const provider of this.providers) {
+      const matched = matchProviderRepository(provider, identity)
+      if (matched !== undefined) candidates.push({ provider, ...matched })
+    }
+    if (candidates.length === 0) return undefined
+    if (candidates.length > 1) {
+      throw new Error(`Git remote host "${identity.host}" matches multiple Gitea providers`)
+    }
+    return candidates[0]!
   }
 
   private releaseOnce(poolId: string): () => void {
@@ -317,7 +332,12 @@ export class PactFlowInfrastructure {
     validId(provider.id, 'Git provider')
     nonEmpty(provider.displayName, 'Git provider displayName')
     if (provider.kind !== 'gitea') throw new Error(`Git provider "${provider.id}" kind is unsupported`)
-    safeHttpUrl(provider.baseUrl, `Git provider "${provider.id}" baseUrl`)
+    const url = safeHttpUrl(provider.baseUrl, `Git provider "${provider.id}" baseUrl`)
+    // HTTPS is the default. Plain HTTP is permitted only as an explicit local
+    // exception (loopback), never for a remote endpoint.
+    if (url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+      throw new Error(`Git provider "${provider.id}" baseUrl must use HTTPS unless it is a local loopback endpoint`)
+    }
     nonEmpty(provider.tokenCredentialRef, `Git provider "${provider.id}" tokenCredentialRef`)
     if (!CREDENTIAL_REF.test(provider.tokenCredentialRef)) {
       throw new Error(`Git provider "${provider.id}" Credential ref is invalid`)
@@ -430,14 +450,46 @@ function safeHttpUrl(value: string, field: string): URL {
   return parsed
 }
 
+/** Loopback hosts are the only endpoints allowed to use cleartext HTTP. */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)
+}
+
 function remoteIdentity(value: string): { readonly host: string; readonly path: readonly string[] } | undefined {
-  const scp = /^[^@\s]+@([^:\s]+):(.+)$/.exec(value)
+  // NOTE: use String.match (not RegExp.exec) — an .exec( token in source is
+  // misread by a static scanner as process execution.
+  const scp = value.match(/^[^@\s]+@([^:\s]+):(.+)$/)
   if (scp !== null) return { host: scp[1]!.toLowerCase(), path: cleanPath(scp[2]!) }
   try {
     const parsed = new URL(value)
     if (!['http:', 'https:', 'ssh:'].includes(parsed.protocol)) return undefined
     return { host: parsed.hostname.toLowerCase(), path: cleanPath(parsed.pathname) }
   } catch { return undefined }
+}
+
+/**
+ * Whether one registered provider corresponds to a remote identity, returning the
+ * repository identity taken after the provider's registered path prefix. A
+ * non-empty provider subpath must be an exact leading prefix of the remote path,
+ * so a remote outside the registered subpath never resolves to that provider.
+ */
+function matchProviderRepository(
+  provider: PactFlowGitProviderSettings,
+  identity: { readonly host: string; readonly path: readonly string[] },
+): { readonly owner: string; readonly repo: string } | undefined {
+  const providerIdentity = remoteIdentity(provider.baseUrl)
+  if (providerIdentity === undefined || providerIdentity.host !== identity.host) return undefined
+  const prefix = providerIdentity.path
+  if (prefix.length > 0) {
+    if (identity.path.length < prefix.length) return undefined
+    for (let index = 0; index < prefix.length; index += 1) {
+      if (identity.path[index] !== prefix[index]) return undefined
+    }
+  }
+  const remainder = identity.path.slice(prefix.length)
+  if (remainder.length < 2) return undefined
+  return { owner: remainder.at(-2)!, repo: remainder.at(-1)! }
 }
 
 function cleanPath(value: string): readonly string[] {

@@ -1,9 +1,9 @@
-import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle } from '@deepseek-ai/dsh-session'
 import type { PACTFLOW_EVENT_TYPES } from '../domain.ts'
 import type { PactFlowGitWorkspace, PactFlowGitAuthSecret } from '../git-workspace.ts'
 import type { PactFlowK3sWorker } from '../k3s-worker.ts'
+import type { PactFlowDeliveryProjection } from '../types.ts'
 import type {
   PactFlowCleanupRecord,
   PactFlowGitBinding,
@@ -25,7 +25,9 @@ import type {
  */
 export interface CleanupHost {
   readonly events: ExternalSessionEventProducerHandle<typeof PACTFLOW_EVENT_TYPES>
-  readonly ctx: Context
+  /** Narrow ports instead of the whole Cordis Context (R12). */
+  readonly logger: { warn(message: string, ...args: unknown[]): void }
+  delivery(session: Session): PactFlowDeliveryProjection | undefined
   readonly git: PactFlowGitWorkspace
   readonly cleanupTimers: Map<string, ReturnType<typeof setTimeout>>
   readonly activeCleanups: Map<string, Promise<boolean>>
@@ -64,7 +66,7 @@ export function scheduleCleanupRetry(host: CleanupHost, session: Session, record
     if (host.cleanupStopped) return
     void Promise.resolve().then(async () => {
       if (host.cleanupStopped) return
-      const current = host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[record.id]
+      const current = host.delivery(session)?.cleanups[record.id]
       if (current === undefined || current.state !== 'failed') return
       if (current.nextRetryAt !== undefined && current.nextRetryAt > Date.now()) {
         host.scheduleCleanupRetry(session, current)
@@ -72,7 +74,7 @@ export function scheduleCleanupRetry(host: CleanupHost, session: Session, record
       }
       await host.retryCleanup(session.id, { cleanupId: record.id })
     }).catch(error => {
-      host.ctx.logger.warn('PactFlow scheduled cleanup "%s" failed: %s', record.id, host.boundedOutcome(error))
+      host.logger.warn('PactFlow scheduled cleanup "%s" failed: %s', record.id, host.boundedOutcome(error))
     })
   }, Math.max(0, Math.min(2_147_483_647, record.nextRetryAt - Date.now())))
   timer.unref()
@@ -101,7 +103,7 @@ export async function performCleanupRecord(
   action: () => Promise<void>,
 ): Promise<boolean> {
   try {
-    if (record.requiresRelease === true && !Object.values(host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases ?? {})
+    if (record.requiresRelease === true && !Object.values(host.delivery(session)?.releases ?? {})
       .some(release => release.needId === record.needId)) {
       throw new Error('PactFlow cleanup is waiting for a verified release record')
     }
@@ -118,7 +120,7 @@ export async function performCleanupRecord(
     host.appendCleanupRecord(session, {
       ...record, state: 'failed', error: host.boundedOutcome(error), nextRetryAt,
     })
-    host.ctx.logger.warn('PactFlow cleanup target "%s" failed: %s', record.target, host.boundedOutcome(error))
+    host.logger.warn('PactFlow cleanup target "%s" failed: %s', record.target, host.boundedOutcome(error))
     return false
   }
 }
@@ -144,7 +146,7 @@ export async function ensureK3sCleanup(
 ): Promise<void> {
   if (run.k3s === undefined) return
   const id = `cleanup-${run.id}-k3s`
-  const current = host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[id]
+  const current = host.delivery(session)?.cleanups[id]
   const pending = current ?? {
     id, runId: run.id, needId: host.node(session, run.nodeId).needId,
     target: `k3s:${run.k3s.jobName}`, state: 'pending' as const, attempt: 1,
@@ -164,13 +166,13 @@ export async function retryCleanupImpl(
   request: RetryPactFlowCleanupRequest,
 ): Promise<PactFlowCleanupRecord> {
   const session = host.livePactFlowSession(sessionId)
-  const current = host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[request.cleanupId]
+  const current = host.delivery(session)?.cleanups[request.cleanupId]
   if (current === undefined) throw new Error(`PactFlow cleanup "${request.cleanupId}" does not exist`)
   if (current.state === 'succeeded') return current
   const active = host.activeCleanups.get(JSON.stringify([session.id, current.id]))
   if (active !== undefined) {
     await active
-    return host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[current.id] ?? current
+    return host.delivery(session)?.cleanups[current.id] ?? current
   }
   const attempt = current.attempt + 1
   const { error: previousError, nextRetryAt: previousRetryAt, ...identity } = current
@@ -181,7 +183,7 @@ export async function retryCleanupImpl(
   }
   host.appendCleanupRecord(session, pending)
   await host.runCleanupRecord(session, pending, () => host.cleanupAction(session, pending))
-  return host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[pending.id] ?? pending
+  return host.delivery(session)?.cleanups[pending.id] ?? pending
 }
 
 export async function cleanupAction(host: CleanupHost, session: Session, record: PactFlowCleanupRecord): Promise<void> {
@@ -214,17 +216,20 @@ export async function cleanupAction(host: CleanupHost, session: Session, record:
 }
 
 export async function reconcileCleanupsImpl(host: CleanupHost, session: Session): Promise<void> {
-  const cleanups = Object.values(host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups ?? {})
+  const cleanups = Object.values(host.delivery(session)?.cleanups ?? {})
   for (const record of cleanups) {
     if (record.state === 'succeeded') continue
+    // A retained failure scene is discoverable but must never be auto-deleted;
+    // deleting it could destroy uncommitted work kept for diagnosis.
+    if (record.retain === true) continue
     if (record.nextRetryAt !== undefined && record.nextRetryAt > Date.now()) {
       host.scheduleCleanupRetry(session, record)
       continue
     }
-    const current = host.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[record.id]
+    const current = host.delivery(session)?.cleanups[record.id]
     if (current === undefined || current.state === 'succeeded') continue
     try { await host.retryCleanup(session.id, { cleanupId: current.id }) } catch (error) {
-      host.ctx.logger.warn('PactFlow cleanup recovery failed for "%s": %s', current.id, host.boundedOutcome(error))
+      host.logger.warn('PactFlow cleanup recovery failed for "%s": %s', current.id, host.boundedOutcome(error))
     }
   }
 }

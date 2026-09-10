@@ -8,7 +8,7 @@ import z from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/dsh-session'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { SubagentResult, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -33,8 +33,11 @@ import {
   PactFlowK3sWorker,
   type PactFlowK3sConfig,
   type PactFlowProbeCleanupRecorder,
+  type PactFlowRunCleanupRecorder,
 } from './k3s-worker.ts'
 import { PactFlowProbeCleanupLedger } from './probe-ledger.ts'
+import { PactFlowRunCleanupLedger } from './run-ledger.ts'
+import { redactUrlCredentials } from './redaction.ts'
 import {
   acquireExecutionOrCancelImpl,
   dispatchGitNodeWithSignalImpl,
@@ -45,6 +48,7 @@ import {
   workerForRunImpl,
   type DispatchHost,
   type K3sDispatchRoute,
+  type PactFlowLocalExecution,
 } from './host/dispatch.ts'
 import {
   backoffImpl,
@@ -96,7 +100,12 @@ import {
 } from './workspace-project.ts'
 import { PactFlowProjectCapacity } from './project-capacity.ts'
 import { PactFlowExecutionCapacity } from './execution-capacity.ts'
-import { pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
+import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
+import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAttemptBudget } from './run-budget.ts'
+import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
+import { staleCodeInputs } from './input-staleness.ts'
+import { PACTFLOW_DEFAULT_RETENTION_BYTES, PACTFLOW_DEFAULT_RETENTION_MS, measureRetainedSceneBytes, summarizeRetentionCapacity } from './retention-policy.ts'
+import type { PactFlowRetentionSummary } from './types.ts'
 import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
   BindPactFlowGitRequest,
@@ -303,6 +312,9 @@ export class PactFlowService extends TypertRemoteService {
   private readonly localExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly infrastructureHealth = new PactFlowInfrastructureHealthStore()
   private readonly probeLedger = new PactFlowProbeCleanupLedger()
+  private readonly runLedger = new PactFlowRunCleanupLedger()
+  /** A11: bounded retry/output budgets for runs. */
+  private readonly runBudget = PACTFLOW_DEFAULT_RUN_BUDGET
   private readonly workspaceProjects = new PactFlowWorkspaceProjectStore()
   private readonly projectCapacity = new PactFlowProjectCapacity()
   private readonly executionCapacity = new PactFlowExecutionCapacity(this.projectCapacity)
@@ -529,6 +541,69 @@ export class PactFlowService extends TypertRemoteService {
     return this.ctx.sessionProjections.stateOf(session, 'pactflowProject') ?? { project: null }
   }
 
+  /**
+   * A05 extension: read-only status of retained failure scenes, flagging overdue
+   * ones for review. Never deletes anything — a human decides.
+   */
+  @Remote('retentionStatus')
+  retentionStatus(sessionId: string): PactFlowRetentionSummary {
+    const session = this.liveSession(sessionId)
+    const delivery = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')
+    const capacity = summarizeRetentionCapacity(
+      Object.values(delivery?.cleanups ?? {}), PACTFLOW_DEFAULT_RETENTION_BYTES, Date.now(),
+    )
+    return {
+      total: capacity.total,
+      overdue: capacity.overdue.map(record => ({
+        id: record.id,
+        target: String((record as { target?: string }).target ?? ''),
+        ...record.retainUntil === undefined ? {} : { retainUntil: record.retainUntil },
+      })),
+      retainedBytes: capacity.retainedBytes,
+      measured: capacity.measured,
+      overBudget: capacity.overBudget,
+      maxBytes: capacity.maxBytes,
+    }
+  }
+
+  /**
+   * A12: read-only project handover summary. Works for a live or cold session via
+   * the same projection snapshot path, and never mutates state — so a project stays
+   * explainable (stage, exact Git artifacts, open responsibilities) even if the
+   * plugin is never started again.
+   */
+  @Remote('projectHandover')
+  async projectHandover(sessionId: string, signal?: AbortSignal): Promise<PactFlowHandoverSummary> {
+    return projectHandoverSummary(await this.snapshot(sessionId, signal) as never)
+  }
+
+  /**
+   * F03 follow-up: report code inputs whose predecessor has since produced a newer
+   * successful commit. Read-only — the historical fact that the successor ran on the
+   * recorded commit is preserved; a human decides whether to re-run.
+   */
+  @Remote('staleCodeInputs')
+  staleCodeInputs(sessionId: string, nodeId: string): readonly { readonly dependency: string; readonly branch: string; readonly recorded: string; readonly latest: string }[] {
+    const session = this.livePactFlowSession(sessionId)
+    const node = this.node(session, nodeId)
+    const runs = Object.values(this.runState(session))
+    const run = runs.filter(candidate => candidate.nodeId === node.id && candidate.git !== undefined)
+      .sort((left, right) => right.attempt - left.attempt)[0]
+    const recorded = (run?.git?.codeInputs ?? [])
+      .filter((input): input is { readonly dependency: string; readonly branch: string; readonly commit: string } =>
+        input.dependency !== undefined)
+      .map(input => ({ dependency: input.dependency, branch: input.branch, commit: input.commit }))
+    if (recorded.length === 0) return []
+    const latest = new Map<string, string>()
+    for (const dependency of new Set(recorded.map(input => input.dependency))) {
+      const latestRun = runs.filter(candidate => candidate.nodeId === dependency
+        && candidate.state === 'succeeded' && candidate.gitResult !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]
+      if (latestRun?.gitResult !== undefined) latest.set(dependency, latestRun.gitResult.commit)
+    }
+    return staleCodeInputs(recorded, latest)
+  }
+
   /** Validate the Session workspace and bind its credential-free Git identity. */
   @Remote('bindGit')
   async bindGit(sessionId: string, request: BindPactFlowGitRequest): Promise<PactFlowProject> {
@@ -544,6 +619,25 @@ export class PactFlowService extends TypertRemoteService {
         validationProfileRevisions: validation.revisions,
       }
     }
+    if (request.giteaProviderId !== undefined && this.infrastructure !== undefined) {
+      // Preferred path: the caller names a registered Provider and the Host resolves
+      // the endpoint, credential ref, auth mode and repository identity from it.
+      const provider = this.infrastructure.giteaProvider(request.giteaProviderId)
+      const remoteMatch = this.infrastructure.matchGitea(inspected.remoteUrl)
+      if (remoteMatch === undefined || remoteMatch.provider.id !== provider.id) {
+        throw new Error('PactFlow Gitea Provider does not match the bound remote repository')
+      }
+      inspected = {
+        ...inspected,
+        gitea: {
+          baseUrl: provider.baseUrl,
+          owner: remoteMatch.owner,
+          repo: remoteMatch.repo,
+          tokenCredentialRef: provider.tokenCredentialRef,
+          ...provider.username === undefined ? {} : { username: provider.username },
+        },
+      }
+    }
     if (inspected.gitea === undefined && this.infrastructure !== undefined) {
       const matched = this.infrastructure.matchGitea(inspected.remoteUrl)
       if (matched !== undefined) {
@@ -557,6 +651,27 @@ export class PactFlowService extends TypertRemoteService {
             ...matched.provider.username === undefined ? {} : { username: matched.provider.username },
           },
         }
+      }
+    } else if (inspected.gitea !== undefined && this.infrastructure !== undefined
+      && this.infrastructure.settings.gitProviders.length > 0) {
+      // An explicit endpoint + credential combination must resolve to exactly one
+      // registered Provider: otherwise a caller could pair a registered credential
+      // ref with an unregistered target. When the remote itself already matches a
+      // Provider, the explicit fields must agree with that match.
+      const endpoint = inspected.gitea.baseUrl.replace(/\/+$/, '')
+      const byEndpoint = this.infrastructure.settings.gitProviders.filter(
+        provider => provider.baseUrl.replace(/\/+$/, '') === endpoint)
+      if (byEndpoint.length !== 1) {
+        throw new Error('PactFlow Gitea binding must reference a single registered Git Provider endpoint')
+      }
+      if (byEndpoint[0]!.tokenCredentialRef !== inspected.gitea.tokenCredentialRef) {
+        throw new Error('PactFlow Gitea binding credential reference does not belong to the registered Provider')
+      }
+      const remoteMatch = this.infrastructure.matchGitea(inspected.remoteUrl)
+      if (remoteMatch !== undefined
+        && (remoteMatch.provider.baseUrl.replace(/\/+$/, '') !== endpoint
+          || remoteMatch.owner !== inspected.gitea.owner || remoteMatch.repo !== inspected.gitea.repo)) {
+        throw new Error('PactFlow Gitea binding does not match the bound remote repository')
       }
     }
     if (inspected.auth !== undefined) {
@@ -645,6 +760,20 @@ export class PactFlowService extends TypertRemoteService {
       remoteRef: run.gitResult!.remoteRef,
       expectedCommit: run.gitResult!.commit,
     })).sort((left, right) => left.remoteRef.localeCompare(right.remoteRef))
+    // F04: the verification approval must have bound this exact delivery subject.
+    // A change to the task set or a successful commit invalidates the prior approval.
+    // F04: the verification approval must have bound this exact delivery subject.
+    // A change to the task set or a successful commit invalidates the prior approval.
+    const verifiedSubject = this.latestVerificationSubject(session, need.id, need.revision - 1)
+    if (verifiedSubject === undefined) {
+      throw new Error('PactFlow closing requires a verification approval bound to a delivery subject; re-confirm the reviewed tasks')
+    }
+    if (verifiedSubject !== pactFlowDeliverySubjectDigest(
+      String(session.id), String(need.id),
+      expectedTaskRefs.map(ref => ({ remoteRef: ref.remoteRef, commit: ref.expectedCommit })),
+    )) {
+      throw new Error('PactFlow delivery subject changed after verification approval; re-confirm the reviewed tasks')
+    }
     if (request.taskRefs !== undefined) {
       const supplied = [...request.taskRefs].sort((left, right) => left.remoteRef.localeCompare(right.remoteRef))
       if (JSON.stringify(supplied) !== JSON.stringify(expectedTaskRefs)) {
@@ -678,7 +807,9 @@ export class PactFlowService extends TypertRemoteService {
       giteaBinding, giteaToken.value, priorClosing.closing.branch, binding.defaultBranch, priorClosing.closing.commit,
     )
     if (priorPullRequest?.merged === true) {
-      await this.git.verifyClosingMerged(session.header.cwd, binding, priorClosing!.closing!.commit, gitSecret)
+      await this.git.verifyClosingMerged(
+        session.header.cwd, binding, priorClosing!.closing!.commit, gitSecret, priorPullRequest.mergeCommit,
+      )
       await this.git.verifyClosingTaskRefs(session.header.cwd, binding, expectedTaskRefs, gitSecret)
     }
     const integration = priorPullRequest?.merged === true ? priorClosing!.closing! : await this.git.prepareClosing(
@@ -728,22 +859,37 @@ export class PactFlowService extends TypertRemoteService {
     if (!merged.merged || merged.mergeCommit === undefined) {
       throw new Error('PactFlow Gitea PR did not report a merged commit')
     }
-    const defaultCommit = await this.git.verifyClosingMerged(
-      session.header.cwd, binding, integration.commit, gitSecret,
+    // F05: the delivery identity is the provider-reported exact merge commit, not
+    // the default-branch tip. Revalidate that exact commit before recording.
+    const mergeCommit = await this.git.verifyClosingMerged(
+      session.header.cwd, binding, integration.commit, gitSecret, merged.mergeCommit,
     )
-    const release: PactFlowRelease = {
+    await this.git.revalidateMergeCommit(
+      session.header.cwd, binding, mergeCommit, gitSecret,
+      await this.assertValidationProfilesCurrent(session, binding),
+    )
+    // F06: if a release was already recorded (crash between the two events), reuse
+    // it verbatim and only fill in the missing phase transition.
+    const recordedRelease = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases[need.id]
+    if (recordedRelease !== undefined && recordedRelease.commit !== mergeCommit) {
+      throw new Error('PactFlow recorded release does not match the verified merge commit; explicit recovery is required')
+    }
+    const release: PactFlowRelease = recordedRelease ?? {
       needId: need.id,
-      commit: defaultCommit,
+      commit: mergeCommit,
       branch: binding.defaultBranch,
       serviceUrl: merged.htmlUrl,
       recordedAt: Date.now(),
     }
-    this.events.append(session, 'pactflow/release-recorded', { v: 1, release })
-    const deployed = this.transitionNeedInSession(session, {
-      needId: need.id,
-      expectedRevision: need.revision,
-      to: 'deployed',
-    })
+    if (recordedRelease === undefined) this.events.append(session, 'pactflow/release-recorded', { v: 1, release })
+    const currentNeed = this.need(session, need.id)
+    const deployed = currentNeed.phase === 'deployed'
+      ? currentNeed
+      : this.transitionNeedInSession(session, {
+        needId: need.id,
+        expectedRevision: currentNeed.revision,
+        to: 'deployed',
+      })
     const cleanupFailures: string[] = []
     const closingRecord = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[cleanupRecords[0]!.id]
       ?? cleanupRecords[0]!
@@ -782,7 +928,8 @@ export class PactFlowService extends TypertRemoteService {
   /** Build the dispatch seam host view. */
   private dispatchHost(): DispatchHost {
     return {
-      ctx: this.ctx,
+      agents: () => this.ctx.get('agents') as AgentRegistry | undefined,
+      subagents: () => this.ctx.get('subagents') as SubagentRuntime | undefined,
       events: this.events,
       git: this.git,
       executionCapacity: this.executionCapacity,
@@ -806,8 +953,11 @@ export class PactFlowService extends TypertRemoteService {
       settleRunInSession: (session, request, gitResult, k3sResult, resultAt) =>
         this.settleRunInSession(session, request, gitResult, k3sResult, resultAt),
       ensureK3sCleanup: (session, run) => this.ensureK3sCleanup(session, run),
+      retainLocalFailure: (session, run) => this.retainLocalFailure(session, run),
       resolveGitAuth: spec => this.resolveGitAuth(spec),
       workerForRun: spec => this.workerForRun(spec),
+      codeInputCommits: (session, node) => this.codeInputCommits(session, node),
+      runCleanupRecorder: k3s => this.runCleanupRecorder(k3s),
       resolveK3sDispatch: (poolId, templateId, modelConnectionId) =>
         this.resolveK3sDispatch(poolId, templateId, modelConnectionId),
       acquireExecutionOrCancel: (session, queueId, workspaceId, policy, profileId, poolId, signal) =>
@@ -822,7 +972,10 @@ export class PactFlowService extends TypertRemoteService {
   private recoveryHost(): RecoveryHost {
     const service = this
     return {
-      ctx: this.ctx,
+      // Lazy so pure helpers (isPermanentK3sError/retryK3sOperation) can run on a
+      // host view that is never wired to a live Context.
+      get logger() { return service.ctx.logger },
+      liveSession: sessionId => service.ctx.sessions.get(sessionId),
       events: this.events,
       git: this.git,
       executionCapacity: this.executionCapacity,
@@ -868,7 +1021,8 @@ export class PactFlowService extends TypertRemoteService {
     const service = this
     return {
       events: this.events,
-      ctx: this.ctx,
+      logger: this.ctx.logger,
+      delivery: session => this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery'),
       git: this.git,
       cleanupTimers: this.cleanupTimers,
       activeCleanups: this.activeCleanups,
@@ -896,9 +1050,10 @@ export class PactFlowService extends TypertRemoteService {
   private probeHost(): ProbeRecoveryHost {
     return {
       probeLedger: this.probeLedger,
+      runLedger: this.runLedger,
       k3s: this.k3s,
       k3sByPool: this.k3sByPool,
-      ctx: this.ctx,
+      logger: this.ctx.logger,
       boundedOutcome: value => this.boundedOutcome(value),
     }
   }
@@ -954,12 +1109,40 @@ export class PactFlowService extends TypertRemoteService {
     return await ensureK3sCleanupImpl(this.cleanupHost(), session, run)
   }
 
+  /**
+   * A05: a failed local run may leave a task branch/worktree behind. Record a
+   * discoverable but non-auto-cleaned responsibility so the residue is auditable
+   * and never silently deleted (uncommitted work may be worth diagnosing).
+   */
+  private retainLocalFailure(session: Session, run: PactFlowRun): void {
+    if (run.git === undefined) return
+    const id = `cleanup-${run.id}-git-retained`
+    const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[id]
+    if (existing !== undefined) return
+    // A bounded measurement so a large residue is accounted for (capacity) without
+    // blocking the failure path; never auto-deleted, only surfaced.
+    const size = measureRetainedSceneBytes(run.git.worktreePath)
+    this.appendCleanupRecord(session, {
+      id, runId: run.id, needId: this.node(session, run.nodeId).needId,
+      target: `git:${run.git.branch}`, state: 'pending', attempt: 1, retain: true,
+      // A bounded window so overdue scenes can be surfaced for review; never auto-deleted.
+      retainUntil: Date.now() + PACTFLOW_DEFAULT_RETENTION_MS,
+      sizeBytes: size.bytes,
+    })
+  }
+
   /** Persist one probe's cleanup responsibility under its provider connection identity. */
   private probeCleanupRecorder(
     worker: PactFlowK3sWorker,
     kind: 'harness' | 'api' | 'image',
   ): PactFlowProbeCleanupRecorder {
     return probeCleanupRecorderImpl(this.probeHost(), worker, kind)
+  }
+
+  /** Persist one Run's creation intent/confirmation under its provider connection identity. */
+  private runCleanupRecorder(k3s: PactFlowK3sWorker): PactFlowRunCleanupRecorder {
+    const fingerprint = k3s.connectionFingerprint()
+    return event => this.runLedger.apply(fingerprint, event)
   }
 
   /** Reconcile persisted probe cleanup responsibilities with the configured providers. */
@@ -1047,6 +1230,8 @@ export class PactFlowService extends TypertRemoteService {
       approvalRequestId: request.approvalRequestId,
       needRevision: request.needRevision,
       evidenceDigest: request.evidenceDigest,
+      // F04: a verification approval binds the exact delivery subject it approves.
+      ...request.kind === 'verification' ? { subjectDigest: this.deliverySubjectDigest(session, need.id) } : {},
       source: request.source,
     }
     this.events.append(session, 'pactflow/review-recorded', { v: 1, review })
@@ -1100,6 +1285,7 @@ export class PactFlowService extends TypertRemoteService {
     const dag = this.dagState(session)
     if (dag[id] !== undefined) throw new Error(`PactFlow node "${id}" already exists`)
     const dependencies = this.dependencies(dag, need.id, id, request.dependencies)
+    const codeInputs = this.codeInputs(dependencies, request.codeInputs)
     const node: PactFlowNode = {
       id,
       needId: need.id,
@@ -1107,6 +1293,7 @@ export class PactFlowService extends TypertRemoteService {
       state: this.dependenciesSucceeded(dag, dependencies) ? 'ready' : 'pending',
       revision: 1,
       dependencies,
+      ...(codeInputs.length === 0 ? {} : { codeInputs }),
       updatedAt: Date.now(),
     }
     this.events.append(session, 'pactflow/node-created', { v: 1, node })
@@ -1157,6 +1344,13 @@ export class PactFlowService extends TypertRemoteService {
     if (current.state !== 'failed' && current.state !== 'cancelled') {
       throw new Error(`PactFlow node "${current.id}" cannot retry from state ${current.state}`)
     }
+    // A11: retries are budgeted. Refuse past the attempt budget with an explicit
+    // reason instead of looping indefinitely.
+    const nextAttempt = Object.values(this.runState(session))
+      .filter(run => run.nodeId === current.id)
+      .reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1
+    const verdict = evaluateAttemptBudget(this.runBudget.maxAttempts, nextAttempt)
+    if (verdict.exhausted) throw new Error(`PactFlow node "${current.id}" exceeded its retry budget: ${verdict.detail}`)
     const node: PactFlowNode = {
       ...current,
       state: this.dependenciesSucceeded(this.dagState(session), current.dependencies) ? 'ready' : 'pending',
@@ -2302,7 +2496,7 @@ export class PactFlowService extends TypertRemoteService {
     session: Session,
     request: DispatchPactFlowLocalNodeRequest,
     requiresCwd: boolean,
-  ): { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string } {
+  ): PactFlowLocalExecution {
     return localExecutionImpl(this.dispatchHost(), session, request, requiresCwd)
   }
 
@@ -2310,7 +2504,7 @@ export class PactFlowService extends TypertRemoteService {
   private async executeClaimed(
     session: Session,
     request: DispatchPactFlowLocalNodeRequest,
-    execution: { readonly parent: Agent; readonly subagents: SubagentRuntime; readonly prompt: string },
+    execution: PactFlowLocalExecution,
     claimed: PactFlowClaimResult,
     git?: PactFlowGitRunSpec,
     externalSignal?: AbortSignal,
@@ -2348,6 +2542,25 @@ export class PactFlowService extends TypertRemoteService {
 
   private workerForRun(spec: PactFlowK3sRunSpec): PactFlowK3sWorker {
     return workerForRunImpl(this.dispatchHost(), spec)
+  }
+
+  /**
+   * F03: the exact successful commits of a node's code-input dependencies, in a
+   * stable order. Each is the newest succeeded Run's Git result for that node.
+   */
+  private codeInputCommits(session: Session, node: PactFlowNode): readonly { readonly dependency: string; readonly branch: string; readonly commit: string }[] {
+    const codeInputs = node.codeInputs ?? []
+    if (codeInputs.length === 0) return []
+    const runs = Object.values(this.runState(session))
+    return [...codeInputs].sort().flatMap((dependency) => {
+      const run = runs.filter(candidate => candidate.nodeId === dependency
+        && candidate.state === 'succeeded' && candidate.gitResult !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]
+      if (run?.gitResult === undefined) {
+        throw new Error(`PactFlow code input node "${dependency}" has no verified successful commit`)
+      }
+      return [{ dependency: String(dependency), branch: run.gitResult.remoteRef, commit: run.gitResult.commit }]
+    })
   }
 
   private async resolveCredential(reference: string, label: string): Promise<string> {
@@ -2431,11 +2644,18 @@ export class PactFlowService extends TypertRemoteService {
 
   /** Rehydrate Basic Auth usernames for historical Session bindings from the current non-secret provider config. */
   private effectiveGiteaBinding(binding: PactFlowGiteaBinding): PactFlowGiteaBinding {
-    if (binding.username !== undefined) return binding
     const normalizedBaseUrl = binding.baseUrl.replace(/\/$/, '')
     const provider = this.infrastructure?.settings.gitProviders.find(candidate =>
       candidate.baseUrl.replace(/\/$/, '') === normalizedBaseUrl
       && candidate.tokenCredentialRef === binding.tokenCredentialRef)
+    // A historical binding whose endpoint + credential ref does not correspond to a
+    // registered Provider must not be trusted with a credential: it stays
+    // read-only/blocked until the user re-confirms a registered Provider.
+    if (provider === undefined && this.infrastructure !== undefined
+      && this.infrastructure.settings.gitProviders.length > 0) {
+      throw new Error('PactFlow Gitea binding does not correspond to a registered Git Provider; re-confirm the provider before use')
+    }
+    if (binding.username !== undefined) return binding
     return provider?.username === undefined ? binding : { ...binding, username: provider.username }
   }
 
@@ -2716,6 +2936,34 @@ export class PactFlowService extends TypertRemoteService {
     return reviews[0]?.decision === 'approved'
   }
 
+  /** Deterministic digest of a Need's current delivery subject (task set + success commits). */
+  private deliverySubjectDigest(session: Session, needId: PactFlowNeed['id']): string {
+    const nodes = Object.values(this.dagState(session)).filter(node => node.needId === needId)
+    const runs = Object.values(this.runState(session))
+    const taskRefs = nodes.flatMap((node) => {
+      const run = runs.filter(candidate => candidate.nodeId === node.id
+        && candidate.state === 'succeeded' && candidate.gitResult !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]
+      return run?.gitResult === undefined
+        ? []
+        : [{ remoteRef: run.gitResult.remoteRef, commit: run.gitResult.commit }]
+    })
+    return pactFlowDeliverySubjectDigest(String(session.id), String(needId), taskRefs)
+  }
+
+  /** The subject digest bound by the latest verification approval for one need revision. */
+  private latestVerificationSubject(session: Session, needId: PactFlowNeed['id'], needRevision: number): string | undefined {
+    const reviews = Object.values(
+      this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {},
+    ).filter(review => review.needId === needId && review.kind === 'verification'
+      && review.source === 'dsh-approval'
+      && review.approvalRequestId !== undefined
+      && review.needRevision === needRevision)
+      .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
+    const latest = reviews[0]
+    return latest?.decision === 'approved' ? latest.subjectDigest : undefined
+  }
+
   /** Resolve one node from the DAG projection. */
   private node(session: Session, rawId: string): PactFlowNode {
     const id = PactFlowNodeId(rawId)
@@ -2762,6 +3010,22 @@ export class PactFlowService extends TypertRemoteService {
     dependencies: readonly PactFlowNode['id'][],
   ): boolean {
     return dependencies.every(dependency => dag[dependency]?.state === 'succeeded')
+  }
+
+  /** Code-input dependencies must be a subset of declared dependencies (never a new edge). */
+  private codeInputs(
+    dependencies: readonly PactFlowNode['id'][],
+    rawCodeInputs: readonly string[] | undefined,
+  ): readonly PactFlowNode['id'][] {
+    if (rawCodeInputs === undefined || rawCodeInputs.length === 0) return []
+    const codeInputs = rawCodeInputs.map(PactFlowNodeId).sort()
+    if (new Set(codeInputs).size !== codeInputs.length) throw new Error('PactFlow node code inputs must be unique')
+    for (const codeInput of codeInputs) {
+      if (!dependencies.includes(codeInput)) {
+        throw new Error(`PactFlow code input "${codeInput}" must also be a declared dependency`)
+      }
+    }
+    return codeInputs
   }
 
   /** Follow dependency edges to detect whether `from` already reaches `target`. */
@@ -2820,10 +3084,12 @@ export class PactFlowService extends TypertRemoteService {
   /** Keep operational outcomes useful without turning the Session Log into an output dump. */
   private boundedOutcome(value: unknown): string {
     const rendered = value instanceof Error ? value.message : String(value)
-    const encoded = new TextEncoder().encode(rendered)
-    return encoded.length <= 4_096
-      ? rendered
-      : `${new TextDecoder().decode(encoded.slice(0, 4_080))}…`
+    // Redact first, then truncate: truncating first could keep a credential prefix.
+    const redacted = redactUrlCredentials(rendered)
+    // A11: the log/output byte budget is the single authority for this cap; the
+    // fallback keeps prototype-only test doubles (no instance budget) working.
+    const budget = this.runBudget?.maxOutputBytes ?? PACTFLOW_DEFAULT_RUN_BUDGET.maxOutputBytes
+    return boundOutputToBudget(redacted, budget).text
   }
 }
 

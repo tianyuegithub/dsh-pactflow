@@ -46,7 +46,8 @@ function samePersistedValue(left: unknown, right: unknown): boolean {
 }
 
 function cleanupIdentity(record: PactFlowCleanupRecord): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(record).filter(([key]) => !['state', 'attempt', 'error', 'nextRetryAt'].includes(key)))
+  // `retainUntil`/`sizeBytes` are mutable retention annotations, not part of resource identity.
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !['state', 'attempt', 'error', 'nextRetryAt', 'retainUntil', 'sizeBytes'].includes(key)))
 }
 
 /** Exact vocabulary written by dsh-pactflow 0.1.0. Never derive this historical tuple. */
@@ -140,6 +141,7 @@ const gitRunSpecSchema = pactFlowSchema<PactFlowGitRunSpec>(z.object({
   remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
   baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/), branch: z.string().min(1),
   worktreePath: z.string().refine(isAbsolute), auth: gitAuthSchema.optional(),
+  codeInputs: z.array(z.object({ dependency: z.string().min(1).optional(), branch: z.string().min(1), commit: z.string().regex(/^[0-9a-f]{40,64}$/) })).optional(),
   validationCommands: z.array(validationCommandSchema),
   validationProfileIds: z.array(z.string().min(1)).optional(),
   validationProfileRevisions: z.record(z.string(), z.number().int().positive()).optional(),
@@ -201,6 +203,7 @@ const nodeSchema = pactFlowSchema<PactFlowNode>(z.object({
   id: pactFlowIdSchema<'node'>(), needId: pactFlowIdSchema<'need'>(), title: z.string().min(1),
   state: z.enum(['pending', 'ready', 'claimed', 'running', 'blocked', 'review', 'succeeded', 'failed', 'cancelled', 'archived']),
   revision: z.number().int().positive(), dependencies: z.array(pactFlowIdSchema<'node'>()), updatedAt: z.number().int().nonnegative(),
+  codeInputs: z.array(pactFlowIdSchema<'node'>()).optional(),
 }))
 
 const runSchema = pactFlowSchema<PactFlowRun>(z.object({
@@ -220,6 +223,7 @@ const reviewSchema = pactFlowSchema<PactFlowReview>(z.object({
   decision: z.enum(['approved', 'rejected', 'changes-requested']), note: z.string(), recordedAt: z.number().int().nonnegative(),
   approvalRequestId: z.string().min(1).optional(), needRevision: z.number().int().positive().optional(),
   evidenceDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(), source: z.literal('dsh-approval').optional(),
+  subjectDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }))
 
 const documentSchema = pactFlowSchema<PactFlowDocument>(z.object({
@@ -239,6 +243,9 @@ const cleanupSchema = pactFlowSchema<PactFlowCleanupRecord>(z.object({
   closing: z.object({ branch: z.string().min(1), commit: z.string().regex(/^[0-9a-f]{40,64}$/),
     worktreePath: z.string().refine(isAbsolute) }).optional(),
   requiresRelease: z.boolean().optional(),
+  retain: z.boolean().optional(),
+  retainUntil: z.number().int().nonnegative().optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
   closingInputDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   attempt: z.number().int().positive(), error: z.string().optional(), nextRetryAt: z.number().int().nonnegative().optional(),
 }).refine(value => value.runId !== undefined || value.needId !== undefined, 'cleanup record must reference a Run or Need'))

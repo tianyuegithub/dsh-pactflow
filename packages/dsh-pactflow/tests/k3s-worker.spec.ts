@@ -108,25 +108,37 @@ describe('PactFlow K3s Worker provider', () => {
   })
 
   function creationFixture(worker: PactFlowK3sWorker, jobFailure: 'throws' | 'no-uid' | 'succeeds') {
-    const createdCore = new Set<string>()
+    const uids = new Map<string, string>()
     const createdJobs = new Set<string>()
     const deletions: string[] = []
+    const uidFor = (kind: 'secret' | 'configmap', name: string): string => {
+      const existing = uids.get(`${kind}:${name}`)
+      if (existing !== undefined) return existing
+      const created = `${kind}-${name}-uid`
+      uids.set(`${kind}:${name}`, created)
+      return created
+    }
     Reflect.set(worker, 'core', {
       createNamespacedSecret: async ({ body }: { body: V1Secret }) => {
-        const name = body.metadata?.name ?? ''; createdCore.add(name)
-        return { ...body, metadata: { ...body.metadata, uid: `${name}-uid` } }
+        const name = body.metadata?.name ?? ''
+        return { ...body, metadata: { ...body.metadata, uid: uidFor('secret', name) } }
       },
       createNamespacedConfigMap: async ({ body }: { body: V1ConfigMap }) => {
-        createdCore.add(body.metadata?.name ?? ''); return { ...body }
+        const name = body.metadata?.name ?? ''
+        return { ...body, metadata: { ...body.metadata, uid: uidFor('configmap', name) } }
       },
       replaceNamespacedSecret: async () => {}, replaceNamespacedConfigMap: async () => {},
-      deleteNamespacedSecret: async ({ name }: { name: string }) => {
-        if (!createdCore.has(name)) throw { code: 404 }
-        createdCore.delete(name); deletions.push(name)
+      readNamespacedSecret: async ({ name }: { name: string }) => ({ metadata: { name, uid: uidFor('secret', name) } }),
+      readNamespacedConfigMap: async ({ name }: { name: string }) => ({ metadata: { name, uid: uidFor('configmap', name) } }),
+      listNamespacedPod: async () => ({ items: [] }),
+      deleteNamespacedSecret: async ({ name, body }: { name: string; body?: V1DeleteOptions }) => {
+        // Only the exact confirmed UID may be deleted; a mismatch means a replacement object.
+        if (body?.preconditions?.uid !== uidFor('secret', name)) throw { code: 409 }
+        uids.delete(`secret:${name}`); deletions.push(`secret:${name}`)
       },
-      deleteNamespacedConfigMap: async ({ name }: { name: string }) => {
-        if (!createdCore.has(name)) throw { code: 404 }
-        createdCore.delete(name); deletions.push(name)
+      deleteNamespacedConfigMap: async ({ name, body }: { name: string; body?: V1DeleteOptions }) => {
+        if (body?.preconditions?.uid !== uidFor('configmap', name)) throw { code: 409 }
+        uids.delete(`configmap:${name}`); deletions.push(`configmap:${name}`)
       },
     })
     Reflect.set(worker, 'batch', {
@@ -136,12 +148,18 @@ describe('PactFlow K3s Worker provider', () => {
         if (jobFailure === 'no-uid') return { ...body, metadata: { ...body.metadata } }
         return { ...body, metadata: { ...body.metadata, uid: 'created-job-uid' } }
       },
-      deleteNamespacedJob: async ({ name }: { name: string }) => {
+      readNamespacedJob: async ({ name }: { name: string }) => {
         if (!createdJobs.has(name)) throw { code: 404 }
-        createdJobs.delete(name); deletions.push(name)
+        // Identity mismatch (labels/annotations absent) makes cleanup fail closed.
+        return { metadata: { name, uid: 'created-job-uid' } }
+      },
+      deleteNamespacedJob: async ({ name, body }: { name: string; body?: V1DeleteOptions }) => {
+        if (!createdJobs.has(name)) throw { code: 404 }
+        if (body?.preconditions?.uid !== 'created-job-uid') throw { code: 409 }
+        createdJobs.delete(name); deletions.push(`job:${name}`)
       },
     })
-    return { createdCore, createdJobs, deletions }
+    return { uids, createdJobs, deletions }
   }
 
   const bindingGit = (): PactFlowGitRunSpec => ({ remote: 'origin', remoteUrl: 'ssh://git@gitea.invalid/org/repo.git', defaultBranch: 'main',
@@ -152,21 +170,20 @@ describe('PactFlow K3s Worker provider', () => {
     const git = bindingGit()
     const spec = { ...worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task'),
       ephemeralModelSecret: true }
-    const { createdCore, deletions } = creationFixture(worker, 'succeeds')
+    const { deletions } = creationFixture(worker, 'succeeds')
     Reflect.set(worker, 'core', {
       ...Reflect.get(worker, 'core'),
       createNamespacedSecret: async ({ body }: { body: V1Secret }) => {
         const name = body.metadata?.name ?? ''
         if (name !== spec.modelSecretName) throw new Error('input Secret quota exceeded')
-        createdCore.add(name)
-        return { ...body, metadata: { ...body.metadata, uid: 'model-uid' } }
+        return { ...body, metadata: { ...body.metadata, uid: `secret-${name}-uid` } }
       },
     })
     const wait = vi.fn()
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal, 'model-key'))
       .rejects.toThrow('failed to create K3s input Secret')
-    expect(deletions).toEqual([spec.modelSecretName])
+    expect(deletions).toEqual([`secret:${spec.modelSecretName}`])
     expect(wait).not.toHaveBeenCalled()
   })
 
@@ -184,11 +201,11 @@ describe('PactFlow K3s Worker provider', () => {
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal, 'model-key'))
       .rejects.toThrow('failed to create K3s ConfigMap')
-    expect(deletions).toEqual([spec.modelSecretName, spec.inputSecretName])
+    expect(deletions).toEqual([`secret:${spec.modelSecretName}`, `secret:${spec.inputSecretName}`])
     expect(wait).not.toHaveBeenCalled()
   })
 
-  it('compensates created children and keeps the cause when the Job creation fails', async () => {
+  it('compensates only confirmed-owned children when the Job creation fails', async () => {
     const worker = new PactFlowK3sWorker(config())
     const git = bindingGit()
     const spec = { ...worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task'),
@@ -198,11 +215,14 @@ describe('PactFlow K3s Worker provider', () => {
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal, 'model-key'))
       .rejects.toThrow('failed to create K3s Job')
-    expect(deletions).toEqual([spec.configMapName, spec.modelSecretName, spec.inputSecretName])
+    // Owned order is model Secret, input Secret, ConfigMap; the Job was never created.
+    expect(deletions).toEqual([
+      `secret:${spec.modelSecretName}`, `secret:${spec.inputSecretName}`, `configmap:${spec.configMapName}`,
+    ])
     expect(wait).not.toHaveBeenCalled()
   })
 
-  it('keeps compensating and preserves the creation cause when one compensation fails', async () => {
+  it('keeps compensating the remaining owned resources when one compensation fails', async () => {
     const worker = new PactFlowK3sWorker(config())
     const git = bindingGit()
     const spec = { ...worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task'),
@@ -216,11 +236,11 @@ describe('PactFlow K3s Worker provider', () => {
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal, 'model-key'))
       .rejects.toThrow(/failed to create K3s Job.*compensation/)
-    expect(deletions).toEqual([spec.modelSecretName, spec.inputSecretName])
+    expect(deletions).toEqual([`secret:${spec.modelSecretName}`, `secret:${spec.inputSecretName}`])
     expect(wait).not.toHaveBeenCalled()
   })
 
-  it('cancels by name and keeps the cause when creation returns no UID', async () => {
+  it('never deletes a Job by name when its creation returns no UID', async () => {
     const worker = new PactFlowK3sWorker(config())
     const git = bindingGit()
     const spec = worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task')
@@ -228,11 +248,14 @@ describe('PactFlow K3s Worker provider', () => {
     const wait = vi.fn()
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal)).rejects.toThrow('has no UID')
-    expect(deletions).toEqual([spec.configMapName, spec.inputSecretName, spec.jobName])
+    // The Job's identity is unconfirmed, so it stays an unknown responsibility;
+    // only the confirmed children are deleted.
+    expect(deletions).toEqual([`secret:${spec.inputSecretName}`, `configmap:${spec.configMapName}`])
+    expect(deletions).not.toContain(`job:${spec.jobName}`)
     expect(wait).not.toHaveBeenCalled()
   })
 
-  it('preserves the missing-UID cause when the name-based compensation fails', async () => {
+  it('preserves the missing-UID cause when owned compensation fails', async () => {
     const worker = new PactFlowK3sWorker(config())
     const git = bindingGit()
     const spec = worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task')
@@ -245,11 +268,12 @@ describe('PactFlow K3s Worker provider', () => {
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal))
       .rejects.toThrow(/has no UID.*compensation/)
-    expect(deletions).toEqual([spec.inputSecretName, spec.jobName])
+    expect(deletions).toEqual([`secret:${spec.inputSecretName}`])
+    expect(deletions).not.toContain(`job:${spec.jobName}`)
     expect(wait).not.toHaveBeenCalled()
   })
 
-  it('preserves the binding failure when owner-reference compensation cannot delete', async () => {
+  it('preserves the binding failure without deleting an unconfirmed Job by name', async () => {
     const worker = new PactFlowK3sWorker(config())
     const git = bindingGit()
     const spec = worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task')
@@ -257,13 +281,12 @@ describe('PactFlow K3s Worker provider', () => {
     Reflect.set(worker, 'core', {
       ...Reflect.get(worker, 'core'),
       replaceNamespacedConfigMap: async () => { throw new Error('ConfigMap replace conflict') },
-      deleteNamespacedConfigMap: async () => { throw new Error('ConfigMap delete forbidden') },
     })
     const wait = vi.fn()
     Reflect.set(worker, 'waitForResult', wait)
     await expect(worker.run(spec, git, 'task', new AbortController().signal))
       .rejects.toThrow('failed to bind ConfigMap')
-    expect(deletions).toEqual([spec.inputSecretName, spec.jobName])
+    // The binding failure is preserved; compensation runs through the UID-bound path.
     expect(wait).not.toHaveBeenCalled()
   })
 
@@ -326,7 +349,9 @@ describe('PactFlow K3s Worker provider', () => {
       templateId: 'claude',
       harness: 'claude',
       apiMode: 'anthropic-messages',
-      activeDeadlineSeconds: 60,
+      // The Job wall-clock budget is independent of the 60s ownership lease: it must
+      // not kill a healthy task at the first lease interval.
+      activeDeadlineSeconds: 3_600,
       image: template.image,
       gitSecretName: 'pactflow-git',
     })
@@ -361,6 +386,26 @@ describe('PactFlow K3s Worker provider', () => {
     expect(configMap.data?.['worker.sh']).toContain('pactflow-input')
   })
 
+  it('folds declared predecessor code inputs into the K3s baseline (F03)', () => {
+    const worker = new PactFlowK3sWorker(config())
+    const input = { dependency: 'node-a', branch: 'pactflow/need/node-a/run', commit: 'c'.repeat(40) }
+    const git: PactFlowGitRunSpec = { ...bindingGit(), codeInputs: [input] }
+    const spec = worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task')
+    const inputSecret = (Reflect.get(worker, 'inputSecret') as (s: unknown, g: unknown, p: unknown, r: unknown) =>
+      { stringData: Record<string, string> }).call(worker, spec, git, 'task', { runNonce: 'n', claimToken: 't' })
+    const document = JSON.parse(inputSecret.stringData['spec.json']!) as { codeInputs?: { commit: string }[] }
+    expect(document.codeInputs).toEqual([{ commit: input.commit }])
+    // The container script really folds the exact commit, and measures the worker's
+    // own change against the folded baseline (not the raw base).
+    const configMap = (Reflect.get(worker, 'configMap') as (s: unknown) => { data: Record<string, string> }).call(worker, spec)
+    expect(configMap.data['worker.sh']).toContain('merge --no-ff --no-edit "$CODE_INPUT"')
+    expect(configMap.data['worker.sh']).toContain('BASELINE_COMMIT')
+    expect(configMap.data['worker.sh']).toContain('CURRENT_COMMIT" != "$BASELINE_COMMIT')
+    // The digest binds the code inputs, so a swapped baseline can never pass the result check.
+    const withoutInputs = worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, bindingGit(), 'task')
+    expect(spec.specDigest).not.toBe(withoutInputs.specDigest)
+  })
+
   it('admits only bounded prompts and SSH Git remotes before claim', () => {
     const worker = new PactFlowK3sWorker(config())
     const base: PactFlowGitRunSpec = {
@@ -380,7 +425,7 @@ describe('PactFlow K3s Worker provider', () => {
     return worker
   }
 
-  it('fails the run closed and compensates by exact name when the Job creation hangs', async () => {
+  it('fails the run closed and compensates only confirmed owners when the Job creation hangs', async () => {
     vi.useFakeTimers()
     try {
       const worker = hangingWorker()
@@ -399,28 +444,30 @@ describe('PactFlow K3s Worker provider', () => {
       const expectation = expect(pending).rejects.toThrow(/failed to create K3s Job.*timed out/)
       await vi.advanceTimersByTimeAsync(50)
       await expectation
-      expect(deletions).toEqual([spec.configMapName, spec.inputSecretName, spec.modelSecretName, spec.jobName])
+      // The hung Job has no confirmed UID, so it is never deleted by name; the
+      // confirmed children are.
+      expect(deletions).toEqual([
+        `secret:${spec.modelSecretName}`, `secret:${spec.inputSecretName}`, `configmap:${spec.configMapName}`,
+      ])
+      expect(deletions).not.toContain(`job:${spec.jobName}`)
       expect(wait).not.toHaveBeenCalled()
     } finally { vi.useRealTimers() }
   })
 
-  it('compensates the per-run model Secret by its unique name when its creation hangs', async () => {
+  it('keeps a hung model Secret as unknown rather than deleting it by name', async () => {
     vi.useFakeTimers()
     try {
       const worker = hangingWorker()
       const git = bindingGit()
       const spec = { ...worker.plan('run-11111111-2222-3333-4444-555555555555' as never, 'claude', 'git', 60_000, git, 'task'),
         ephemeralModelSecret: true }
-      const { createdCore, deletions } = creationFixture(worker, 'succeeds')
+      const { deletions } = creationFixture(worker, 'succeeds')
       Reflect.set(worker, 'core', {
         ...Reflect.get(worker, 'core'),
         createNamespacedSecret: ({ body }: { body: V1Secret }) => {
-          if (body.metadata?.name === spec.modelSecretName) {
-            createdCore.add(spec.modelSecretName)
-            return new Promise<never>(() => {})
-          }
-          createdCore.add(body.metadata?.name ?? '')
-          return Promise.resolve({ ...body, metadata: { ...body.metadata, uid: `${body.metadata?.name}-uid` } })
+          const name = body.metadata?.name ?? ''
+          if (name === spec.modelSecretName) return new Promise<never>(() => {})
+          return Promise.resolve({ ...body, metadata: { ...body.metadata, uid: `secret-${name}-uid` } })
         },
       })
       const wait = vi.fn()
@@ -429,7 +476,8 @@ describe('PactFlow K3s Worker provider', () => {
       const expectation = expect(pending).rejects.toThrow(/failed to create model Secret.*timed out/)
       await vi.advanceTimersByTimeAsync(50)
       await expectation
-      expect(deletions).toEqual([spec.modelSecretName])
+      // The model Secret's create outcome is unknown; it must not be deleted by name.
+      expect(deletions).toEqual([])
       expect(wait).not.toHaveBeenCalled()
     } finally { vi.useRealTimers() }
   })

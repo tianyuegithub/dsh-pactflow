@@ -1,6 +1,7 @@
 /** K3s Job provider for immutable PactFlow Worker runs. */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import {
   BatchV1Api,
@@ -15,6 +16,7 @@ import {
   type V1Secret,
   type V1ObjectMeta,
 } from '@kubernetes/client-node'
+import { harnessAchievedLevel, harnessProbeMaxLevel, type PactFlowHarnessCapabilityLevel } from './harness-capabilities.ts'
 import type {
   PactFlowApiMode,
   PactFlowApiProbeResult,
@@ -37,6 +39,20 @@ const COMMIT = /^[0-9a-f]{40,64}$/
 const PROBE_FINISHED_JOB_TTL_SECONDS = 3_600
 /** Independent deadline for one Kubernetes create, replace, or delete call. */
 const PACTFLOW_K3S_REQUEST_TIMEOUT_MS = 30_000
+
+/**
+ * A10: the highest capability level a probe actually reached, derived only from
+ * observed stages. Delegates to `harness-capabilities.ts` so the ladder has one
+ * source of truth. The module pair is mutually importing, but the shared helper is
+ * only called at run time (never during module evaluation), so the cycle is inert.
+ */
+function probeAchievedLevel(stages: readonly { readonly name: string; readonly state: 'succeeded' | 'failed' }[]):
+  PactFlowHarnessCapabilityLevel {
+  return harnessAchievedLevel({ stages })
+}/** Floor for the Job wall-clock budget so a tiny value cannot kill a task at once. */
+const PACTFLOW_K3S_MIN_WALL_CLOCK_SECONDS = 60
+/** Default Job wall-clock budget, independent of the ownership lease. */
+const PACTFLOW_K3S_DEFAULT_WALL_CLOCK_SECONDS = 3_600
 
 /** A create/replace/delete call neither completed nor failed within its independent deadline. */
 export class PactFlowK3sRequestTimeoutError extends Error {
@@ -84,6 +100,25 @@ export type PactFlowProbeCleanupEvent =
 
 export type PactFlowProbeCleanupRecorder = (event: PactFlowProbeCleanupEvent) => Promise<void>
 
+/**
+ * Durable creation intent for one Run: recorded before any Kubernetes resource is
+ * created, confirmed with server UIDs afterward, removed once cleanup succeeds.
+ */
+export type PactFlowRunCleanupEvent =
+  | { readonly phase: 'intent'; readonly jobName: string; readonly childNames: readonly string[] }
+  | { readonly phase: 'confirmed'; readonly jobName: string; readonly jobUid: string
+      readonly children: readonly { readonly kind: 'configmap' | 'secret'; readonly name: string; readonly uid: string }[] }
+  | { readonly phase: 'cleaned'; readonly jobName: string }
+
+export type PactFlowRunCleanupRecorder = (event: PactFlowRunCleanupEvent) => Promise<void>
+
+/** Persisted identity of one Run's owned external resources; incomplete records fail closed. */
+export interface PactFlowRunCleanupIdentity {
+  readonly jobName: string
+  readonly jobUid?: string
+  readonly children?: readonly { readonly kind: 'configmap' | 'secret'; readonly name: string; readonly uid: string }[]
+}
+
 /** Recorded identity of one probe's external resources; incomplete records fail closed. */
 export interface PactFlowProbeCleanupIdentity {
   readonly jobName: string
@@ -116,6 +151,7 @@ export function pactFlowK3sSpecDigest(
     expectedBranch: spec.expectedBranch, expectedBaseCommit: spec.expectedBaseCommit,
     remote: git.remote, remoteUrl: git.remoteUrl, defaultBranch: git.defaultBranch,
     baseCommit: git.baseCommit, branch: git.branch, prompt,
+    codeInputs: git.codeInputs ?? [],
   })
   return createHash('sha256').update(canonical).digest('hex')
 }
@@ -160,6 +196,8 @@ export class PactFlowK3sWorker {
   private readonly templates = new Map<string, PactFlowHarnessTemplateConfig>()
   private readonly pendingRuntimeSecrets = new Map<string, PactFlowK3sRuntimeSecrets>()
   private requestTimeoutMs = PACTFLOW_K3S_REQUEST_TIMEOUT_MS
+  /** Resolved cluster identity (server + CA digest); set in the constructor. */
+  private clusterIdentity = ''
 
   constructor(private readonly config: PactFlowK3sConfig) {
     this.requireDnsName('namespace', config.namespace)
@@ -179,6 +217,18 @@ export class PactFlowK3sWorker {
     if (config.kubeconfig === undefined) kubeconfig.loadFromDefault()
     else kubeconfig.loadFromFile(config.kubeconfig)
     if (config.context !== undefined) kubeconfig.setCurrentContext(config.context)
+    // A kubeconfig PATH is not a cluster identity: the file at that path can be
+    // replaced with one pointing at another cluster. Bind the identity to the
+    // resolved server + certificate authority instead.
+    const cluster = kubeconfig.getCurrentCluster()
+    let caMaterial = cluster?.caData ?? ''
+    if (caMaterial === '' && cluster?.caFile !== undefined) {
+      try { caMaterial = createHash('sha256').update(readFileSync(cluster.caFile)).digest('hex') } catch { caMaterial = cluster.caFile }
+    }
+    this.clusterIdentity = createHash('sha256').update(JSON.stringify({
+      server: cluster?.server ?? '(unknown)',
+      ca: createHash('sha256').update(caMaterial).digest('hex'),
+    })).digest('hex')
     this.batch = kubeconfig.makeApiClient(BatchV1Api)
     this.core = kubeconfig.makeApiClient(CoreV1Api)
   }
@@ -188,12 +238,12 @@ export class PactFlowK3sWorker {
     return [...this.templates.values()]
   }
 
-  /** Stable non-secret connection identity for durable probe cleanup records. */
+  /** Stable non-secret connection identity for durable probe/run cleanup records. */
   connectionFingerprint(): string {
     return createHash('sha256').update(JSON.stringify({
       namespace: this.config.namespace,
-      kubeconfig: this.config.kubeconfig ?? '(default)',
-      context: this.config.context ?? '(default)',
+      // Cluster identity (server + CA), not the mutable kubeconfig path.
+      cluster: this.clusterIdentity,
     })).digest('hex')
   }
 
@@ -275,7 +325,13 @@ export class PactFlowK3sWorker {
     }
   }
 
-  /** Resolve one configured template into an immutable Run spec. */
+  /**
+   * Resolve one configured template into an immutable Run spec.
+   *
+   * `leaseDurationMs` is the Host's ownership-renewal lease. It is intentionally
+   * NOT used as the Job wall-clock deadline: renewal extends ownership, and a
+   * healthy long task must not be killed at the first lease interval.
+   */
   plan(
     runId: PactFlowRunId,
     templateId: string,
@@ -284,11 +340,18 @@ export class PactFlowK3sWorker {
     git?: PactFlowGitRunSpec,
     prompt = '',
   ): PactFlowK3sRunSpec {
+    void leaseDurationMs
     const template = this.templates.get(templateId)
     if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
     this.requireDnsName('gitSecretName', gitSecretName)
     const suffix = runId.slice('run-'.length, 'run-'.length + 20).toLowerCase()
-    const activeDeadlineSeconds = Math.max(1, Math.floor(leaseDurationMs / 1_000))
+    // The Job wall-clock budget is a separate contract from the ownership lease:
+    // renewal extends ownership, never this deadline. Lease/1000 would kill a
+    // healthy long task at the first lease interval.
+    const activeDeadlineSeconds = Math.max(
+      PACTFLOW_K3S_MIN_WALL_CLOCK_SECONDS,
+      this.config.jobMaxWallClockSeconds ?? PACTFLOW_K3S_DEFAULT_WALL_CLOCK_SECONDS,
+    )
     const runNonce = randomBytes(32).toString('hex')
     const claimToken = randomBytes(32).toString('hex')
     const base: PactFlowK3sRunSpec = {
@@ -325,6 +388,16 @@ export class PactFlowK3sWorker {
     return spec
   }
 
+  /**
+   * Release a planned-but-never-run Run's in-memory runtime secrets. Call this
+   * when the prepared Run is discarded before `run()` (admission failure,
+   * configuration drift, cancellation). It never touches external resources:
+   * a discarded plan created none.
+   */
+  discard(jobName: string): void {
+    this.pendingRuntimeSecrets.delete(jobName)
+  }
+
   /** Create the immutable ConfigMap and Job, then wait for a termination result. */
   async run(
     spec: PactFlowK3sRunSpec,
@@ -334,6 +407,7 @@ export class PactFlowK3sWorker {
     modelApiKey?: string,
     runtimeSecrets?: PactFlowK3sRuntimeSecrets,
     onBound?: (jobUid: string) => void | Promise<void>,
+    record?: PactFlowRunCleanupRecorder,
   ): Promise<PactFlowK3sResult> {
     const secrets = runtimeSecrets ?? this.pendingRuntimeSecrets.get(spec.jobName)
     if (spec.specDigest !== undefined && spec.expectedBranch !== undefined
@@ -343,6 +417,24 @@ export class PactFlowK3sWorker {
     if (secrets === undefined || pactFlowSecretHash(secrets.runNonce) !== spec.runNonceHash
       || pactFlowSecretHash(secrets.claimToken) !== spec.claimTokenHash) {
       throw new Error(`PactFlow K3s Run "${spec.jobName}" has no matching runtime claim secrets`)
+    }
+    // Persist the creation intent before any external resource exists, so a crash
+    // between create and response leaves a discoverable responsibility.
+    await record?.({
+      phase: 'intent', jobName: spec.jobName,
+      childNames: [
+        spec.configMapName,
+        ...(spec.inputSecretName === undefined ? [] : [spec.inputSecretName]),
+        ...(spec.ephemeralModelSecret === true ? [spec.modelSecretName] : []),
+      ],
+    })
+    // Only resources this call created and confirmed with a server UID may ever be
+    // deleted; a 409 or an unconfirmed create never belongs to this run.
+    const owned: Array<{ readonly kind: 'configmap' | 'secret'; readonly name: string; readonly uid: string }> = []
+    const unknown: string[] = []
+    const own = (kind: 'configmap' | 'secret', name: string, uid: string | undefined): void => {
+      if (uid !== undefined && uid.trim() !== '') owned.push({ kind, name, uid })
+      else unknown.push(`${kind} "${name}"`)
     }
     let createdModelSecret: V1Secret | undefined
     let createdInputSecret: V1Secret | undefined
@@ -361,14 +453,15 @@ export class PactFlowK3sWorker {
             },
           },
         }, options))
+        own('secret', spec.modelSecretName, createdModelSecret.metadata?.uid)
       } catch (error) {
-        if (this.isTimeout(error)) {
-          // The request may still have created this per-run Secret; compensate
-          // by its unique name instead of leaving it unowned.
-          await this.deleteModelSecret(spec).catch(() => {})
-        }
+        // A timeout means the server may have created the object, but we hold no UID;
+        // keep it as an unknown responsibility instead of deleting a reusable name.
+        if (this.isTimeout(error)) unknown.push(`model Secret "${spec.modelSecretName}"`)
+        this.pendingRuntimeSecrets.delete(spec.jobName)
         const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
-        throw new Error(`PactFlow failed to create model Secret "${spec.modelSecretName}"${note}`)
+        const compensation = await this.compensateOwned(spec.namespace, owned)
+        throw new Error(`PactFlow failed to create model Secret "${spec.modelSecretName}"${note}${compensation}${this.unknownNote(unknown)}`)
       }
     }
     try {
@@ -376,10 +469,13 @@ export class PactFlowK3sWorker {
         namespace: spec.namespace,
         body: this.inputSecret(spec, git, prompt, secrets),
       }, options))
+      own('secret', spec.inputSecretName ?? spec.jobName, createdInputSecret.metadata?.uid)
     } catch (error) {
       const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
-      const compensationFailed = await this.compensateCreatedChildren(spec, createdModelSecret)
-      throw new Error(`PactFlow failed to create K3s input Secret "${spec.inputSecretName ?? spec.jobName}"${note}${compensationFailed ? '; compensation of created resources also failed' : ''}`)
+      this.pendingRuntimeSecrets.delete(spec.jobName)
+      if (this.isTimeout(error)) unknown.push(`input Secret "${spec.inputSecretName ?? spec.jobName}"`)
+      const compensation = await this.compensateOwned(spec.namespace, owned)
+      throw new Error(`PactFlow failed to create K3s input Secret "${spec.inputSecretName ?? spec.jobName}"${note}${compensation}${this.unknownNote(unknown)}`)
     }
     const configMap = this.configMap(spec)
     let createdConfigMap: V1ConfigMap
@@ -387,10 +483,13 @@ export class PactFlowK3sWorker {
       createdConfigMap = await this.withRequestDeadline(options => this.core.createNamespacedConfigMap({
         namespace: spec.namespace, body: configMap,
       }, options))
+      own('configmap', spec.configMapName, createdConfigMap.metadata?.uid)
     } catch (error) {
       const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
-      const compensationFailed = await this.compensateCreatedChildren(spec, createdModelSecret)
-      throw new Error(`PactFlow failed to create K3s ConfigMap "${spec.configMapName}"${note}${compensationFailed ? '; compensation of created resources also failed' : ''}`)
+      this.pendingRuntimeSecrets.delete(spec.jobName)
+      if (this.isTimeout(error)) unknown.push(`ConfigMap "${spec.configMapName}"`)
+      const compensation = await this.compensateOwned(spec.namespace, owned)
+      throw new Error(`PactFlow failed to create K3s ConfigMap "${spec.configMapName}"${note}${compensation}${this.unknownNote(unknown)}`)
     }
     let createdJob: V1Job
     try {
@@ -399,21 +498,19 @@ export class PactFlowK3sWorker {
       }, options))
     } catch (error) {
       const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
-      let compensationFailed = false
-      if (this.isTimeout(error)) {
-        // The Job may exist without a usable UID; compensate our own lineage
-        // by the exact per-run names, children first.
-        try { await this.cancel(spec) } catch { compensationFailed = true }
-      } else {
-        compensationFailed = await this.compensateCreatedChildren(spec, createdModelSecret)
-      }
-      throw new Error(`PactFlow failed to create K3s Job "${spec.jobName}"${note}${compensationFailed ? '; compensation of created resources also failed' : ''}`)
+      this.pendingRuntimeSecrets.delete(spec.jobName)
+      if (this.isTimeout(error)) unknown.push(`Job "${spec.jobName}"`)
+      const compensation = await this.compensateOwned(spec.namespace, owned)
+      throw new Error(`PactFlow failed to create K3s Job "${spec.jobName}"${note}${compensation}${this.unknownNote(unknown)}`)
     }
     const jobUid = createdJob.metadata?.uid
     if (jobUid === undefined) {
-      let compensationFailed = false
-      try { await this.cancel(spec) } catch { compensationFailed = true }
-      throw new Error(`PactFlow K3s Job "${spec.jobName}" has no UID${compensationFailed ? '; compensation of created resources also failed' : ''}`)
+      // The Job response carried no usable UID, so its identity is unconfirmed:
+      // delete our confirmed children, but never the Job by its reusable name.
+      unknown.push(`Job "${spec.jobName}"`)
+      this.pendingRuntimeSecrets.delete(spec.jobName)
+      const compensation = await this.compensateOwned(spec.namespace, owned)
+      throw new Error(`PactFlow K3s Job "${spec.jobName}" has no UID${compensation}${this.unknownNote(unknown)}`)
     }
     try {
       createdConfigMap.metadata = {
@@ -451,13 +548,20 @@ export class PactFlowK3sWorker {
         }, options))
       }
     } catch {
-      // Children may lack ownerReferences here, so compensation stays name-based;
+      // The Job exists and its UID is confirmed, so compensation carries that UID;
       // the binding failure itself must not be masked by a cleanup error.
-      try { await this.cancel(spec) } catch { /* the failed run leaves a durable cleanup responsibility for the Host */ }
+      try { await this.cancel({ ...spec, jobUid }) } catch { /* the failed run leaves a durable cleanup responsibility for the Host */ }
+      this.pendingRuntimeSecrets.delete(spec.jobName)
       throw new Error(`PactFlow failed to bind ConfigMap "${spec.configMapName}" to its Job`)
     }
     this.pendingRuntimeSecrets.delete(spec.jobName)
     const boundSpec: PactFlowK3sRunSpec = { ...spec, jobUid }
+    // Record the confirmed identity so the Host can reconcile this Run's resources
+    // after a crash; the intent was already persisted before creation.
+    await record?.({
+      phase: 'confirmed', jobName: spec.jobName, jobUid,
+      children: owned.map(child => ({ kind: child.kind, name: child.name, uid: child.uid })),
+    })
     try {
       await onBound?.(jobUid)
     } catch (error) {
@@ -617,6 +721,11 @@ export class PactFlowK3sWorker {
       durationMs: Date.now() - startedAt,
       output: this.bounded(this.redactProbeOutput(output, modelApiKey), 16_384),
       stages,
+      // A10: state the highest capability level the probe actually reached, so a
+      // mere connectivity success is never presented as a delivered artifact. The
+      // ceiling is the highest *attestable* level, not the harness's aspiration.
+      achievedLevel: probeAchievedLevel(stages),
+      maxLevel: harnessProbeMaxLevel(),
     }
   }
 
@@ -704,7 +813,13 @@ export class PactFlowK3sWorker {
       }
     }
     if (signal.aborted) success = false
-    return { success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages }
+    return {
+      success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages,
+      // A10: an image probe that ran its CLI reached `artifact`; its cleanup stage
+      // can lift it to `cancellation`. The ceiling is the highest attestable level.
+      achievedLevel: probeAchievedLevel(stages),
+      maxLevel: harnessProbeMaxLevel(),
+    }
   }
 
   /** Send one direct protocol request in a short-lived Job without invoking the Harness CLI. */
@@ -845,6 +960,10 @@ export class PactFlowK3sWorker {
       modelSecretName: runtimeTemplate.modelSecretName, prompt, timeoutMs,
       requestPath: request.path, requestPayload: request.payload,
       success, durationMs: Date.now() - startedAt, output: this.bounded(this.redactProbeOutput(output, modelApiKey), 16_384), stages,
+      // A10: a direct API probe only ever reaches `protocol`; its cleanup stage can
+      // lift it to `cancellation`. It can never claim `artifact` (no CLI ran).
+      achievedLevel: probeAchievedLevel(stages),
+      maxLevel: harnessProbeMaxLevel(),
     }
   }
 
@@ -921,6 +1040,42 @@ export class PactFlowK3sWorker {
   }
 
   /** Delete completed resources owned by one Run; missing resources count as clean. */
+  /**
+   * Reconcile one persisted Run creation intent against the cluster. Requires a
+   * confirmed Job UID; deletes confirmed-owned children by UID precondition, then
+   * the Job by UID. A record without a confirmed UID fails closed (explicit
+   * recovery), and a missing object counts as already clean.
+   */
+  async cleanupRunIdentity(identity: PactFlowRunCleanupIdentity): Promise<void> {
+    const { jobName, jobUid, children } = identity
+    if (typeof jobUid !== 'string' || jobUid.trim() === '') {
+      throw new Error(`PactFlow Run cleanup for "${jobName}" requires a confirmed Job UID; explicit recovery is required`)
+    }
+    for (const child of children ?? []) {
+      try {
+        if (child.kind === 'configmap') {
+          await this.withRequestDeadline(options => this.core.deleteNamespacedConfigMap({
+            name: child.name, namespace: this.config.namespace, body: { preconditions: { uid: child.uid } },
+          }, options))
+        } else {
+          await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
+            name: child.name, namespace: this.config.namespace, body: { preconditions: { uid: child.uid } },
+          }, options))
+        }
+      } catch (error) {
+        if (!this.isNotFound(error)) throw error
+      }
+    }
+    try {
+      await this.withRequestDeadline(options => this.batch.deleteNamespacedJob({
+        name: jobName, namespace: this.config.namespace, gracePeriodSeconds: 0,
+        propagationPolicy: 'Background', body: { preconditions: { uid: jobUid } },
+      }, options))
+    } catch (error) {
+      if (!this.isNotFound(error)) throw error
+    }
+  }
+
   async cleanupRun(spec: PactFlowK3sRunSpec): Promise<void> {
     const missingIdentity = resourceIdentityError(spec)
     if (missingIdentity !== undefined) throw new Error(missingIdentity)
@@ -1031,6 +1186,8 @@ export class PactFlowK3sWorker {
         'spec.json': JSON.stringify({
           schema: 'dsh_pactflow_k3s_run/v1', repoUrl: git.remoteUrl,
           baseCommit: git.baseCommit, branch: git.branch, prompt,
+          // F03: exact predecessor commits the container folds into the baseline.
+          ...(git.codeInputs === undefined ? {} : { codeInputs: git.codeInputs.map(input => ({ commit: input.commit })) }),
           runNonce: secrets.runNonce, claimToken: secrets.claimToken,
           runNonceHash: spec.runNonceHash, claimTokenHash: spec.claimTokenHash,
           specDigest: spec.specDigest,
@@ -1475,20 +1632,47 @@ export class PactFlowK3sWorker {
     if (failures.length > 0) throw new Error(`PactFlow failed to cancel K3s Job "${spec.jobName}" resources`)
   }
 
-  /** Name-based compensation for children created moments ago inside this call. */
-  private async compensateCreatedChildren(
-    spec: PactFlowK3sRunSpec,
-    createdModelSecret: V1Secret | undefined,
-  ): Promise<boolean> {
-    const failures: unknown[] = []
-    for (const operation of [
-      () => this.deleteConfigMap(spec),
-      ...(createdModelSecret !== undefined ? [() => this.deleteModelSecret(spec)] : []),
-      () => this.deleteInputSecret(spec),
-    ]) {
-      try { await operation() } catch (error) { failures.push(error) }
+  /**
+   * Delete only resources this call created and confirmed with a server UID, using
+   * the UID as a precondition. Never delete by reusable name; a 409 or an
+   * unconfirmed create is not owned. A delete that times out keeps the resource
+   * as an unknown responsibility instead of being reported as cleaned.
+   */
+  private async compensateOwned(
+    namespace: string,
+    owned: readonly { readonly kind: 'configmap' | 'secret'; readonly name: string; readonly uid: string }[],
+  ): Promise<string> {
+    let failed = false
+    const unknown: string[] = []
+    for (const resource of owned) {
+      try {
+        const deleted: unknown = resource.kind === 'configmap'
+          ? await this.withRequestDeadline(options => this.core.deleteNamespacedConfigMap({
+            name: resource.name, namespace, body: { preconditions: { uid: resource.uid } },
+          }, options))
+          : await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
+            name: resource.name, namespace, body: { preconditions: { uid: resource.uid } },
+          }, options))
+        // A delete request accepted while the object is still terminating (202 /
+        // finalizer) is not a completed cleanup: keep it as an unknown responsibility.
+        const metadata = (deleted as { readonly metadata?: { readonly deletionTimestamp?: unknown } } | undefined)?.metadata
+        if (metadata?.deletionTimestamp !== undefined) {
+          unknown.push(`${resource.kind} "${resource.name}" (delete requested, still terminating)`)
+        }
+      } catch (error) {
+        if (this.isNotFound(error)) continue
+        if (this.isTimeout(error)) { unknown.push(`${resource.kind} "${resource.name}"`); continue }
+        failed = true
+      }
     }
-    return failures.length > 0
+    const parts: string[] = []
+    if (failed) parts.push('; compensation of created resources also failed')
+    if (unknown.length > 0) parts.push(`; ${this.unknownNote(unknown, 'compensation outcome unknown')}`)
+    return parts.join('')
+  }
+
+  private unknownNote(names: readonly string[], label = 'create outcome unknown'): string {
+    return names.length === 0 ? '' : `; ${label}: ${names.join(', ')}`
   }
 
   private async deleteConfigMap(spec: PactFlowK3sRunSpec): Promise<void> {
@@ -1692,6 +1876,10 @@ for key, field in [('REPO_URL','repoUrl'),('BASE_COMMIT','baseCommit'),('BRANCH'
     print(f"{key}={shlex.quote(str(spec[field]))}")
 with open('/tmp/prompt.txt', 'w', encoding='utf-8') as output:
     output.write(str(spec['prompt']))
+# F03: declared predecessor code inputs (exact commits) to fold into the task baseline.
+with open('/tmp/code-inputs.txt', 'w', encoding='utf-8') as output:
+    for entry in spec.get('codeInputs', []) or []:
+        output.write(str(entry.get('commit', '')) + '\n')
 PY
 )"
 mkdir -p "$HOME/.ssh"
@@ -1703,6 +1891,23 @@ git clone --no-checkout "$REPO_URL" /workspace/repo
 git -C /workspace/repo checkout -b "$BRANCH" "$BASE_COMMIT"
 git -C /workspace/repo config user.name "PactFlow Worker"
 git -C /workspace/repo config user.email "pactflow-worker@local"
+# F03: fold each declared predecessor code input (exact commit) into the task
+# baseline, so a dependent task starts from the tree its dependencies produced.
+# Fetch is by exact commit, never a movable branch. Fail closed on either step.
+while IFS= read -r CODE_INPUT; do
+    [ -z "$CODE_INPUT" ] && continue
+    if ! git -C /workspace/repo fetch --no-tags origin "$CODE_INPUT"; then
+        echo "PactFlow code input is unavailable at $CODE_INPUT" >&2
+        exit 1
+    fi
+    if ! git -C /workspace/repo merge --no-ff --no-edit "$CODE_INPUT"; then
+        echo "PactFlow code input conflicts with the task baseline at $CODE_INPUT" >&2
+        exit 1
+    fi
+done < /tmp/code-inputs.txt
+# The worker's own change is measured against the folded baseline, so folding
+# alone can never masquerade as a delivered commit.
+BASELINE_COMMIT="$(git -C /workspace/repo rev-parse HEAD)"
 cd /workspace/repo
 set +e
 PROMPT_PATH=/tmp/prompt.txt /usr/local/bin/pactflow-harness-runner.sh
@@ -1712,7 +1917,7 @@ HARNESS_VERSION="$(cat /tmp/harness-version.txt 2>/dev/null || true)"
 CURRENT_COMMIT="$(git rev-parse HEAD)"
 PUSH_EXIT_CODE=1
 STATUS=failed
-if [ "$AGENT_EXIT_CODE" -eq 0 ] && [ "$CURRENT_COMMIT" != "$BASE_COMMIT" ] && [ -z "$(git status --porcelain)" ]; then
+if [ "$AGENT_EXIT_CODE" -eq 0 ] && [ "$CURRENT_COMMIT" != "$BASELINE_COMMIT" ] && [ -z "$(git status --porcelain)" ]; then
     if git push origin "HEAD:refs/heads/$BRANCH"; then
         PUSH_EXIT_CODE=0
         STATUS=succeeded

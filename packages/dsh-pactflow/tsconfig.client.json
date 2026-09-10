@@ -23,6 +23,8 @@
     "src/client/dag-graph-model.ts",
     "src/client/dag-graph.tsx",
     "src/client/project-panel.tsx",
+    "src/client/request-gate.ts",
+    "src/client/runtime-freshness.ts",
     "src/client/validation-profile-editor.tsx",
     "src/schema.ts",
     "src/harness-discovery.ts",

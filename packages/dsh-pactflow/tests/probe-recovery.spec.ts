@@ -144,3 +144,53 @@ describe('PactFlow probe cleanup recovery', () => {
     } finally { await ctx.fiber.dispose() }
   })
 })
+
+describe('PactFlow run creation-intent recovery', () => {
+  function runEntry(fingerprint: string, withUid = true) {
+    return {
+      jobName: 'dsh-pf-run-recovery', fingerprint, createdAt: new Date().toISOString(),
+      ...(withUid ? { jobUid: 'run-recovery-job-uid' } : {}),
+      ...(withUid ? { children: [{ kind: 'secret' as const, name: 'dsh-pf-run-recovery-input', uid: 'run-recovery-secret-uid' }] } : {}),
+    }
+  }
+
+  it('reconciles a confirmed run intent by UID and removes the record', async () => {
+    const ctx = await startService()
+    try {
+      const remove = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-a')]), remove })
+      const cleanupRunIdentity = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'k3s', { connectionFingerprint: () => 'fp-a', cleanupRunIdentity })
+      await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
+      expect(cleanupRunIdentity).toHaveBeenCalledTimes(1)
+      expect(remove).toHaveBeenCalledWith('dsh-pf-run-recovery')
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('retains a run intent without a confirmed UID as an explicit responsibility', async () => {
+    const ctx = await startService()
+    try {
+      const remove = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-a', false)]), remove })
+      const cleanupRunIdentity = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'k3s', { connectionFingerprint: () => 'fp-a', cleanupRunIdentity })
+      await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
+      // No confirmed identity: never delete by name, keep the record for explicit recovery.
+      expect(cleanupRunIdentity).not.toHaveBeenCalled()
+      expect(remove).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('retains a run intent whose provider fingerprint no longer matches', async () => {
+    const ctx = await startService()
+    try {
+      const remove = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-gone')]), remove })
+      const cleanupRunIdentity = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'k3s', { connectionFingerprint: () => 'fp-a', cleanupRunIdentity })
+      await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
+      expect(cleanupRunIdentity).not.toHaveBeenCalled()
+      expect(remove).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+})

@@ -85,10 +85,14 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
 
   afterAll(async () => {
     await browser?.close()
+    if (process.env.PACTFLOW_KEEP_ROOT === '1') {
+      // Preserve the scene for diagnosis: skipping close() keeps the scaffold
+      // workspace (scaffold.close() removes it).
+      console.log(`[keep-root] ${scaffold?.workspaceCwd ?? '(none)'}`)
+      return
+    }
     await scaffold?.close()
     if (bundleAnchor !== undefined) await rm(bundleAnchor.directory, { recursive: true, force: true })
-    if (process.env.PACTFLOW_KEEP_ROOT === '1') console.log(`[keep-root] ${root ?? '(none)'}`)
-    else if (root !== undefined) await rm(root, { recursive: true, force: true })
   })
 
   it('uses PactFlow tools and accepts a real spawn Worker commit in its task worktree', async () => {

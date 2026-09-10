@@ -9,11 +9,12 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it } from 'vitest'
 import PactFlowService from '../lib/index.js'
+import type { PactFlowClaimResult } from '../src/types.ts'
 import { createGitFixture } from './git-fixture.ts'
 import { recordAuthorizedReview } from './review-fixture.ts'
 
 describe('PactFlow Gitea closing', () => {
-  it.each(['empty', 'registered', 'workspace', 'session-override', 'changed', 'legacy', 'ledger-failure', 'release-failure', 'release-drift'] as const)('checks %s validation authorization before protected PR closing', async mode => {
+  it.each(['empty', 'registered', 'workspace', 'session-override', 'changed', 'legacy', 'ledger-failure', 'release-failure', 'release-drift', 'main-advances', 'phase-interrupt-retry', 'subject-drift', 'code-input-chain'] as const)('checks %s validation authorization before protected PR closing', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-closing-'))
     const priorDshHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, '.dsh')
@@ -63,6 +64,12 @@ describe('PactFlow Gitea closing', () => {
         mergeCommit = git(['-C', merger, 'rev-parse', 'HEAD^{commit}'])
         git(['-C', merger, 'push', 'origin', 'main'])
         git(['-C', merger, 'push', 'origin', '--delete', pullHead])
+        if (mode === 'main-advances') {
+          // F05: the default branch advances past the merge commit before the Host
+          // verifies. The delivery must still bind the exact merge commit.
+          git(['-C', merger, 'commit', '--allow-empty', '-m', 'post-merge advance'])
+          git(['-C', merger, 'push', 'origin', 'main'])
+        }
         response.end('{}')
         return
       }
@@ -139,6 +146,13 @@ describe('PactFlow Gitea closing', () => {
       const node = ctx.pactflow.createNode(session.id, {
         id: 'node', needId: need.id, title: 'Node', dependencies: [],
       })
+      // F03: a dependent node whose execution baseline contains its predecessor's
+      // commit must still pass the closing task-set invariant.
+      if (mode === 'code-input-chain') {
+        ctx.pactflow.createNode(session.id, {
+          id: 'dep', needId: need.id, title: 'Dep', dependencies: ['node'], codeInputs: ['node'],
+        })
+      }
       const parent = { id: session.id, session }
       ctx.provide('agents', { get: () => parent } as never)
       ctx.provide('subagents', {
@@ -160,6 +174,16 @@ describe('PactFlow Gitea closing', () => {
       })
       expect(task.run.state).toBe('succeeded')
       expect(task.run.git?.remote).toBe('origin')
+
+      let chainTask: PactFlowClaimResult | undefined
+      if (mode === 'code-input-chain') {
+        const dep = ctx.pactflow.dag(session.id).byId.dep!
+        chainTask = await ctx.pactflow.dispatchGitNode(session.id, {
+          nodeId: 'dep', expectedRevision: dep.revision, provider: 'spawn',
+          leaseDurationMs: 60_000, prompt: 'commit on top',
+        })
+        expect(chainTask.run.state).toBe('succeeded')
+      }
       if (mode === 'workspace') expect(ctx.pactflow.project(session.id).project?.git).toBeUndefined()
 
       let current = ctx.pactflow.transitionNeed(session.id, {
@@ -204,6 +228,25 @@ describe('PactFlow Gitea closing', () => {
         session.append('pactflow/project-configured', { v: 1, project: { ...project, revision: project.revision + 1,
           git: { ...project.git!, validationProfileIds: [], validationProfileRevisions: {}, legacyUntrusted: true } } })
       }
+      if (mode === 'subject-drift') {
+        // F04: a node is added and succeeds *after* the verification approval, so the
+        // approved delivery subject no longer matches the current task set. Every node
+        // is succeeded, so only the subject-binding check can reject closing.
+        const extra = ctx.pactflow.createNode(session.id, { id: 'extra', needId: need.id, title: 'Extra', dependencies: [] })
+        const extraRun = await ctx.pactflow.dispatchGitNode(session.id, {
+          nodeId: extra.id, expectedRevision: extra.revision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'commit',
+        })
+        expect(extraRun.run.state).toBe('succeeded')
+      }
+      if (mode === 'subject-drift') {
+        await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
+          .rejects.toThrow(/subject changed after verification/)
+        expect(pullHead).toBe('')
+        expect(mergeCommit).toBe('')
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases).toEqual({})
+        await ctx.fiber.dispose()
+        return
+      }
       if (mode === 'changed' || mode === 'legacy') {
         await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
           .rejects.toThrow(/changed after Git binding|authorization/)
@@ -246,6 +289,45 @@ describe('PactFlow Gitea closing', () => {
           return
         }
       }
+      if (mode === 'phase-interrupt-retry') {
+        // F06: release persists but the phase transition is interrupted, leaving the
+        // Need in closing with a recorded release. Retry must reuse that release.
+        const events = Reflect.get(ctx.pactflow, 'events')
+        Reflect.set(ctx.pactflow, 'events', { ...events, append: (...args: unknown[]) => {
+          if (args[1] === 'pactflow/phase-transitioned') throw new Error('phase transition interrupted')
+          return events.append(...args)
+        } })
+        await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
+          .rejects.toThrow('phase transition interrupted')
+        Reflect.set(ctx.pactflow, 'events', events)
+        expect(mergeCalls).toBe(1)
+        const interrupted = ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases[need.id]
+        expect(interrupted).toBeDefined()
+        expect(ctx.sessionProjections.stateOf(session, 'pactflowNeeds')?.byId[need.id]?.phase).toBe('closing')
+        // Retry: the same release identity, no second merge, and the phase advances.
+        const retried = await ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision })
+        expect(mergeCalls).toBe(1)
+        expect(retried.release?.recordedAt).toBe(interrupted!.recordedAt)
+        expect(retried.release?.commit).toBe(interrupted!.commit)
+        expect(retried.need.phase).toBe('deployed')
+        const releaseEvents = session.events.filter(event => event.type === 'pactflow/release-recorded')
+        expect(releaseEvents).toHaveLength(1)
+        await ctx.fiber.dispose()
+        return
+      }
+      if (mode === 'code-input-chain') {
+        // Both tasks are now succeeded; closing must accept the dependent chain and
+        // produce one merge commit for the whole verified set.
+        const closed = await ctx.pactflow.closeGitNeed(session.id, {
+          needId: need.id, expectedRevision: current.revision,
+        })
+        expect(closed.need.phase).toBe('deployed')
+        expect(mergeCalls).toBe(1)
+        expect(chainTask!.run.state).toBe('succeeded')
+        expect(git(['--git-dir', remote, 'rev-parse', 'refs/heads/main^{commit}'])).toBe(mergeCommit)
+        await ctx.fiber.dispose()
+        return
+      }
       const closed = await ctx.pactflow.closeGitNeed(session.id, {
         needId: need.id, expectedRevision: current.revision,
       })
@@ -255,12 +337,21 @@ describe('PactFlow Gitea closing', () => {
         cleanupFailures: [],
       })
       expect(mergeCalls).toBe(1)
+      if (mode === 'main-advances') {
+        // F05: release binds the exact merge commit, not the (advanced) default tip.
+        expect(closed.release?.commit).toBe(mergeCommit)
+        expect(git(['--git-dir', remote, 'rev-parse', 'refs/heads/main^{commit}'])).not.toBe(mergeCommit)
+      }
       const cleanupIntents = session.events.filter(event => event.type === 'pactflow/cleanup-recorded'
         && event.data.record.state === 'pending' && event.data.record.attempt === 1)
       const releaseEvent = session.events.find(event => event.type === 'pactflow/release-recorded')!
       expect(cleanupIntents).toHaveLength(2) // Integration checkout and the local Git task, no fictional K3s Job.
       expect(cleanupIntents.every(event => event.seq < releaseEvent.seq)).toBe(true)
-      expect(git(['--git-dir', remote, 'rev-parse', 'refs/heads/main^{commit}'])).toBe(mergeCommit)
+      // The merge-validation worktree ref must not accumulate in the user repository.
+      expect(git(['-C', workspace, 'for-each-ref', '--format=%(refname)', 'refs/pactflow/merge/'])).toBe('')
+      if (mode !== 'main-advances') {
+        expect(git(['--git-dir', remote, 'rev-parse', 'refs/heads/main^{commit}'])).toBe(mergeCommit)
+      }
       if (mode === 'registered' || mode === 'workspace' || mode === 'session-override') await expect(access(marker)).resolves.toBeUndefined()
       expect(() => git([
         '--git-dir', remote, 'show-ref', '--verify', `refs/heads/${task.run.git?.branch}`,

@@ -124,6 +124,12 @@ export interface PactFlowK3sSettings {
   readonly pollIntervalMs: number
   readonly templates: readonly PactFlowHarnessTemplateView[]
   readonly finishedJobTtlSeconds?: number
+  /**
+   * Wall-clock budget for one K3s Job, independent of the ownership lease. Lease
+   * renewal extends ownership, not this deadline; a healthy long task must not be
+   * killed at the first lease interval. Floored to PACTFLOW_K3S_MIN_WALL_CLOCK_SECONDS.
+   */
+  readonly jobMaxWallClockSeconds?: number
 }
 
 export interface PactFlowK3sClusterSettings {
@@ -494,6 +500,8 @@ export interface PactFlowGitRunSpec {
   readonly remoteUrl: string
   readonly defaultBranch: string
   readonly baseCommit: string
+  /** Successful predecessor commits folded into this Run's immutable execution baseline. */
+  readonly codeInputs?: readonly { readonly dependency?: string | undefined; readonly branch: string; readonly commit: string }[]
   readonly branch: string
   readonly worktreePath: string
   readonly auth?: PactFlowGitAuth
@@ -521,6 +529,8 @@ export interface PactFlowGitResult {
   readonly remoteRef: string
   readonly syncedAt: number
   readonly validations: readonly PactFlowValidationEvidence[]
+  /** Verification-wiring files this task commit changed (surfaced, not blocking). */
+  readonly validationSensitiveChanges?: readonly string[]
 }
 
 export interface PactFlowNeed {
@@ -540,6 +550,8 @@ export interface PactFlowNode {
   readonly state: PactFlowNodeState
   readonly revision: number
   readonly dependencies: readonly PactFlowNodeId[]
+  /** Dependencies whose successful commits must be part of this node's execution baseline. */
+  readonly codeInputs?: readonly PactFlowNodeId[]
   readonly updatedAt: number
 }
 
@@ -619,6 +631,8 @@ export interface PactFlowReview {
   readonly approvalRequestId?: string
   readonly needRevision?: number
   readonly evidenceDigest?: string
+  /** For verification reviews: digest of the exact delivery subject (task set + commits). */
+  readonly subjectDigest?: string
   readonly source?: 'dsh-approval'
 }
 
@@ -649,6 +663,15 @@ export interface PactFlowCleanupRecord {
   readonly closingInputDigest?: string
   /** Pre-merge intent: deletion is forbidden until delivery proof exists. */
   readonly requiresRelease?: boolean
+  /**
+   * Failure residue kept for human review: discoverable, but never auto-cleaned
+   * (including session-recovery reconciliation). Only an explicit cleanup touches it.
+   */
+  readonly retain?: boolean
+  /** Epoch ms when the retention window ends; overdue retained scenes are flagged for review (never auto-deleted). */
+  readonly retainUntil?: number
+  /** Recorded on-disk size of the retained scene; absent means unmeasured (A05 capacity). */
+  readonly sizeBytes?: number
   readonly state: 'pending' | 'failed' | 'succeeded'
   readonly attempt: number
   readonly error?: string
@@ -668,6 +691,8 @@ export interface BindPactFlowGitRequest {
   readonly validationCommands?: readonly PactFlowValidationCommand[]
   readonly validationProfileIds?: readonly string[]
   readonly k3sGitSecretName?: string
+  /** Registered Git Provider id; the Host resolves endpoint, auth mode and credential ref from it. */
+  readonly giteaProviderId?: string
   readonly giteaBaseUrl?: string
   readonly giteaOwner?: string
   readonly giteaRepo?: string
@@ -704,6 +729,8 @@ export interface CreatePactFlowNodeRequest {
   readonly needId: string
   readonly title: string
   readonly dependencies: readonly string[]
+  /** Subset of dependencies whose successful commits become this node's code input. */
+  readonly codeInputs?: readonly string[]
 }
 
 export interface UpdatePactFlowNodeDependenciesRequest {
@@ -798,6 +825,10 @@ export interface PactFlowHarnessImageProbeResult {
   readonly durationMs: number
   readonly output: string
   readonly stages: readonly PactFlowHarnessProbeStage[]
+  /** Highest capability level this probe actually reached (A10). */
+  readonly achievedLevel?: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
+  /** Highest level this harness is declared to support (A10). */
+  readonly maxLevel?: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
 }
 
 export interface PactFlowHarnessProbeResult {
@@ -815,6 +846,10 @@ export interface PactFlowHarnessProbeResult {
   readonly durationMs: number
   readonly output: string
   readonly stages: readonly PactFlowHarnessProbeStage[]
+  /** Highest capability level this probe actually reached (A10). */
+  readonly achievedLevel?: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
+  /** Highest level this harness is declared to support (A10). */
+  readonly maxLevel?: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
 }
 
 export interface PactFlowApiProbeResult {
@@ -834,6 +869,10 @@ export interface PactFlowApiProbeResult {
   readonly durationMs: number
   readonly output: string
   readonly stages: readonly PactFlowHarnessProbeStage[]
+  /** Highest capability level this probe actually reached (A10). */
+  readonly achievedLevel?: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
+  /** Highest level this harness is declared to support (A10). */
+  readonly maxLevel?: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
 }
 
 export interface PactFlowProjectRecord {
@@ -906,4 +945,35 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     pactflowRuns: PactFlowRunsProjection
     pactflowDelivery: PactFlowDeliveryProjection
   }
+}
+
+/** Retained failure-scene status (A05 extension); read-only, never triggers deletion. */
+export interface PactFlowRetentionSummary {
+  readonly total: number
+  readonly overdue: readonly { readonly id: string; readonly target: string; readonly retainUntil?: number }[]
+  /** Sum of recorded retained-scene sizes; unmeasured scenes contribute nothing. */
+  readonly retainedBytes: number
+  /** True only when every retained scene carries a recorded size (so the sum is a true total). */
+  readonly measured: boolean
+  /** True when the measured retained total meets or exceeds the disk budget. */
+  readonly overBudget: boolean
+  readonly maxBytes: number
+}
+
+/** Read-only project handover summary (A12); exposed on the public type surface for Remote boundaries. */
+export interface PactFlowHandoverSummary {
+  readonly project: { readonly id: string; readonly name: string; readonly revision: number } | null
+  readonly gitRemote?: string
+  readonly defaultBranch?: string
+  readonly needs: readonly { readonly id: string; readonly title: string; readonly phase: string; readonly revision: number }[]
+  readonly nodes: readonly { readonly id: string; readonly needId: string; readonly state: string }[]
+  /** Exact Git artifacts produced, so the work is recoverable without this plugin. */
+  readonly artifacts: readonly { readonly runId: string; readonly branch: string; readonly commit: string }[]
+  /** Responsibilities still open (pending/failed), including retained failure scenes. */
+  readonly pendingCleanups: readonly {
+    readonly id: string
+    readonly target: string
+    readonly state: string
+    readonly retain?: boolean
+  }[]
 }

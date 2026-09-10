@@ -29,3 +29,24 @@ export function pactFlowReviewEvidenceDigest(
   const canonical = JSON.stringify({ sessionId, needId, needRevision, kind, decision, note })
   return createHash('sha256').update(canonical).digest('hex')
 }
+
+/**
+ * Deterministic digest of the exact delivery subject: the task set and each task's
+ * successful commit. Approving a Need means approving these objects, so any change
+ * here (added task, replaced commit) must invalidate the prior approval. Input
+ * order never affects the result.
+ */
+export function pactFlowDeliverySubjectDigest(
+  sessionId: string,
+  needId: string,
+  taskRefs: readonly { readonly remoteRef: string; readonly commit: string }[],
+): string {
+  const canonical = JSON.stringify({
+    sessionId,
+    needId,
+    tasks: taskRefs
+      .map(ref => ({ remoteRef: ref.remoteRef, commit: ref.commit }))
+      .sort((left, right) => left.remoteRef < right.remoteRef ? -1 : left.remoteRef > right.remoteRef ? 1 : 0),
+  })
+  return createHash('sha256').update(canonical).digest('hex')
+}
