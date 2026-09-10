@@ -2,7 +2,7 @@
 
 本文档定义这个插件的**终局意图**：目的、最终需求、最终想要的系统形态。它是判断一切增量工作"是否跑偏"的对照物，也是整个加固工作的终止条件来源。
 
-它不回答"现在做到哪了"（那是[实施状态](implementation-status-实施状态.md)的职责），也不回答"下一步按什么顺序做什么"（那是[开发计划](development-plan-开发计划.md)的职责）。本文档刻意不包含进度、日期、测试数字和临时阻断——凡是会随时间腐化的内容都不属于这里。
+它不回答"现在做到哪了"（那是[实施状态](implementation-status-实施状态.md)的职责），也不回答"下一步按什么顺序做什么"（那是 OpenSpec change 与 `openspec/specs/` 的职责）。本文档刻意不包含进度、日期、测试数字和临时阻断——凡是会随时间腐化的内容都不属于这里。
 
 ## 1. 文档自身规则
 
@@ -11,7 +11,7 @@
 | 文档 | 拥有 | 变更权 |
 | --- | --- | --- |
 | 本文档 | WHY + 终局 WHAT | **仅用户**；Agent 只能提案 |
-| [开发计划](development-plan-开发计划.md) | HOW + 顺序 + 每步合同 | 唯一计划 owner（按 AGENTS.md 既有规则） |
+| OpenSpec（`openspec/changes/`、`openspec/specs/`、`openspec/config.yaml`） | HOW + 顺序 + 行为合同 | 唯一计划 owner（按 AGENTS.md 规则） |
 | [实施状态](implementation-status-实施状态.md) | WHERE-now + 验证证据 | 唯一写入方按证据更新 |
 | 本仓库 AGENTS.md | 协作规则 | 用户 |
 

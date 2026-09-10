@@ -1,0 +1,205 @@
+{
+  "date": "2026-09-10",
+  "node": "v22.16.0",
+  "sourceZipSha256": "ae9ad9bf8315c08b62d314c32bb7be9a9e5b211a5a567ce205bd69b73ab8d639",
+  "scope": "Actual transpiled modules and AST-extracted methods; transport and DSH infrastructure are test doubles; real temporary Git and loopback HTTP; not official DSH/K3s E2E",
+  "results": [
+    {
+      "id": "R01",
+      "title": "ConfigMap create 409 causes deletion of an unowned pre-existing ConfigMap",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "deleteCalls": [
+          [
+            "configmap",
+            {
+              "name": "same-name",
+              "namespace": "review"
+            }
+          ],
+          [
+            "secret",
+            {
+              "name": "same-name-input",
+              "namespace": "review"
+            }
+          ]
+        ],
+        "foreignConfigMapUid": "foreign-existing-uid",
+        "createReturnedUid": false
+      },
+      "ms": 2
+    },
+    {
+      "id": "R02",
+      "title": "Input Secret create 409 triggers delete of that uncreated Secret and ConfigMap",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "deleteCalls": [
+          [
+            "configmap",
+            {
+              "name": "same-name",
+              "namespace": "review"
+            }
+          ],
+          [
+            "secret",
+            {
+              "name": "same-name-input",
+              "namespace": "review"
+            }
+          ]
+        ],
+        "successfullyCreatedResources": 0
+      },
+      "ms": 0
+    },
+    {
+      "id": "R03",
+      "title": "Delete request timeout is treated as successful compensation",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "allDeleteOutcomes": "timeout/unknown",
+        "compensationFailed": false
+      },
+      "ms": 1
+    },
+    {
+      "id": "R04",
+      "title": "Local Git dispatch bypasses an admission service that would reject all requests",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "claims": 1,
+        "executes": 1,
+        "admissionCalls": 0
+      },
+      "ms": 1
+    },
+    {
+      "id": "R05",
+      "title": "Final Git ancestry proof accepts a descendant whose registered validation fails",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "integrationCommit": "33ed36deae4752a4ecfbc7cb83a293e4b2b79675",
+        "acceptedDefaultCommit": "b3f23193a37794e5804eeddf4e7717e81a2a51d7",
+        "finalValidation": "failed when independently invoked"
+      },
+      "ms": 228
+    },
+    {
+      "id": "R06",
+      "title": "Agent-style explicit Gitea endpoint sends a configured synthetic token to a different origin",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "gitOrigin": "https://trusted.example.invalid/owner/repo.git",
+        "acceptedApiOrigin": "http://127.0.0.1:44815",
+        "registeredProviderMatchCalls": 0,
+        "requestCount": 2,
+        "syntheticCredentialReceived": true
+      },
+      "ms": 66
+    },
+    {
+      "id": "R07",
+      "title": "Crash after release-recorded but before phase-transitioned makes closing retry non-idempotent",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "persistedRelease": true,
+        "phaseAfterCrash": "closing",
+        "retryError": "PactFlow release for Need \"need\" changed after recording",
+        "priorRecordedAt": 1789013515687
+      },
+      "ms": 14
+    },
+    {
+      "id": "R08",
+      "title": "DAG can be enlarged in closing and even after deployed without changing approval digest",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "acceptedPhases": [
+          "closing",
+          "deployed"
+        ],
+        "needRevisionUnchanged": true,
+        "approvalDigestUnchanged": true
+      },
+      "ms": 1
+    },
+    {
+      "id": "R09",
+      "title": "One saturated pool blocks a queued task in an unrelated idle pool",
+      "kind": "design-tradeoff",
+      "status": "design-observation-verified",
+      "observed": {
+        "poolA": "saturated",
+        "poolB": "idle",
+        "admittedB": true,
+        "bAcquireAttempts": 1
+      },
+      "ms": 61
+    },
+    {
+      "id": "R10",
+      "title": "Failed K3s creation retains per-run claim secrets in pendingRuntimeSecrets",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "pendingSecretsAfterFailure": 1
+      },
+      "ms": 0
+    },
+    {
+      "id": "R11",
+      "title": "A dependency-ready node starts from default branch, excluding its successful predecessor commit",
+      "kind": "defect-reproduction",
+      "status": "reproduced",
+      "observed": {
+        "dependency": "predecessor (succeeded)",
+        "predecessorCommit": "ea89e76b1a3622c43493b7ed70aba1b03066c87b",
+        "dependentBase": "571a29c17dd27f4b7389c253f85ad635bb1a71ab",
+        "predecessorFilePresent": false
+      },
+      "ms": 89
+    },
+    {
+      "id": "C01",
+      "title": "Validator actually rejects a failed subprocess (negative control)",
+      "kind": "control",
+      "status": "control-passed",
+      "observed": {
+        "rejected": true
+      },
+      "ms": 78
+    },
+    {
+      "id": "C02",
+      "title": "Unchanged release append is idempotent (control for R07)",
+      "kind": "control",
+      "status": "control-passed",
+      "observed": {
+        "sameReleaseReplay": "accepted"
+      },
+      "ms": 0
+    },
+    {
+      "id": "C03",
+      "title": "Combined admission scheduler itself honors the recovery pause",
+      "kind": "control",
+      "status": "control-passed",
+      "observed": {
+        "paused": true,
+        "resumed": true
+      },
+      "ms": 20
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+schema: spec-driven
+
+context: |
+  本仓库是 DSH 零脉（PactFlow）插件的唯一源码 owner。OpenSpec 是本仓库开发管理的第一入口：
+  新增、修改或删除长期 Requirement/Scenario 行为合同，必须先走 `openspec/changes/<change>`（proposal → specs → design → tasks），
+  经 apply 实施、verify 核对后 archive 归并入 `openspec/specs/`。普通修复、重构、运行故障与 Git 收口按 OpenSpec 工作流执行，不另设平行计划 owner。
+  人读 artifacts 使用中文；Requirement/Scenario 结构标题与 SHALL/MUST 等规范关键词保留英文。
+  生产安装必须运行在未修改的官方 DSH 上；需要 DSH 新通用能力时，只在独立上游 change 中实现并等待其进入受支持发行版，禁止私有 patch 回落。
+  本插件与 Hermes 零脉是两个独立产品实现；禁止导入、调用、共享或理解其源码、数据库、协议和运行时。
+  原始凭证不得进入 Session Log、Remote payload、Tool result、Git、argv、截图或持久日志。
+  禁止使用 `reset --hard`、无范围 `restore/clean`、强制推送或提交与当前里程碑无关的文件。
+
+rules:
+  proposal:
+    - 明确业务结果、非目标、受影响面（Host/Agent/Client/Remote/Session Event/Worker Provider）与行为 capability；New/Modified Capabilities 必须与 delta spec 目录双向一致，不复制项目规则正文。
+    - 说明该 change 与 `docs/architecture-目标架构.md` 终局能力/不变量的对应关系；跨边界改动必须先落合同再分模块实施。
+  specs:
+    - 每个 requirement 必须可证伪；权限、安全、资源身份与失败场景必须写 fail-closed 行为（未知身份不得按名删除、unknown 不得变成 success）。
+    - 区分已验证事实、工作假设和未知项；Mock 只用于边界清晰的隔离测试，安装/卸载/Typert/冷恢复/Git/Gitea/Harbor/K3s 验收必须走真实路径。
+  design:
+    - 引用现有 owner 文档而不是复制；单插件模块化单体，不引入中心服务端、第二份项目注册表或微服务重写。
+  tasks:
+    - 只写可验收的实现里程碑；关键修复遵守“先失败后通过”，不削弱断言与超时。
