@@ -25,6 +25,8 @@
 - 真实集群复跑 `pnpm run test:real-k3s`（真实模型 + 真实 Job/Pod）：**3 个套件 6/6 全通过**——k3s-harness-tasks 3/3（claude/codex/opencode）、harness-probes 2/2、k3s-worker 1/1。
 - 残留核对：`pactflow` namespace 无本轮 Job/Pod；验收远程 `pactflow/need/node/*` 分支数**未增加**（仍为 7 个历史残留），即本轮未产生新的分支泄漏。
 - 结论：本批改动在真实路径上行为正确、无回归。
+- **追加：全部真实套件的提交后复跑（29 提交后）**——`test:real-k3s` **6/6**、`test:real-gitea` **1/1**（受保护 PR 合并，临时 ref 清理）、`test:real-crash-restart` **1/1** 且远程任务分支数 **7→7 未增加**（清理修复持续生效）、`test:real-worker` **1/1**、`test:real-probe-ledger` **2/2**、`verify:profile:dev` install→boot→upgrade→remove→clean boot。`pactflow` namespace 无残留。
+- 即：本批 29 个提交在**全部真实路径**上均已复验无回归，而非仅单元测试通过。
 
 ## 2026-09-11 证据管线端到端验证（补：收敛重构的真实执行验证）
 
