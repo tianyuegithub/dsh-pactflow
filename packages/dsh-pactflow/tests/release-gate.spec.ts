@@ -20,4 +20,30 @@ describe('PactFlow release Web gate', () => {
     if (variant === 'skipped-assertion') value.testResults[0]!.assertionResults[0]!.status = 'pending'
     expect(() => assertReleaseWebReport(variant === 'malformed' ? {} : value, files)).toThrow()
   })
+
+  // The gate must be diagnosable from its message alone: it names the specific
+  // counter, suite file, or missing suite rather than a generic refusal.
+  it('names the offending counter when a count is non-zero', () => {
+    const value = report()
+    value.numPendingTests = 3
+    expect(() => assertReleaseWebReport(value, files)).toThrow(/numPendingTests must be zero but is 3/)
+  })
+
+  it('names the offending suite when it has a skipped assertion', () => {
+    const value = report()
+    value.testResults[0]!.assertionResults[0]!.status = 'pending'
+    expect(() => assertReleaseWebReport(value, files)).toThrow(new RegExp(`skipped, or missing assertions \\(${files[0]!}`))
+  })
+
+  it('names the missing suite rather than only that something is missing', () => {
+    const value = report()
+    value.testResults = []
+    expect(() => assertReleaseWebReport(value, files)).toThrow(new RegExp(`required suites are missing \\(${files[0]!}`))
+  })
+
+  it('names an unexpected suite', () => {
+    const value = report()
+    value.testResults = [{ name: '/isolated/other.spec.ts', status: 'passed', assertionResults: [{ status: 'passed' }] }]
+    expect(() => assertReleaseWebReport(value, files)).toThrow(/unexpected suite \(\/isolated\/other\.spec\.ts\)/)
+  })
 })
