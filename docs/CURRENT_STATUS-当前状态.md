@@ -37,6 +37,7 @@
 | 保留现场磁盘容量（A05 扩展） | passed | `failure-scene-retention-policy`；`retainedBytes`/`measured`/`overBudget` 只读呈现，`sizeBytes` 有界测量（未测量不谎报总量）；绝不自动删除 |
 | 跨进程工作区文件锁 | passed | `multiprocess-workspace-lock`；`workspace-lock-multiprocess.spec.ts`（2：**真实 4 进程**×15 迭代经锁精确=60，无锁对照 <60，防止空转断言）。此前该锁零测试 |
 | Worker 工具作用域（A08） | passed | `worker-tool-scope`；`domain.spec.ts#readonly-orchestrator`（Worker 子会话保留 `bash/write/edit` 且 `write` 可执行；编排器仍被拒）+ 真实 `test:real-worker` 通过 |
+| 真实套件自清理（新） | passed | `real-suite-hygiene`；`test:real-crash-restart` 清理可验证且失败可见（此前静默泄漏远程分支） |
 
 ## 2. 真实环境（B 类）
 
@@ -46,7 +47,7 @@
 | 真实 Gitea 收口（`test:real-gitea`） | passed | 2026-09-11 **F05 之后复跑**：真实受保护 PR 合并，断言 `merge_commit_sha === release.commit`（精确 merge SHA）且隔离复验路径成立，临时 ref 清零；见 `docs/b-class-k3s-acceptance-20260911.md` §6 |
 | 真实 worker 支线（`test:real-worker`） | **passed** | 2026-09-11 **修复后通过**。根因是本仓缺陷：`agent/session-start` 的编排器只读守卫**错误地施加到被委派的 Worker 子会话**，拦截其全部修改类工具（Worker 原话：`every mutating tool in my scope is blocked by the orchestrator guard before it reaches the filesystem`）。修复：守卫仅作用于编排器（`origin='subagent'` 直接返回）；并把 Worker 自身报告折入失败原因以便诊断。change `harden-worker-tool-scope`（已归档） |
 | 真实探针账本对账（`test:real-probe-ledger`） | **passed** | 2026-09-11 真实集群 2/2（UID 前置删除 + 404 幂等 + 未确认身份失败关闭）；骨架已实现 |
-| 真实跨进程崩溃重启（`test:real-crash-restart`） | **passed** | 2026-09-11 多进程基建（独立宿主子进程 + SIGKILL + 同 DSH_HOME 重启）两次稳定通过；非终态 Run 及精确 K3s 身份从持久事实恢复 |
+| 真实跨进程崩溃重启（`test:real-crash-restart`） | **passed** | 2026-09-11 多进程基建（独立宿主子进程 + SIGKILL + 同 DSH_HOME 重启）；非终态 Run 及精确 K3s 身份从持久事实恢复。**本轮修复其清理缺陷**：清理用 K8s 对象名校验器校验含 `/` 的分支名而抛错、被 `catch {}` 吞掉 → 每次运行都残留远程分支且套件仍报通过；已改用 `refName()` 并做可验证清理 + 失败可见（`real-suite-hygiene`） |
 | 真实人工审批界面（`test:real-approval`） | **not-run** | 需用户本人在原生 UI 操作 |
 | `run-real-k3s-batch` 的 TTL/ZeroProof 阶段 | **passed** | 2026-09-11 真实集群运行通过（含修复 namespace 缺失与假阳性风险后复跑） |
 | 真实待办网页 dogfood（`test:real-todo`，两节点依赖链） | **passed** | 2026-09-11 真实模型 + 真实 Job/Pod + 真实 Git：A 建 `todo.html`，B 以 A 为代码输入在其基线上文档化；宿主验证 `node test-todo-smoke.js` exit 0；真实浏览器驱动增/勾选/删除/刷新持久通过。**此运行发现并修复 K3s 代码输入断链**；见 `docs/b-class-k3s-acceptance-20260911.md` §7 |

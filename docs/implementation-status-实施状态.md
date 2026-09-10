@@ -1,5 +1,15 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 修复真实崩溃重启套件的远程分支泄漏（change harden-real-suite-cleanup，已归档）
+
+- 真实运行发现：验收远程累积 `pactflow/need/node/*` 分支，而 `test:real-crash-restart` **一直报告通过**——静默泄漏 + 假绿。
+- 根因：清理函数用 `names()`（Kubernetes 对象名校验器，禁止 `/`）去校验 **git 分支名** `pactflow/need/node/<id>`，立即抛 `unsafe object name`；外层 `catch { /* may never have pushed */ }` 静默吞掉，因此**从不删除**。
+- 修复：新增 `refName()`（允许 `/`，拒绝 `..`/结尾 `.`/结尾 `/`/`.lock`）；清理改为**可验证**（删除后确认引用消失并复核，防被 SIGKILL 的 Worker 迟到 push 重建），失败则显式 `WARNING`；分支未清理时 `verdict.ok=false` 使套件失败（不再假绿）；删除 Job 后先等待再删分支。
+- 真实复跑：`test:real-crash-restart` **1/1 通过且无新增残留**；已手动删除本会话产生的 4 个残留分支；历史残留（本 change 之前、含其它前缀）未擅自删除，已记录。
+- 同类排查：`test:real-todo`、`test:real-k3s`（harness-tasks）的清理路径**无该校验器误用**，但同样**删除后不复核**——已记为已知边界，未扩范围。
+- 验证：`pnpm run check` 62 文件 / 515 测试 / 13 包产物；`pnpm run typecheck`；`git diff --check`；`openspec validate --all --strict` 25/25。
+- 未推送。
+
 ## 2026-09-11 接线 Harness 能力声明查询 + 未接线助手排查（change harden-harness-capability-query，已归档）
 
 - **排查方法**：逐模块统计「每个导出符号在自身文件之外的引用数」，找「导出且被单测引用、但生产未接线」的助手（对照基线：本轮早前发现的死代码 `maxOutputBytes`）。

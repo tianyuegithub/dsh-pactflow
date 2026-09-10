@@ -24,6 +24,18 @@ const OBJECT_NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/
 
 const log = message => process.stderr.write(`[crash-restart] ${message}\n`)
 const names = value => { if (!OBJECT_NAME.test(String(value))) throw new Error(`unsafe object name: ${String(value)}`); return String(value) }
+// A git ref legitimately contains `/`, which OBJECT_NAME (a Kubernetes object-name
+// validator) rejects. Using `names()` here threw before the delete, and the old
+// `catch {}` hid it — so the task branch was never cleaned up. The argv element is
+// passed literally with `--`, so validating the ref shape is enough.
+const REF_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
+const refName = value => {
+  const name = String(value)
+  if (!REF_NAME.test(name) || name.includes('..') || name.endsWith('.') || name.endsWith('/') || name.endsWith('.lock')) {
+    throw new Error(`unsafe ref name: ${name}`)
+  }
+  return name
+}
 
 function kubectlDelete(kind, name) {
   // Foreground cascade so dependent Pods are gone before this returns; Background
@@ -51,8 +63,31 @@ function kubectlDelete(kind, name) {
 function kubectlExists(kind, name) {
   try { execFileSync('kubectl', ['-n', 'pactflow', 'get', kind, '-o', 'name', '--', names(name)], { stdio: 'ignore' }); return true } catch { return false }
 }
+function refAbsent(workspace, name, environment) {
+  return execFileSync('git', ['-C', workspace, 'ls-remote', '--heads', 'origin', `refs/heads/${name}`],
+    { encoding: 'utf8', env: environment }).trim() === ''
+}
+
+/**
+ * Delete the task branch and prove it STAYS deleted. The crashed Job's container may
+ * still be finishing its push, so an absent reading must be confirmed again after a
+ * settle gap; otherwise a late push re-creates the ref after we report success and
+ * quietly pollutes the acceptance repository. Returns whether it ended absent.
+ */
 function gitDeleteBranch(workspace, branch) {
-  execFileSync('git', ['-C', workspace, 'push', 'origin', '--delete', '--', names(branch)], { stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+  const name = refName(branch)
+  const environment = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try { execFileSync('git', ['-C', workspace, 'push', 'origin', '--delete', '--', name], { stdio: 'ignore', env: environment }) } catch { /* retried below */ }
+    if (refAbsent(workspace, name, environment)) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000)
+      if (refAbsent(workspace, name, environment)) return true
+      continue
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_000)
+  }
+  log(`WARNING: could not delete remote branch ${name} after retries; delete it manually`)
+  return false
 }
 function waitForFile(path, timeoutMs) {
   const deadline = Date.now() + timeoutMs
@@ -96,6 +131,7 @@ const env = {
 }
 
 let verdict
+let branchCleaned = true
 try {
   const repository = env.PACTFLOW_CRASH_REPO
   log('cloning acceptance repository')
@@ -139,9 +175,22 @@ try {
 } finally {
   try { if (crashed?.jobName !== undefined) kubectlDelete('job', crashed.jobName) } catch { /* best effort */ }
   try { if (crashed?.configMapName !== undefined) kubectlDelete('configmap', crashed.configMapName) } catch { /* best effort */ }
-  try { if (crashed?.branch !== undefined) gitDeleteBranch(workspace, crashed.branch) } catch { /* may never have pushed */ }
+  // Settle before touching the remote: the terminated Worker may still be finishing
+  // its push, and a late push would re-create the branch right after we delete it.
+  // Deleting the Job (foreground cascade) stops it, but give the push long enough to
+  // land first so the delete below sticks.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_000)
+  try {
+    if (crashed?.branch !== undefined) branchCleaned = gitDeleteBranch(workspace, crashed.branch)
+  } catch { branchCleaned = false }
   try { host?.kill('SIGKILL') } catch { /* already gone */ }
   await rm(root, { recursive: true, force: true }).catch(() => {})
+}
+
+// A run that leaves its remote branch behind is not a clean run: surface it instead
+// of reporting success and quietly polluting the acceptance repository.
+if (verdict?.ok === true && !branchCleaned) {
+  verdict = { ...verdict, ok: false, error: 'remote task branch was not cleaned up' }
 }
 
 process.stdout.write(`${JSON.stringify(verdict)}\n`)
