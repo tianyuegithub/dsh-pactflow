@@ -1,5 +1,14 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 证据管线端到端验证（补：收敛重构的真实执行验证）
+
+- 背景：上一项「收敛证据读取/校验为唯一路径」（change `harden-consolidate-evidence-validation`）改动了会被真实命令使用的 `acceptance-gate.mjs` 与 `evidence-collect.mjs`，但当时**只有单测**覆盖。
+- 本轮以真实命令端到端验证（非单测）：
+  - 构造含 7 个 target + zero-proof 的完整批次 → `pnpm run evidence:verify batch-smoke` **通过**（`acceptance gate: 7 targets verified`）；`node scripts/evidence-collect.mjs batch-smoke` **7/7 collected**。
+  - 反例一（未知 conclusion）：`evidence:verify` **失败关闭**并给出 `conclusion must be one of verified-fact|working-assumption|unknown`。
+  - 反例二（未知字段 `sneaky`）：`evidence:verify` 报 `unexpected fields sneaky`；`evidence:collect` **同样失败关闭**——证明收敛后**仍在真实校验**，未因重构而跳过校验（若跳过，正向用例也会通过，具误导性）。
+- 结论：收敛重构在真实命令路径上行为等价且校验未削弱；临时批次目录已清理。
+
 ## 2026-09-11 修复真实崩溃重启套件的远程分支泄漏（change harden-real-suite-cleanup，已归档）
 
 - 真实运行发现：验收远程累积 `pactflow/need/node/*` 分支，而 `test:real-crash-restart` **一直报告通过**——静默泄漏 + 假绿。
