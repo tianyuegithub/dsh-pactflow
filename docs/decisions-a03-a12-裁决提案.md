@@ -66,3 +66,15 @@
 4. 每项单独走 OpenSpec change（propose → apply → verify → archive），与本批一致。
 
 **不做也不影响当前正确性**：A03-b/c 与 A12-c 缺省下，现有行为是安全的（拒绝空验证呈现为 verified 的**数据**已在；drain 缺省为「照常卸载」但 §9.2 已提示需人工确认）。
+
+## 4. 分类已用合同核对（2026-09-11，避免再次误分类）
+
+本会话曾把 `validationExecutedCount` 误列为「待裁决的新能力」，实为**既有合同未接线**（已修正并接线）。为避免同类误判，本提案的每项都**逐条对照 openspec 合同**核实：
+
+- **A03-a**（零验证可识别）：合同 `validation-integrity-signals` 明确要求「Host SHALL 能报告执行数量…零必须可识别」→ **既有合同** → 已接线（`artifacts[].validationsExecuted`）；剩余 UI 视觉标记才属新目标。
+- **A03-d**（测试基础设施改动进入审查）：合同 `validation-integrity-signals` 要求「在运行结果中记录这些文件路径」→ **已满足**：`validationSensitiveChanges` 经 `syncResult` 落入 `PactFlowGitResult`（`types.ts` 的 `PactFlowGitResult.validationSensitiveChanges`），经 `snapshot()` 可读。故「记录」不缺；缺的是**评审门禁/UI 呈现**（新目标）。
+- **A12-a**（卸载前 drain 检查）：`grep` 全部 `openspec/specs/*/spec.md` **无任何**「drain / 卸载前」要求 → **确属新能力**，须你定目标。
+- **A12-b/c**：同上，无对应合同 → 新能力。
+
+即：需你裁决的只有**没有合同依据**的部分；有合同依据的已在（或已在本会话）交付。
+
