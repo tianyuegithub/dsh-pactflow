@@ -1,5 +1,14 @@
 # DSH 零脉实施状态
 
+## 2026-09-11 核对计划的两条完成条件（静态可验部分）
+
+`docs/development-plan-开发计划.md` §1 列出「才能声称完成」的硬条件。对其**静态可验**的两条做了核对：
+
+- **「官方 DSH 源码工作树对 PactFlow 为零差异」**：本仓为唯一源码 owner；已核实 `src/` 无任何指向相邻 DSH 开发仓的导入（`deepseek-harness-pactflow-p0`、`../../`、`packages/*/src` 检索均为 0 命中）。
+- **「Web 控制台使用 DSH Client Module/Slot/Store/Locale/Theme/Typert Remote，不存在 iframe、第二层 Web 壳或私有 DSH 源码导入」**：已核实无 `iframe`/`webview`/`createRoot`/`ReactDOM.render`；客户端只导入官方 Client 原语（`dsh-client-ui-slots`、`dsh-client-ui-primitives`、`dsh-client-store`、`dsh-client-locale`、`dsh-client-ui-*`、`dsh-api-remotes`、`dsh-typert-protocol` 等）。
+- 结论：上述两条**成立**（有源码级证据）。其余条件（安装/升级/卸载全通过、真实多 Harness 支线、安全验收等）依赖真实环境或用户操作，见 CURRENT_STATUS 与待办清单。
+- 说明：本次为**静态核对**，不替代 `verify:profile` 的真实安装/启动证据（后者 release 通道仍阻断，dev 通道已跑通）。
+
 ## 2026-09-11 修复不可运行的发布门禁 verify-profile（TDZ；change harden-verify-profile-tdz，已归档）
 
 - **发现**：`scripts/verify-profile.mjs` 从第一次调用即抛 `ReferenceError: Cannot access 'COMMAND_TIMEOUT_MS' before initialization`——常量声明在顶层 `try`（首个 `runDsh` 调用处）**之后**，属暂时性死区。
