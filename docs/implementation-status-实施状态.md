@@ -6,6 +6,7 @@
 - **影响面**：`pnpm run verify:profile` 与 `verify:profile:dev` **从未真正运行过**；`check:release` 的首个真实步骤即 `verify:profile`，故该发布门禁同样从未跨过此点。比「缺门禁」更糟：它以与验证对象无关的原因报错。
 - **修复**：两常量上移至顶层 `try` 之前。此后 `verify:profile:dev` **真实跑通**：`install → boot → upgrade → remove → clean boot passed`；release 通道不再 TDZ 崩溃，而给出设计好的明确错误（`Set DSH_CLI_ENTRY …`）。
 - **守卫**：`tests/script-hygiene.spec.ts` 新增 2 项——逐个 `node --check` 全部 `scripts/*.mjs`；断言 `COMMAND_TIMEOUT_MS` 声明早于首个顶层 `try {`。
+- **`check:release` 的实际阻断点（已实跑确认）**：运行 `pnpm run check:release` 在其第 9 行 `resolveProfileRuntime` 处失败，错误为本机未设 `DSH_CLI_ENTRY`（需已安装的官方 JavaScript CLI，禁止源码回落）。这是**设计好的上游前置**，与上面 TDZ 那类「脚本自身缺陷」性质不同——前者是「条件未满足」，后者是「脚本根本不可运行」。两者外观相似（都立即抛错），须区分。
 - 验证：`pnpm run check` 65 文件 / 528 测试；`openspec validate --all --strict` 30/30。
 - 未推送。
 
