@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { buildTtlProbeJob, evaluateTtlRecycle, evaluateZeroProof } from './k3s-batch-stages.mjs'
+import { loadAndRequireGrantedImpactList } from './impact-list.schema.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const SUITES = [
@@ -136,6 +137,22 @@ function runSuites() {
   })
 }
 
+/**
+ * B-class gate (plan §380): a real batch mutates cluster resources and remote
+ * branches, so it must be preceded by a precise, granted impact list. When one is
+ * supplied it is validated and MUST be `granted` (a well-formed `pending` list is
+ * refused). Absence is surfaced loudly rather than silently assumed.
+ */
+function enforceImpactListGate() {
+  const path = process.env.PACTFLOW_K3S_IMPACT_LIST
+  if (path === undefined || path.trim() === '') {
+    process.stderr.write('[k3s-batch] WARNING: no PACTFLOW_K3S_IMPACT_LIST supplied; the plan §380 precise-impact-list gate was NOT applied to this mutating run\n')
+    return
+  }
+  loadAndRequireGrantedImpactList(path)
+  process.stdout.write(`[k3s-batch] impact list validated and authorized: ${path}\n`)
+}
+
 function main() {
   const dryRun = process.argv.includes('--dry-run')
   if (!kubectlReachable()) {
@@ -147,6 +164,7 @@ function main() {
     process.stdout.write(`[k3s-batch] dry-run: real cluster reachable; would run stages ${JSON.stringify(['suites', 'ttl', 'zero-proof'])}\n`)
     return
   }
+  enforceImpactListGate()
   runStage('suites', runSuites)
   runStage('ttl', ttlStage)
   runStage('zero-proof', zeroProofStage)

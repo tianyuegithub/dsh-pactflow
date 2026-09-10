@@ -72,3 +72,22 @@ export function validatePreciseImpactList(input) {
 export function validatePreciseImpactListFile(path) {
   return validatePreciseImpactList(JSON.parse(readFileSync(path, 'utf8')))
 }
+
+/**
+ * The B-class gate from the plan (§380): a precise impact list must exist AND carry
+ * a granted authorization before a real (mutating) batch run proceeds. Structural
+ * validity alone is not authorization — `pending` is a well-formed list that may not
+ * be executed.
+ */
+export function requireGrantedImpactList(list) {
+  validatePreciseImpactList(list)
+  if (list.authorization !== 'granted') {
+    throw new Error(`precise impact list is not authorized (authorization=${list.authorization}); obtain the applicable authorization before a B-class run`)
+  }
+  return list
+}
+
+/** Load, validate, and require a granted impact list from a file path. */
+export function loadAndRequireGrantedImpactList(path) {
+  return requireGrantedImpactList(validatePreciseImpactListFile(path))
+}
