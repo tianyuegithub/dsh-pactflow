@@ -1,6 +1,18 @@
 # DSH 零脉实施状态
 
-> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 71 文件 / 554 测试、44 个 change 已归档、已推送）。
+> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 72 文件 / 558 测试、45 个 change 已归档、已推送）。
+
+## 2026-09-11 完整 Mimosa 深度扫描 + SSRF 族处置（change `harden-egress-url-origin`，已归档）
+
+补齐此前 `git commit`/`push` 时多次 `scanner_enobufs` 的缺口：完成一次**密封深度扫描**（`scan-2026-09-11T06-24-14.686Z-93cb38201725`，seal `sha256:732c2a60…`；收据与三族处置结论见 `docs/security-scan-20260911.md`）。扫描覆盖 `partial`（调用图动态派发缺口）→ 结论 `inconclusive`，**不得**作全项目安全声明。
+
+50 条 finding 的人工核实与处置：
+
+- **SSRF 入口 19 条 high → 已处置**：核实「Agent 面工具只收注册 id、无端点参数；操作员表单探测按设计接受草稿端点；Gitea 携凭据出网由 F01 合同约束」后，把该分层落为新合同 `egress-url-origin` + 守卫测试 `tests/egress-url-origin.spec.ts`（4 项：schema 无端点参数含信封形状断言、Agent 面无探测工具、未注册模型连接零出网、草稿凭据未配置零出网）。**对抗验证**：临时注入假想 `base_url` 参数工具时守卫精确点名（非空转）；守卫首版曾因未识别 `schemas()` 的 JSON-Schema 信封而险些空转——由「断言信封形状 + 含 `gitea_provider_id`」修正。
+- **mongo-sort-injection 23 条 medium → 规则错配**：全仓无 MongoDB（零命中）；sink 实为 JS 数组排序。不改代码。
+- **硬编码凭据 3 条 high（CWE-798）→ 误报**：仅环境变量名（K8s Secret 注入、容器内运行时读取），无字面量。不改代码。
+
+零运行时改动（纯新增测试与文档）。**验证**：`pnpm run check` 72 文件 / **558** 测试 / 13 包产物全绿；`openspec validate --all --strict` 37/37；依赖 56 包离线 advisory 匹配 0。
 
 ## 2026-09-11 A03-a 零验证界面标注 + A12-a/b drain 检查与版本可追溯（change `harden-drain-and-verification-visibility`，已归档）
 
