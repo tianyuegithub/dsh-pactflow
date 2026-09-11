@@ -170,6 +170,7 @@ import type {
   PactFlowProjectRecord,
   PactFlowRelease,
   PactFlowSnapshot,
+  PactFlowDrainStatus,
   PactFlowReview,
   PactFlowRun,
   RecordPactFlowReviewRequest,
@@ -576,7 +577,53 @@ export class PactFlowService extends TypertRemoteService {
    */
   @Remote('projectHandover')
   async projectHandover(sessionId: string, signal?: AbortSignal): Promise<PactFlowHandoverSummary> {
-    return projectHandoverSummary(await this.snapshot(sessionId, signal) as never)
+    return projectHandoverSummary(await this.snapshot(sessionId, signal) as never, {
+      packageVersion: VERSION,
+      eventProducerVersion: EVENT_PRODUCER_VERSION,
+    })
+  }
+
+  /**
+   * A12: read-only uninstall drain status. Across every PactFlow session the plugin
+   * owns (live or cold), reports non-terminal Runs and unfinished cleanup
+   * responsibilities so an operator can decide whether uninstalling now is safe.
+   * Never mutates state and never triggers cleanup — there is NO automatic path.
+   */
+  @Remote('drainStatus')
+  async drainStatus(): Promise<PactFlowDrainStatus> {
+    const activeRuns: { sessionId: string; runId: string; nodeId: string; state: string }[] = []
+    const pendingCleanups: { sessionId: string; id: string; target: string; state: string; retain?: boolean }[] = []
+    for (const record of await this.listProjects()) {
+      const sessionId = SessionId(record.sessionId)
+      const live = this.ctx.sessions.get(sessionId)
+      let values
+      if (live !== undefined) {
+        values = this.ctx.sessionProjections.snapshot(live).values
+      } else {
+        const query = this.ctx.get('sessionQuery') as SessionQueryEngine | undefined
+        if (query === undefined) throw new Error('PactFlow drain status requires sessionQuery')
+        const stored = await query.readSession(sessionId)
+        values = this.ctx.sessionProjections.restore({}, stored.events, 0, stored.session).snapshot.values
+      }
+      for (const run of Object.values(values.pactflowRuns?.byId ?? {}) as { id: string; nodeId: string; state: string }[]) {
+        if (!this.isTerminalRun(run as never)) {
+          activeRuns.push({ sessionId: record.sessionId, runId: String(run.id), nodeId: String(run.nodeId), state: String(run.state) })
+        }
+      }
+      for (const cleanup of Object.values(values.pactflowDelivery?.cleanups ?? {}) as {
+        id: string; target: string; state: string; retain?: boolean
+      }[]) {
+        if (cleanup.state !== 'succeeded') {
+          pendingCleanups.push({
+            sessionId: record.sessionId, id: String(cleanup.id), target: String(cleanup.target), state: String(cleanup.state),
+            ...cleanup.retain === true ? { retain: true } : {},
+          })
+        }
+      }
+    }
+    activeRuns.sort((left, right) => `${left.sessionId}/${left.runId}`.localeCompare(`${right.sessionId}/${right.runId}`))
+    pendingCleanups.sort((left, right) => `${left.sessionId}/${left.id}`.localeCompare(`${right.sessionId}/${right.id}`))
+    return { safeToUninstall: activeRuns.length === 0 && pendingCleanups.length === 0, activeRuns, pendingCleanups }
   }
 
   /**

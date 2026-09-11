@@ -1,6 +1,16 @@
 # DSH 零脉实施状态
 
-> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 69 文件 / 545 测试、43 个 change 已归档、已推送）。
+> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 71 文件 / 554 测试、44 个 change 已归档、已推送）。
+
+## 2026-09-11 A03-a 零验证界面标注 + A12-a/b drain 检查与版本可追溯（change `harden-drain-and-verification-visibility`，已归档）
+
+用户授权后实现 P2-6 的最小可测切片。三项均在**无合同依据**处新建/扩展合同（先行 `openspec validate` 再实施）：
+
+- **A03-a（零验证一等只读信号贯通到界面）**：新增客户端纯函数 `pactFlowVerificationLabel(count)`——`count===0` 返回显式「无自动验证」语义键，而非计数 `0`；`overlay.tsx` 运行行改用它；新增中英本地化键。这样「没有自动验证」不再被读成「验证通过、数量为零」。测试 `verification-label.spec.ts`（3，含 NaN/负数 fail-closed）。
+- **A12-a（卸载前只读 drain 检查）**：新增 `@Remote('drainStatus')`，跨全部 PactFlow 会话（**含冷会话**——正是卸载时的常见态）汇总非终态 Run 与未成功清理责任，返回派生布尔 `safeToUninstall`；**只读、绝不自动清理、不创建 live 会话**（冷读用 `restore`）。手册 §7 卸载步骤加入 drain 前置与处置说明。测试 `drain-status.spec.ts`（5：无责任/活跃 Run/未完成清理含保留标记/**冷会话可读且可重复无副作用**/文档名绑定 Host 实际 Remote 名）。
+- **A12-b（版本可追溯）**：移交摘要新增 `packageVersion` 与 `eventProducerVersion`（取自构建常量与已注册事件生产者，非调用方输入），使旧日志的兼容 reader 版本可从摘要直接读出。`project-handover.spec.ts` 3 → 5。
+
+**验证**：`pnpm run check` 71 文件 / **554** 测试 / 13 包产物全绿；`test:web` 8 通过（overlay 场景无回归——首轮曾报 3 项失败，经 stash 对照与多次复跑确认是**冷启动 sidebar 指针拦截偶发**，与本改动无关，复跑 4 次全绿）；`openspec validate --all --strict` 36/36；archive 后补写新 capability 的真实 Purpose（占位 Purpose 再次触发 validate 失败，已按既有守卫处置）。
 
 ## 2026-09-11 真实人工审批（P1-4）落地 + 发布门禁不可满足性修复（P3-15）
 

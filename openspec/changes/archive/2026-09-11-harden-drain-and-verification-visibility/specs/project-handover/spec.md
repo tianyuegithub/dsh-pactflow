@@ -1,9 +1,6 @@
-# project-handover Specification
+# project-handover (delta)
 
-## Purpose
-让项目可被**只读移交**：导出当前项目身份、各需求阶段、精确 Git 产物引用与未完成责任，且不依赖插件继续运行、不修改任何状态——使「数据还在但没有 reader」不成为事实上的丢失。
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 项目必须可导出只读移交摘要
 

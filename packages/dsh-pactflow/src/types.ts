@@ -995,4 +995,33 @@ export interface PactFlowHandoverSummary {
     readonly state: string
     readonly retain?: boolean
   }[]
+  /** The installed package build version, so an old log's reader build is traceable. */
+  readonly packageVersion: string
+  /** The external Session event producer (reader) version this build registered. */
+  readonly eventProducerVersion: string
+}
+
+/**
+ * Read-only uninstall drain status (A12): across the plugin's PactFlow sessions,
+ * whether any Run is non-terminal or any cleanup responsibility is unfinished.
+ * Exposed on the public type surface for the Remote boundary; never mutates state
+ * and never triggers cleanup.
+ */
+export interface PactFlowDrainStatus {
+  /** Derived from the two lists below — never a caller input. */
+  readonly safeToUninstall: boolean
+  readonly activeRuns: readonly {
+    readonly sessionId: string
+    readonly runId: string
+    readonly nodeId: string
+    readonly state: string
+  }[]
+  /** Unfinished cleanup responsibilities (state !== 'succeeded'). */
+  readonly pendingCleanups: readonly {
+    readonly sessionId: string
+    readonly id: string
+    readonly target: string
+    readonly state: string
+    readonly retain?: boolean
+  }[]
 }

@@ -34,6 +34,7 @@ export type PactFlowLocaleKey =
   | 'verifyGitea'
   | 'giteaProtected'
   | 'giteaUnprotected'
+  | 'noVerification'
   | 'empty'
 
 export const zh: Record<PactFlowLocaleKey, string> = {
@@ -70,6 +71,7 @@ export const zh: Record<PactFlowLocaleKey, string> = {
   verifyGitea: '验证 Gitea',
   giteaProtected: '默认分支已保护',
   giteaUnprotected: '默认分支未保护',
+  noVerification: '无自动验证',
   empty: '暂无数据',
 }
 
@@ -107,6 +109,7 @@ export const en: Record<PactFlowLocaleKey, string> = {
   verifyGitea: 'Verify Gitea',
   giteaProtected: 'Default branch protected',
   giteaUnprotected: 'Default branch unprotected',
+  noVerification: 'No automatic verification',
   empty: 'No data',
 }
 

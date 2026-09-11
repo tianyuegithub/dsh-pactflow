@@ -13,8 +13,19 @@ export type { PactFlowHandoverSummary }
 
 type AnyRecord = Record<string, any>
 
+/**
+ * Versions that make an old log's reader traceable. Supplied by the caller
+ * (the Host owns the build/registration facts) so this derivation stays pure and
+ * testable; they are never caller-supplied by accident because the only caller
+ * passes its own build constants.
+ */
+export interface PactFlowHandoverVersions {
+  readonly packageVersion: string
+  readonly eventProducerVersion: string
+}
+
 /** Derive a read-only handover summary from a project snapshot. */
-export function projectHandoverSummary(snapshot: AnyRecord): PactFlowHandoverSummary {
+export function projectHandoverSummary(snapshot: AnyRecord, versions: PactFlowHandoverVersions): PactFlowHandoverSummary {
   const project = snapshot?.project?.project ?? null
   const needs = Object.values(snapshot?.needs?.byId ?? {}) as AnyRecord[]
   const nodes = Object.values(snapshot?.dag?.byId ?? {}) as AnyRecord[]
@@ -53,5 +64,7 @@ export function projectHandoverSummary(snapshot: AnyRecord): PactFlowHandoverSum
     })).sort((left, right) => left.id.localeCompare(right.id)),
     artifacts,
     pendingCleanups,
+    packageVersion: versions.packageVersion,
+    eventProducerVersion: versions.eventProducerVersion,
   }
 }

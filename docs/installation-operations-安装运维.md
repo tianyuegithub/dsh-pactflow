@@ -124,15 +124,19 @@ pnpm run service:generate -- --platform systemd --dsh /absolute/path/to/dsh --pr
 
 升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 当前写入 **17** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_3`），同时以 read-only registration 读取 0.1.0 的 12 类词汇与 0.2.0 的 13 类词汇；升级不重写历史日志。
 
-卸载：
+卸载——**先做 drain 检查**（`pactflow/drainStatus`）：
+
+该只读查询跨全部 PactFlow 会话（**含未 live 的冷会话**）汇总两类未完成责任：非终态 Run 与未成功的清理责任（含被标记保留的失败现场）。它不修改任何状态、不触发任何清理。**任一非空即不宜卸载**：先到对应 Session 里结束/取消任务并重试清理；确需立即卸载的，必须知情并自行承担遗留资源（K3s Job/Pod、任务分支、失败现场）不再被自动对账的后果。`safeToUninstall: true` 才可安全卸载。
 
 ```bash
+# 安全前置：在卸载前查询（Web Profile 运行中经 Remote；或卸载前用浏览器 UI 触发）
+#   pactflow/drainStatus  ->  { safeToUninstall, activeRuns[], pendingCleanups[] }
 dsh plugin --profile web remove dsh-pactflow
 dsh --profile web --dump-config
 dsh --profile web
 ```
 
-卸载后 Bundle row、Preset、Client UI 和 Settings namespace 必须消失；Session 原始日志保留。含 required PactFlow 外部事件的 Session 在匹配插件重装前应失败关闭，不能静默切换 Standard 模式。匹配版本/事件词汇重装后恢复读取。
+卸载后 Bundle row、Preset、Client UI 和 Settings namespace 必须消失；Session 原始日志保留。含 required PactFlow 外部事件的 Session 在匹配插件重装前应失败关闭，不能静默切换 Standard 模式。匹配版本/事件词汇重装后恢复读取。旧日志的读取版本可追溯：`pactflow/projectHandover` 的摘要携带 `packageVersion` 与 `eventProducerVersion`。
 
 Host 重启期间 K3s Job 可以继续。PactFlow Agent 重新成为 live 后，Host 按持久 Run Spec 对账已存在 Job：租约内成功结果会 fetch/验证/结算，活动 Job 会续租等待，过期 Job 会取消并记录 expiry，缺失 Job 会失败关闭。
 

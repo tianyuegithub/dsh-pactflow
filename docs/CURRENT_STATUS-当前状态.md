@@ -5,8 +5,8 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 69 文件 / 545 测试 / 13 包产物，全绿；`git diff --check` 通过；
-`openspec validate --all --strict` 通过（**35 个 spec / 43 个已归档 change**）。分支**已推送**到 `origin`（`local==remote`，0/0）。
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 71 文件 / 554 测试 / 13 包产物，全绿；`git diff --check` 通过；
+`openspec validate --all --strict` 通过（**36 个 spec / 44 个已归档 change**）。分支**已推送**到 `origin`（`local==remote`，0/0）。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
@@ -25,11 +25,12 @@
 | 运行时数据新鲜度（R11） | passed | `runtime-data-freshness`；`runtime-freshness.spec.ts`（7）。**接线已核实**：`overlay.tsx` 实际调用 `createFreshnessTracker` 与 `PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS` |
 | 集群连接身份（A07） | passed | `cluster-connection-identity`；`cluster-identity.spec.ts`（3） |
 | 时间合同分离（A02） | passed | `run-time-contracts`；`run-time-contracts.spec.ts`（3） |
-| 验证完整性信号（A03 部分） | passed | `validation-integrity-signals`；`validation-integrity.spec.ts`（5） |
+| 验证完整性信号（A03） | passed | `validation-integrity-signals`；`validation-integrity.spec.ts`（5）+ `verification-label.spec.ts`（3：**客户端把零验证显式标为「无自动验证」而非计数 0**）；零验证可识别已贯通「宿主数据 → 只读移交摘要 → 界面标注」 |
+| 卸载前 drain 检查（A12-a） | passed | `uninstall-drain-safety`；`drain-status.spec.ts`（5：无责任/活跃 Run/未完成清理/**冷会话可读**/文档绑定 Remote 名）。新增只读 `@Remote('drainStatus')`，跨会话汇总非终态 Run 与未成功清理，只读不自动清理 |
 | 本地失败保留（A05） | passed | `local-failure-retention`；`local-failure-retention.spec.ts`（2）、`cleanup-retention-guard.spec.ts`（2） |
 | 运行预算（A11） | passed | `run-budgets`；`run-budgets.spec.ts`（6，含 `retryNode` 强制 + **输出上限由预算单一权威决定并实际生效**） |
 | Harness 能力分级（A10） | passed | `harness-capability-levels`；`harness-capabilities.spec.ts`（9：级别推导 + **不可证级别不虚报**对抗守卫 + **声明可查询**）+ `k3s-cleanup.spec.ts#capability-level`（镜像/API 探针均报级别）+ **真实集群** `pactflow-harness-probes`（四模板 2/2） |
-| 只读项目移交（A12） | passed | `project-handover`；`project-handover.spec.ts`（3） |
+| 只读项目移交（A12） | passed | `project-handover`；`project-handover.spec.ts`（5：含**包版本与 reader 版本可追溯**） |
 | 代码输入过期追踪（F03 增强） | **partial** | `code-input-staleness`；检测器与记录已就位并通过测试，但**触发路径当前不可达**（成功节点不可重跑）——见 §4 |
 | 宿主窄端口（R12/J9） | passed | `host-narrow-ports`；`host-narrow-ports.spec.ts`（4：cleanup/probe + 派发/恢复均在不含 `ctx` 的宿主替身上驱动）+ `cleanup-retention-guard.spec.ts`（2）。`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost` 四个端口均已剥离整个 `ctx` |
 | K3s 批次收尾阶段（R04） | **passed** | `k3s-batch-finalization`；2026-09-11 真实集群验证 TTL 回收（两次）与零残留归零（两态）；见 `docs/b-class-k3s-acceptance-20260911.md` |
@@ -71,8 +72,8 @@
 
 - **A11 完整形态**：token/模型调用数用量统计（Harness termination document 无 token 字段，需先扩展 Harness 能力）、「预算耗尽进入 paused/needs-decision」（当前以**显式拒绝**表达，改为持久 paused 属领域状态机变更）。**输出/日志容量上限已交付**（预算单一权威，实际生效）。
 - **A10 完整形态**：为 `tool-invocation`/`verification` **增设专门探针阶段并做真实六级实证**——当前二者无可证证据（前者需 Harness runner 上报工具调用，不在本仓所有权内；后者需专门验证阶段），故诚实性上**不虚报**（已显式入合同与测试）；跨 Harness 能力协商未做。
-- **A12 完整形态**：卸载前 drain 检查、前端移交入口。
-- **A03 完整形态**：宿主侧独立验收基线、按任务类型的最小验证策略、测试基础设施改动单独审查——本批只做了「验证基础设施改动可见」与「零验证可识别」。
+- **A12 完整形态**：**卸载前 drain 检查已交付**（`uninstall-drain-safety`，只读 `drainStatus` + 手册 §7 前置）、**版本可追溯已交付**（移交摘要 `packageVersion`/`eventProducerVersion`）；**剩前端移交入口**（UI 按钮触发导出移交摘要）未做。
+- **A03 完整形态**：**零验证可识别已贯通到界面**（`verification-label` 显式标注「无自动验证」）、验证基础设施改动可见已交付；**剩**宿主侧独立验收基线、按任务类型的最小验证策略——二者引入新的基线资产所有权/策略语义，属新目标，未做。
 - **A05 完整形态**：保留现场 UI 入口与只读查询的界面呈现仍未做；磁盘容量**已交付**（窗口/陈旧标记/容量计量/超预算标记）。
 - **A04**：Gitea 保护分支的 `waiting-review/waiting-checks` 协作闭环（当前遇 required approvals/status checks 即拒绝自动收口）；需真实受保护仓库的审核/CI 状态，属 B 类环境前置。
 - **R12/J9 窄接口重构**：四个宿主端口（`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost`）均已剥离整个 `ctx`，改为窄端口；剩余未做的是「跨进程锁/时钟/环境」的显式可注入端口（D 类设计建议），属更大重构。
@@ -80,7 +81,7 @@
 - **「已实现但未强制执行」的脚本（诚实清点，2026-09-11 穷尽扫描）**：
   - `scripts/impact-list.schema.mjs`：**已接线**（change `harden-enforce-impact-list-gate`）——`run-real-k3s-batch` 现对变更型运行施加门禁：提供清单则要求**已授权**（`pending` 被拒），未提供则**显式告警**门禁未施加。
   - `scripts/evidence-schema.mjs`：`validateAcceptanceEvidenceFile`、`ACCEPTANCE_EVIDENCE_VERDICTS`、`ACCEPTANCE_EVIDENCE_CONCLUSIONS` 三个导出**零消费者**（其余导出在用：`validateAcceptanceEvidence`/`validateZeroProof`/`ACCEPTANCE_EVIDENCE_TARGETS`）。
-  - `src/validation-integrity.ts` 的 `validationExecutedCount`：**已接线**（change `harden-wire-validation-count`）——复核合同后确认「零自动验证必须可识别」属**既有合同未接线**（非新目标），已接入只读移交摘要（`artifacts[].validationsExecuted`，零即表示无自动验证）。前端 UI 的视觉标记仍未做。
+  - `src/validation-integrity.ts` 的 `validationExecutedCount`：**已接线**（change `harden-wire-validation-count`）——复核合同后确认「零自动验证必须可识别」属**既有合同未接线**（非新目标），已接入只读移交摘要（`artifacts[].validationsExecuted`，零即表示无自动验证）。**前端视觉标记已交付**（change `harden-drain-and-verification-visibility`：`verification-label` 纯函数把零计数标为「无自动验证」，overlay 运行行接线）。
   - 说明：`tests/` 与 `scripts/` 中「断言可空转」的形态已抽查（`toBeDefined()` 仅 6 处，均伴随失败路径断言，非空转）；未做穷尽式变异测试——那属工具链改动，不在本批。
   - **静默吞错排查（2026-09-11）**：对 `src/` 全部 catch 块做穷尽扫描（28 处候选），逐一核对后**未发现真正静默吞错的块**——其中「租约续期失败」`catch { controller.abort(...) }`、探针清理失败 `catch { success=false; stages.push(...) }`、取消路径 `catch { failures.push(error) }` 等均**有显式动作**（中止/记失败/入集合）。**结论：本仓 `src/` 无「catch 后什么都不做」的块**（此前修复的静默吞错在 `scripts/` 的 crash-restart runner，已由 `real-suite-hygiene` 处置）。
 

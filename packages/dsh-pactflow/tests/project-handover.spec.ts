@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { projectHandoverSummary } from '../src/project-handover.ts'
 
+const VERSIONS = { packageVersion: '0.2.1', eventProducerVersion: '0.3.0' }
+
 const snapshot = {
   project: { project: { id: 'session-1', name: 'Demo', revision: 3, createdAt: 1, updatedAt: 2,
     git: { remote: 'origin', remoteUrl: 'https://git.example/owner/repo.git', defaultBranch: 'main', revision: 1, boundAt: 2 } } },
@@ -16,7 +18,7 @@ const snapshot = {
 
 describe('PactFlow project handover summary', () => {
   it('summarises project, stage and unresolved responsibilities read-only', () => {
-    const summary = projectHandoverSummary(snapshot as never)
+    const summary = projectHandoverSummary(snapshot as never, VERSIONS)
     expect(summary.project.name).toBe('Demo')
     expect(summary.gitRemote).toBe('https://git.example/owner/repo.git')
     expect(summary.needs).toEqual([{ id: 'need', title: 'N', phase: 'closing', revision: 8 }])
@@ -38,13 +40,21 @@ describe('PactFlow project handover summary', () => {
       { command: 'git', args: ['diff', '--check'], timeoutMs: 1000, exitCode: 0, durationMs: 5 },
       { command: 'node', args: ['test.js'], timeoutMs: 1000, exitCode: 0, durationMs: 7 },
     ]
-    const summary = projectHandoverSummary(withValidations as never)
+    const summary = projectHandoverSummary(withValidations as never, VERSIONS)
     expect(summary.artifacts[0]?.validationsExecuted).toBe(2)
+  })
+
+  it('carries the package and reader versions so an old log stays traceable', () => {
+    const summary = projectHandoverSummary(snapshot as never, VERSIONS)
+    // Versions come from the caller's build/registration facts, not the snapshot,
+    // so an old log's compatible reader build is readable from the handover.
+    expect(summary.packageVersion).toBe('0.2.1')
+    expect(summary.eventProducerVersion).toBe('0.3.0')
   })
 
   it('reports no project cleanly when none is bound', () => {
     const summary = projectHandoverSummary({ project: { project: null }, needs: { byId: {} }, dag: { byId: {} },
-      runs: { byId: {} }, delivery: { reviews: {}, documents: {}, releases: {}, cleanups: {} } } as never)
+      runs: { byId: {} }, delivery: { reviews: {}, documents: {}, releases: {}, cleanups: {} } } as never, VERSIONS)
     expect(summary.project).toBeNull()
     expect(summary.pendingCleanups).toEqual([])
     expect(summary.artifacts).toEqual([])
@@ -53,7 +63,7 @@ describe('PactFlow project handover summary', () => {
   it('excludes succeeded cleanups from unresolved responsibilities', () => {
     const done = { ...snapshot, delivery: { ...snapshot.delivery,
       cleanups: { ...snapshot.delivery.cleanups, 'cleanup-done': { id: 'cleanup-done', target: 'git:other', state: 'succeeded', attempt: 1 } } } }
-    const summary = projectHandoverSummary(done as never)
+    const summary = projectHandoverSummary(done as never, VERSIONS)
     expect(summary.pendingCleanups.map(record => record.id)).toEqual(['cleanup-run-git'])
   })
 })

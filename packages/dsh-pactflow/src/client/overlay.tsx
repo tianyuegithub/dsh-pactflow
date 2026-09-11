@@ -6,6 +6,7 @@ import type { PactFlowHealth, PactFlowSnapshot, PactFlowHarnessTemplateView, Pac
 import { harnessProbeAvailability } from '../harness-discovery.ts'
 import { NS, type PactFlowLocaleKey } from './locale.ts'
 import { isHarnessProfile } from './resource-model.ts'
+import { pactFlowVerificationLabel } from './verification-label.ts'
 import { createRequestGate } from './request-gate.ts'
 import { createFreshnessTracker, PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS, type PactFlowFreshnessState } from './runtime-freshness.ts'
 import { PactFlowDagGraph } from './dag-graph.tsx'
@@ -368,6 +369,11 @@ function PactFlowProjectionTables({
   const needs = Object.values(snapshot.needs.byId)
   const nodes = Object.values(snapshot.dag.byId)
   const runs = Object.values(snapshot.runs.byId)
+  // Zero executed validations must read as "no automatic verification", never as the bare count 0.
+  const verificationLabel = (count: number): string => {
+    const label = pactFlowVerificationLabel(count)
+    return label.key === 'noVerification' ? t('noVerification') : `${t('validations')}: ${String(label.count)}`
+  }
   return (
     <div style={gridStyle}>
       <section style={cardStyle}>
@@ -409,7 +415,7 @@ function PactFlowProjectionTables({
         `${t('attempt')}: ${run.attempt}`,
         run.git === undefined ? '—' : `${t('gitBranch')}: ${run.git.branch}`,
         run.gitResult === undefined ? '—' : `${t('gitCommit')}: ${run.gitResult.commit.slice(0, 12)}`,
-        run.gitResult === undefined ? '—' : `${t('validations')}: ${run.gitResult.validations.length}`,
+        run.gitResult === undefined ? '—' : verificationLabel(run.gitResult.validations.length),
       ])} empty={t('empty')} />
       <ProjectionTable title={t('workerPools')} rows={workerPools.map(pool => [
         pool.id,
