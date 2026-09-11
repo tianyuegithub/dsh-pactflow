@@ -1,6 +1,6 @@
 # DSH 零脉实施状态
 
-> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 72 文件 / 561 测试、46 个 change 已归档、已推送）。
+> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 73 文件 / 565 测试、46 个 change 已归档、已推送）。
 
 ## 2026-09-11 A03-d 评审可见验证清单 + A12-c 移交入口 + A05 保留现场 UI（change `surface-review-and-readonly-entries`，已归档）
 
@@ -24,6 +24,18 @@
 - **硬编码凭据 3 条 high（CWE-798）→ 误报**：仅环境变量名（K8s Secret 注入、容器内运行时读取），无字面量。不改代码。
 
 零运行时改动（纯新增测试与文档）。**验证**：`pnpm run check` 72 文件 / **558** 测试 / 13 包产物全绿；`openspec validate --all --strict` 37/37；依赖 56 包离线 advisory 匹配 0。
+
+## 2026-09-11 跨主机文件锁语义（11 号待办收尾；change `harden-cross-host-lock-semantics`，已归档）
+
+用户指定 11 号待办（多宿主并发的剩余边界：跨主机文件锁语义）。接线定性：锁以**目录 rename 原子抢占**（共享盘上由 NFS 服务端 RENAME 原子性保证）；`recoverDeadOwner` 对**异宿主** owner 记录**故意不恢复**（无法探测异主机进程死活，夺取可能偷活主）——该安全设计此前无合同无测试。
+
+- **合同**：`multiprocess-workspace-lock` 扩展两条——异宿主遗留锁**失败关闭且不得被改动**（竞争者超时错误指名持有 host/pid）；共享 FS 依据与验证边界文档化（由测试绑定）。
+- **运行时小改**：超时错误 best-effort 读取 owner 文件拼入 `held by host "X", pid Y`（前缀逐字不变；Mimosa 对 `.exec(` 的误报以等价 `String.match` 规避）。
+- **测试**：`workspace-lock-cross-host.spec.ts`（4 项，真实子进程）：异宿主锁→超时+指名 host/pid+锁目录逐字节不变；异宿主 pending 工件→清扫后原样保留；同宿主死主→正常恢复获锁（回归守卫）；手册绑定。伪主机名先断言 ≠ 本机 hostname（防空转）。
+- **文档**：运维手册 §6.1「跨主机/共享盘上的工作区配置锁」：语义声明、人工恢复两步、**真实 NFS 双客户端验证 runbook**（精确命令）并**如实标注未运行**。
+- **边界（诚实）**：真实 NFS 双客户端互斥验证**未运行**——集群仅 local-path（无 RWX）、本机挂载需 sudo；已由文档绑定测试钉住，不得宣称已验证。
+
+**验证**：`pnpm run check` 73 文件 / **565** 测试全绿；`openspec validate --all --strict` 全过（38 项 = 37 spec + 本 change）。
 
 ## 2026-09-11 A03-a 零验证界面标注 + A12-a/b drain 检查与版本可追溯（change `harden-drain-and-verification-visibility`，已归档）
 

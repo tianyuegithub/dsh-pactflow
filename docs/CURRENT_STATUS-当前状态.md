@@ -7,7 +7,7 @@
 
 > **收尾快照（2026-09-11，固化点）**：`36d9057`，本节以下基线描述此提交。用户指令「把当前成果固化收尾」。终态：`check` 72 文件 / 561 测试 / 13 包产物全绿；`openspec validate --all --strict` 37/37；46 change 归档 / 37 spec；`origin` 与主目录 `/Users/ty/Codes/dsh-pactflow`（`main`）三方一致；工作树干净。发布物 `dist/dsh-pactflow-0.2.1.tgz` SHA256 `ce9b3537f58fdbd3eb145789b1f191dd2ff512775456c3427574ca1c92edfae0`（构建确定性由「build 前后产物哈希相同 + 测试直接导入产物」保证）。密封扫描收据两份（`…93cb38201725` / `…0178b1d09938`，后者覆盖全部当日代码；结论 `inconclusive`，三族处置见 `docs/security-scan-20260911.md`）。**无待用户裁决事项**；此后启动新工作即属新目标立项（见 §4 与待办清单）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 72 文件 / 561 测试 / 13 包产物，全绿；`git diff --check` 通过；
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 73 文件 / 565 测试 / 13 包产物，全绿；`git diff --check` 通过；
 `openspec validate --all --strict` 通过（**37 个 spec / 46 个已归档 change**）。分支**已推送**到 `origin`（`local==remote`，0/0）。
 
 ## 1. 隔离层能力（A 类，已有证据）

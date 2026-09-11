@@ -74,6 +74,21 @@ async function recoverLockArtifacts(path: string): Promise<void> {
   }
 }
 
+/** Best-effort holder identification for the timeout error; never masks the original failure. */
+async function describeHolder(lockPath: string): Promise<string> {
+  try {
+    const [file] = await readdir(lockPath)
+    if (file === undefined) return ''
+    const match = file.match(/^owner-([1-9][0-9]*)-([0-9a-f-]{36})\.json$/)
+    if (match === null) return ''
+    const owner = JSON.parse(await readFile(join(lockPath, file), 'utf8')) as { host?: unknown }
+    if (owner === null || typeof owner.host !== 'string' || owner.host === '') return ''
+    return ` (held by host "${owner.host}", pid ${match[1]})`
+  } catch {
+    return ''
+  }
+}
+
 /** Local filesystem lock: publish a complete non-empty directory, never age-steal a live owner. */
 export async function withWorkspaceFileLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = `${path}.lock`
@@ -93,7 +108,11 @@ export async function withWorkspaceFileLock<T>(path: string, operation: () => Pr
       }
       if (!acquired) {
         await recoverDeadOwner(lockPath)
-        if (performance.now() >= deadline) throw new Error('PactFlow Workspace configuration lock timed out; inspect the active or interrupted writer before retrying')
+        if (performance.now() >= deadline) {
+          // Name the holder so a cross-host abandoned lock (which this host must
+          // never steal) has an actionable manual-recovery starting point.
+          throw new Error(`PactFlow Workspace configuration lock timed out${await describeHolder(lockPath)}; inspect the active or interrupted writer before retrying`)
+        }
         await delay(20)
       }
     }

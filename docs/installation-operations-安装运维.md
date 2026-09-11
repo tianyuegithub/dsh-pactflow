@@ -120,6 +120,32 @@ pnpm run service:generate -- --platform systemd --dsh /absolute/path/to/dsh --pr
 
 生成器只写 stdout。运维人员审阅后再保存到 `~/Library/LaunchAgents/ai.deepseek.dsh.pactflow.web.plist` 或 `~/.config/systemd/user/dsh-pactflow.service` 并由对应系统工具加载。零脉不维护第二个 daemon。
 
+### 6.1 跨主机/共享盘上的工作区配置锁
+
+工作区项目配置（每个工作区一份的 JSON，记录 Git 远端绑定、验证配置、Worker 策略与仓库对账状态机）由**跨进程文件锁**保护。语义与边界：
+
+- **互斥依据**：锁以目录 rename 原子抢占。单机由本机文件系统保证；共享盘上由 NFS 服务端 RENAME 原子性保证（协议行为，本仓不重复实现）。
+- **异宿主遗留锁：失败关闭，绝不夺取**。本机无法探测异主机进程是否存活，因此 owner 记录属于其它主机时**永不**恢复/改名/删除——竞争者在 5 秒后失败，错误信息指名持有者（`held by host "X", pid Y`）。这是「绝不偷活主」的代价侧，不是缺陷。
+- **人工恢复（仅当确认持有主机已停用该工作区）**：查看 `<配置文件>.lock/owner-*.json` 中的 host 与 pid；确认后删除整个 `<配置文件>.lock` 目录即可。
+- **真实 NFS 双客户端互斥验证：未运行**（当前集群仅 local-path 节点本地存储；本机挂载需 sudo）。待环境就绪后按下列 runbook 执行，**在取得通过证据前不得宣称跨主机互斥已验证**：
+
+```bash
+# 1) 本机 nfsd 导出一个目录，并挂载两个独立挂载点（= 两个独立 NFS 客户端实例，
+#    各有独立的属性缓存，等价于两台客户机的竞争形态）
+echo "/Users/ty/pf-nfs -network 127.0.0.1 -mask 255.255.255.255 -maproot=root" | sudo tee /etc/exports.d/pf-lock-test
+sudo nfsd enable && sudo nfsd start
+mkdir -p /Users/ty/pf-nfs /mnt/pf-nfs-a /mnt/pf-nfs-b
+sudo mount_nfs 127.0.0.1:/Users/ty/pf-nfs /mnt/pf-nfs-a
+sudo mount_nfs 127.0.0.1:/Users/ty/pf-nfs /mnt/pf-nfs-b
+# 2) 互斥：两个终端各在一个挂载点跑多进程 driver，最终计数必须精确等于 进程数×迭代数
+PACTFLOW_LOCK_PATH=/mnt/pf-nfs-a/w.locktarget node scripts/multi-process-lock-driver.mjs
+PACTFLOW_LOCK_PATH=/mnt/pf-nfs-b/w.locktarget node scripts/multi-process-lock-driver.mjs
+# 3) 遗留锁：在 A 挂载点建锁后 kill -9 持锁进程，再在 B 挂载点跑
+#    scripts/workspace-lock-foreign-driver.mjs → 必须超时且指名 A 的 host/pid
+# 4) 清理（全部还原）
+sudo umount /mnt/pf-nfs-a /mnt/pf-nfs-b && sudo nfsd disable && sudo rm /etc/exports.d/pf-lock-test
+```
+
 ## 7. 升级、卸载与恢复
 
 升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 当前写入 **17** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_3`），同时以 read-only registration 读取 0.1.0 的 12 类词汇与 0.2.0 的 13 类词汇；升级不重写历史日志。
