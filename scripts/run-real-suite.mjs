@@ -13,10 +13,9 @@ const suites = {
     file: 'packages/dsh-pactflow/e2e/pactflow-real-crash-restart.e2e.spec.ts',
     env: { DSH_K3S_E2E: '1', DSH_REAL_CRASH: '1' },
   },
-  approval: {
-    file: 'packages/dsh-pactflow/e2e/pactflow-real-approval.e2e.spec.ts',
-    env: { DSH_REAL_APPROVAL: '1' },
-  },
+  // The real-approval acceptance needs the model credential lane, so it owns a
+  // dedicated runner (`scripts/run-real-approval-e2e.mjs`) instead of this
+  // generic key-less dispatcher — a key-less entry here would silently skip.
   'todo-webapp': {
     file: 'packages/dsh-pactflow/e2e/pactflow-real-todo-webapp.e2e.spec.ts',
     env: { DSH_K3S_E2E: '1' },

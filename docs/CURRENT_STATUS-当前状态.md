@@ -5,8 +5,8 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 69 文件 / 543 测试 / 13 包产物，全绿；`git diff --check` 通过；
-`openspec validate --all --strict` 通过（**35 个 spec / 42 个已归档 change**）。**本批已提交到本地分支，尚未推送**（提交数随改动增长，故不在此写死）。
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 69 文件 / 545 测试 / 13 包产物，全绿；`git diff --check` 通过；
+`openspec validate --all --strict` 通过（**35 个 spec / 43 个已归档 change**）。分支**已推送**到 `origin`（`local==remote`，0/0）。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
@@ -49,7 +49,8 @@
 | 真实 worker 支线（`test:real-worker`） | **passed** | 2026-09-11 **修复后通过**。根因是本仓缺陷：`agent/session-start` 的编排器只读守卫**错误地施加到被委派的 Worker 子会话**，拦截其全部修改类工具（Worker 原话：`every mutating tool in my scope is blocked by the orchestrator guard before it reaches the filesystem`）。修复：守卫仅作用于编排器（`origin='subagent'` 直接返回）；并把 Worker 自身报告折入失败原因以便诊断。change `harden-worker-tool-scope`（已归档） |
 | 真实探针账本对账（`test:real-probe-ledger`） | **passed** | 2026-09-11 真实集群 2/2（UID 前置删除 + 404 幂等 + 未确认身份失败关闭）；骨架已实现 |
 | 真实跨进程崩溃重启（`test:real-crash-restart`） | **passed** | 2026-09-11 多进程基建（独立宿主子进程 + SIGKILL + 同 DSH_HOME 重启）；非终态 Run 及精确 K3s 身份从持久事实恢复。**本轮修复其清理缺陷**：清理用 K8s 对象名校验器校验含 `/` 的分支名而抛错、被 `catch {}` 吞掉 → 每次运行都残留远程分支且套件仍报通过；已改用 `refName()` 并做可验证清理 + 失败可见（`real-suite-hygiene`） |
-| 真实人工审批界面（`test:real-approval`） | **not-run** | 需用户本人在原生 UI 操作 |
+| 真实人工审批界面（`test:real-approval`） | **passed** | 2026-09-11 骨架扩为可运行半自动形态（`scripts/run-real-approval-e2e.mjs`）；真实模型（`deepseek-v4-flash`）+ 原生弹窗点击 + 落账断言，连续 3 次通过。**关键断言证明「决定前无任何落账」**（asked 有、decided/review-recorded 均无）→ 无自动批准路径；见 §8 |
+| 完整真实网页零跳过门禁（`test:real-web-gate`） | **passed** | 2026-09-11 修复门禁武装集缺陷后**真实全绿**：20 套件 / 21 测试，**0 跳过 / 0 失败**（含真实 K3s、Gitea、模型、浏览器、人工审批）。此前该门禁因漏注凭据 + 漏装两个开关而**结构上不可满足** |
 | `run-real-k3s-batch` 的 TTL/ZeroProof 阶段 | **passed** | 2026-09-11 真实集群运行通过（含修复 namespace 缺失与假阳性风险后复跑） |
 | 真实待办网页 dogfood（`test:real-todo`，两节点依赖链） | **passed** | 2026-09-11 真实模型 + 真实 Job/Pod + 真实 Git：A 建 `todo.html`，B 以 A 为代码输入在其基线上文档化；宿主验证 `node test-todo-smoke.js` exit 0；真实浏览器驱动增/勾选/删除/刷新持久通过。**此运行发现并修复 K3s 代码输入断链**；见 `docs/b-class-k3s-acceptance-20260911.md` §7 |
 | 真实依赖链矩阵（真实集群） | **passed** | 2026-09-11 完整 `test:real-k3s-batch`：`suites` 阶段 3 套件 6/6（k3s-worker / harness-probes / harness-tasks×3）+ TTL 回收 + 零残留归零；两节点依赖链另见 `test:real-todo` |
@@ -59,7 +60,7 @@
 
 | 项 | 类型 | 说明 |
 | --- | --- | --- |
-| 官方 DSH 安装/启动/升级/卸载验收 | C（上游） | 完整发布通道需**已安装的官方 JavaScript CLI**（`verify:profile` 禁止源码回落）。本机 `dsh` 为源码版包装（`0.1.5-rc.2`），故 release 通道仍阻断；**但开发通道 `verify:profile:dev` 本轮已真实跑通**（install→boot→upgrade→remove→clean boot），见 §1 |
+| 官方 DSH 安装/启动/升级/卸载验收 | C（上游，**已实证缺口**） | 2026-09-11 装入官方 `@deepseek-ai/dsh` 两个发行版实测（隔离临时目录，未改本仓）：`0.1.5-rc.1`（`latest`）与 `0.1.5-rc.2`（`next`）均可安装、`--version` 正常，但 **`verify:profile` 在其上真实失败**：`PactFlow requires DSH external Session event producers; this DSH runtime is unsupported`。已确认 `sessions.externalEventProducers` 只存在于开发源码（`packages/core/session/src/external-event-producers.ts`），两个官方发行版均无 → **确为上游能力缺口，非本仓检测 bug**。开发通道 `verify:profile:dev` 已真实跑通（install→boot→upgrade→remove→clean boot）。待上游加入该能力后再验 |
 | 远程企业平台（kubeconfig 托管/多租户/中心服务端） | D（已裁决非目标） | 目标架构 §5 永久非目标 |
 | 节点准入时机、严格全局 FIFO | D（已裁决） | 决策 1B / §15-A6；不得收紧/静默更改 |
 | `deployed` 枚举语义（merged vs deployed） | D（**已裁决：保持现状** 2026-09-11） | 仍表示「已合并/已交付」；不擅改领域枚举 |

@@ -1,6 +1,25 @@
 # DSH 零脉实施状态
 
-> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 69 文件 / 543 测试、42 个 change 已归档、工作树干净、未推送）。
+> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 69 文件 / 545 测试、43 个 change 已归档、已推送）。
+
+## 2026-09-11 真实人工审批（P1-4）落地 + 发布门禁不可满足性修复（P3-15）
+
+**P1-4：`e2e/pactflow-real-approval.e2e.spec.ts` 从骨架改为可运行半自动形态。**
+
+- 形态：真实 Web scaffold（本包 `cordis.patch.yml` + preset 根）→ **真实模型回合**（`DSH_SNAPSHOT=record`，用凭据库里的 `DEEPSEEK_API_KEY`）→ `pactflow_record_review` 触发原生审批接管 → 真实浏览器 `[data-approval-key]` 弹窗 → `Allow once` → 断言落账。
+- 新增专用运行器 `scripts/run-real-approval-e2e.mjs`（`pnpm run test:real-approval`）；`run-real-suite.mjs` 中的 keyless `approval` 条目已移除（会静默跳过），并入 `real-suite-inventory` 的 IMPLEMENTED 桶（`REQUIRED_NOT_RUN` 现为空）。
+- 真实运行结论（连续 3 次通过，测试体约 11–13s）：实测 `deepseek-official/deepseek-v4-flash` 真实 token 驱动工具链 `pactflow_view → initialize → create_need → transition_need → record_review → view → transition_need`。
+- **关键断言（不可绕过性）**：弹窗出现后、点击前，`approval/asked`（`toolName=pactflow_record_review`）恰 1 条，而 `approval/decided` 与 `pactflow/review-recorded` 均 0 条 → **决定未作出前无任何落账**。点击后三者一一对应，`review.source='dsh-approval'`、`approvalRequestId`/`evidenceDigest` 与 asked 一致，门禁 `discussion→confirmed` 真实推进。
+- 证据：`docs/b-class-k3s-acceptance-20260911.md` §8；运行手册 `docs/installation-operations-安装运维.md` §9.1。
+
+**P3-15：发布门禁「结构上不可满足」已修好并真实验证（change `harden-release-gate-armability`，已归档）。**
+
+- 原判：`check:release` 与 `real-web-gate` 的通过条件是「网页零跳过」，而武装集漏了两个门控套件的开关（`DSH_REAL_CRASH`、`DSH_REAL_APPROVAL`）→ 该门禁**永远不可能通过**（与 `verify-profile` TDZ 同类的「门禁自身缺陷」）。
+- **真实运行又暴露第二缺陷**：首次真实运行显示，即便武装集补全，门禁**只检查凭据存在于库中却不注入子进程 env** → record 模式套件在 `beforeAll` 抛 `requires DEEPSEEK_API_KEY` / `requires PACTFLOW_GITEA_API_TOKEN`，被 vitest **计为跳过**（`numPendingTests=10`）→ 门禁仍不可能通过。这是「让失败自我报告」再次奏效：真实报告比推断更可信。
+- 修复：① 新增单一凭据读取器 `scripts/credential-refs.mjs`（三处脚本共用，消除重复与行为差异）；② `run-real-web-gate.mjs` 抽出单一武装集 `realWebGateEnvironment()`（补齐两开关）并**注入解析后的凭据**；③ `check-release.mjs` 复用同一武装集与前置检查，先以可诊断缺失清单失败关闭。
+- 守卫：`tests/real-web-gate-prerequisites.spec.ts` 新增**从 e2e 套件源码反推必需开关**与**凭据注入意图**两条——任何未来新门控套件未纳入武装集、或退回「只查不注入」，离线测试立即失败（防复发）。
+- **真实验证（关键）**：修复后 `node scripts/run-real-web-gate.mjs`（`DSH_SNAPSHOT=record`）**真实全绿**：**20 套件 / 21 测试，0 跳过 0 失败**，退出码 0（含真实 K3s、Gitea 保护 PR、模型、浏览器、人工审批）。报告留证于 `~/.pactflow-reports/real-web-gate-*.json`。
+- 上游前置仍在：`check:release` 首个真实步骤 `verify:profile` 需已安装官方 CLI，而官方 `0.1.5-rc.1/rc.2` 均缺 `externalEventProducers` 能力（本轮已实证，见下）。
 
 ## 2026-09-11 打包产物与源码一致性核对（发布产物不漂移）
 

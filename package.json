@@ -18,7 +18,7 @@
     "test:real-k3s-batch": "node scripts/run-real-k3s-batch.mjs",
     "test:real-probe-ledger": "node scripts/run-real-suite.mjs probe-ledger",
     "test:real-crash-restart": "node scripts/run-real-suite.mjs crash-restart",
-    "test:real-approval": "node scripts/run-real-suite.mjs approval",
+    "test:real-approval": "node scripts/run-real-approval-e2e.mjs",
     "test:real-todo": "node scripts/run-real-suite.mjs todo-webapp",
     "test:real-web-gate": "node scripts/run-real-web-gate.mjs",
     "evidence:collect": "node scripts/evidence-collect.mjs",

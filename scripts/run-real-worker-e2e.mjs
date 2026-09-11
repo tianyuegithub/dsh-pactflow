@@ -1,14 +1,9 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import yaml from 'js-yaml'
+import { resolveCredential } from './credential-refs.mjs'
 
-const credentialFile = resolve(process.env.DSH_CREDENTIAL_FILE ?? resolve(homedir(), '.dsh/.credentials.yaml'))
-const document = yaml.load(readFileSync(credentialFile, 'utf8'))
-// The ref may live under `refs:` (namespaced layout) or at the document top level.
-const key = document?.refs?.DEEPSEEK_API_KEY ?? document?.DEEPSEEK_API_KEY
-if (typeof key !== 'string' || key.length === 0) {
+const key = resolveCredential('DEEPSEEK_API_KEY')
+if (key === undefined) {
   throw new Error('real Worker E2E requires the DEEPSEEK_API_KEY credential ref')
 }
 execFileSync('pnpm', [

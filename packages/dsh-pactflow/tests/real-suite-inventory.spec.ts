@@ -12,8 +12,9 @@ const e2eRoot = resolve(import.meta.dirname, '../e2e')
 // IMPLEMENTED: real assertions replace the skeleton; must NOT still be a skeleton.
 // COVERED_ELSEWHERE: the suite was intentionally removed because its intent is
 //   proven by other evidence; must NOT be re-added as a dead skeleton.
-const REQUIRED_NOT_RUN = ['pactflow-real-approval.e2e.spec.ts']
+const REQUIRED_NOT_RUN: string[] = []
 const IMPLEMENTED = [
+  'pactflow-real-approval.e2e.spec.ts',
   'pactflow-real-probe-ledger.e2e.spec.ts',
   'pactflow-real-crash-restart.e2e.spec.ts',
   'pactflow-real-todo-webapp.e2e.spec.ts',

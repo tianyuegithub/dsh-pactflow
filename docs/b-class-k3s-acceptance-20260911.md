@@ -93,13 +93,25 @@
 - 产物：`PACTFLOW_KEEP_ROOT=1` 时保留页面到 `.arts/todo-dogfood/todo.html` 与 `test-todo-smoke.js` 供复核。
 - 说明：该套件是**真实功能验收**，不属任何已归档 change 的 spec 范围（本次修复除外）；它同时是对「插件能否在真实小项目上产出可用交付物、且多节点链可用」的可用度体检。
 
+### 8. 真实人工审批（`test:real-approval`，原生 DSH UI）—— 通过（连续 3 次；实测真实模型）
+
+- 背景：该项曾是 `expect.fail('skeleton')` 骨架；本轮改为可运行半自动形态（`e2e/pactflow-real-approval.e2e.spec.ts` + 专用运行器 `scripts/run-real-approval-e2e.mjs`，命令 `pnpm run test:real-approval`）。
+- 真实路径：真实 Web scaffold（`launchWebScaffold` + 本包 `cordis.patch.yml` 与 preset 根）→ 真实模型回合（`DSH_SNAPSHOT=record`，用 `~/.dsh/.credentials.yaml` 的 `DEEPSEEK_API_KEY`）→ `pactflow_record_review` 触发**原生审批接管** → 真实浏览器中的 `[data-approval-key]` 弹窗 → 点击 `Allow once` → 断言落账。
+- 结果：**连续 3 次 1/1 通过**（测试体 11.3s / 12.8s / 11.3s；总时长 13–16s）。
+- 真实模型与工具链（实测日志）：`provider=deepseek-official, model=deepseek-v4-flash`，真实 token 用量；模型按序调用 `pactflow_view → pactflow_initialize → pactflow_create_need → pactflow_transition_need → pactflow_record_review → pactflow_view → pactflow_transition_need`，终态回复「Final phase: confirmed (need approval-gate, revision 3)」。
+- **不可绕过性被证明（关键断言）**：弹窗出现后、点击前，脚本断言延迟日志中 `approval/asked`（`toolName=pactflow_record_review`）恰好 1 条，而 `approval/decided` 与 `pactflow/review-recorded` 均为 0 条——**决定未作出前没有任何落账**，不存在自动批准路径。
+- **一一对应被证明**：点击后 `approval/asked` → `approval/decided`(`allowed-once`) → `pactflow/review-recorded` 各恰好 1 条；`review.source='dsh-approval'`、`review.approvalRequestId` 等于 asked 的 id、`review.evidenceDigest` 等于 asked 原因里的 64 位摘要；`needId='approval-gate'`、`needRevision=2`、`kind='requirement'`、`decision='approved'`。
+- **摘要防伪**：弹窗正文含 `approval-gate`、修订 2 与 64 位证据摘要（与调用计算值一致），故「批准 A 却记录 B」不可能通过。
+- **门禁真实推进**：`pactflow/phase-transitioned`（→`confirmed`，`from='discussion'`）恰好 1 条，且其日志位置在 `review-recorded` 之后；结束后页面无残留审批弹窗。
+- 反例路径（拒绝/取消/不可用、无 Approval 服务、凭证样证据、审批期间需求被改）由确定性单测 `tests/review-authorization.spec.ts` 覆盖，未在本真实套件重复。
+
 ## 归零自证
 
-`pactflow` namespace 复核：仅剩 7 天前既有 `pf-clone-diag`、既有 ConfigMap（`pactflow-harness-check-*`、`pactflow-spec-*`）与既有 Secret（`pactflow-git-*`、`pactflow-legacy-*`、`pactflow-llm-*`、`pactflow-registry-home-harbor`、`pactflow-secrets` 等），**无本轮产生的 Job/Pod/ConfigMap/Secret 残留**。
+`pactflow` namespace 复核：仅剩 7 天前既有 `pf-clone-diag`、既有 ConfigMap（`pactflow-harness-check-*`、`pactflow-spec-*`）与既有 Secret（`pactflow-git-*`、`pactflow-legacy-*`、`pactflow-llm-*`、`pactflow-registry-home-harbor`、`pactflow-secrets` 等），**无本轮产生的 Job/Pod/ConfigMap/Secret 残留**。真实审批套件不接触集群/Gitea（在 `closing` 之前即停止），故无新增集群残留。
 
 ## 未覆盖（诚实）
 
-- **真实人工审批界面**（`test:real-approval`）：需用户本人在原生 UI 操作批准，未运行。
+- **真实人工审批中「由本人点击」这一步**：本轮由脚本代点以形成可复现证据；脚本已断言「作出决定前无任何落账」，但「人类亲自点击」的语义只能由真人在真实场景复现（判定要点见 `docs/installation-operations-安装运维.md` §9.1）。
 - **多宿主并发**、**真实依赖链矩阵**：未在真实集群运行。
 - 完整批量 `run-real-k3s-batch`（`suites` 阶段消耗模型额度与较长时间）未在本批运行。
 - 本记录不构成官方 DSH 兼容证明。

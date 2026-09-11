@@ -2,7 +2,7 @@
 
 **日期**：2026-09-11
 **性质**：派生视图（非计划 owner）。计划与顺序的正文 owner 是 OpenSpec（`openspec/changes/`、`openspec/specs/`）；本清单只做跨 change 的三方汇总与优先级排序，供决策使用。
-**当前事实基线**：42 个 change 已归档、35 个 spec 有效、`pnpm run check` 69 文件 / 543 测试全绿；本批**已提交到本地分支**，另有本轮新提交，**尚未推送**。
+**当前事实基线**：43 个 change 已归档、35 个 spec 有效、`pnpm run check` 69 文件 / 545 测试全绿；分支**已推送**到 `origin`（`local==remote`）。
 
 排序原则：先消除**错误或冗余信息**（成本极低）→ 再补**行为已改但未经真实环境验证**的项（正确性风险最高）→ 再做**结构性/新能力**（工作量大）→ 最后是与目标/上游绑定的项。
 
@@ -20,7 +20,7 @@
 | # | 事项 | 为什么优先 | 影响范围（需授权） |
 | --- | --- | --- | --- |
 | 3 ✅ | **真实 Gitea 收口复跑（F05 之后）** | **已完成 2026-09-11**：真实受保护 PR 合并，断言 `merge_commit_sha === release.commit`（精确 merge SHA）且隔离复验路径成立，临时 ref 清零；见 `docs/b-class-k3s-acceptance-20260911.md` §6 | 已验；受保护仓库 `tianyue/pactflow-acceptance` |
-| 4 | 真实人工审批界面（`test:real-approval`） | 唯一必须**你本人在原生 UI 操作**的验收；不可由我代执行 | 本地 web 界面，人工批准 |
+| 4 ✅ | 真实人工审批界面（`test:real-approval`） | **已完成 2026-09-11**：骨架扩成可运行半自动形态（专用运行器 `scripts/run-real-approval-e2e.mjs`）；真实模型 + 原生弹窗点击 + 落账断言，连续 3 次通过；关键断言证明「决定前无任何落账」（无自动批准路径）；见 `docs/b-class-k3s-acceptance-20260911.md` §8 与 `docs/installation-operations-安装运维.md` §9.1 | 本地 web 界面；本轮脚本代点，真实场景由本人点击 |
 
 ## P2 · 结构性重构与新能力（A 类，可做；测试兜底）
 
@@ -41,7 +41,7 @@
 | 12 ✅ | 完整 `run-real-k3s-batch` 的 `suites` 阶段 | 2026-09-11 已运行：3 套件 6/6 + TTL 回收 + 零残留归零，全通过 |
 | 13 ✅ | 真实 worker 支线 | **已修复并通过**：根因是本仓缺陷——编排器只读守卫错误地施加到被委派的 Worker 子会话，拦截其全部修改类工具。修复（守卫按 `origin='subagent'` 排除子会话）+ 可诊断性（失败折入 Worker 报告）；change `harden-worker-tool-scope` 已归档；真实 `test:real-worker` 通过 |
 | 14 | A8 剩余：跨卡片未保存草稿并存 + 移动端 | 需资源卡夹具，构造与维护成本高 |
-| 15 ◑ | `check:release` 完整真实运行 | **两处前置，均已实测确认**：① 需**已安装的官方 DSH CLI**（`DSH_CLI_ENTRY`，禁止源码回落）——实跑在第 9 行即因未设而失败；② **当前结构上不可满足**：断言要求「零跳过」，而 10 个必需套件中有 8 个为环境门控（`skipIf`）→ 跳过即触发 `numPendingTests must be zero`；而 `pactflow-real-approval` **即使武装也只是 `expect.fail` 骨架**（其真实断言依赖 P1-4 人工审批）。实测断言对「跳过」与「运行后失败」两种结果**都拒绝**，故该门禁在 approval 具备真实断言前不可能通过 |
+| 15 ✅ | `check:release` 完整真实运行 | **本仓侧的不可满足性已修复并真实验证**：① 武装集缺陷（漏掉 `DSH_REAL_CRASH`/`DSH_REAL_APPROVAL` 两开关）已补齐为单一 `realWebGateEnvironment()`，并被 `check:release` 复用；② **凭据只查不注入**缺陷已修（门禁现把凭据解析结果注入子进程 env，否则 record 套件在 `beforeAll` 因缺 key 失败并被计为跳过）；③ 新增「从套件源码反推必需开关」守卫防复发。修复后 `test:real-web-gate` **真实全绿**（20 套件 / 21 测试，0 跳过 0 失败）。**剩余阻断仅上游**：`check:release` 首个真实步骤 `verify:profile` 需已安装官方 CLI，而官方 `0.1.5-rc.1/rc.2` 均缺 `externalEventProducers` 能力（见第 18 行） |
 
 ## D · 需你裁决 / 属新目标
 
@@ -54,27 +54,24 @@
 
 | # | 事项 | 说明 |
 | --- | --- | --- |
-| 18 | 官方 DSH 发行版安装/启动/升级/卸载验收 | 受 `externalEventProducers` 等能力约束；官方已发布到 `v0.1.5-rc.1`（2026-09-10），需按新版本复核兼容窗口，不沿用 9-06 结论 |
+| 18 ◑ | 官方 DSH 发行版安装/启动/升级/卸载验收 | **已按新版实测复核（2026-09-11）**：装入官方 `@deepseek-ai/dsh` 的 `0.1.5-rc.1`（`latest`）与 `0.1.5-rc.2`（`next`），二者均可安装、`--version` 正常，但 `verify:profile` 真实失败于 `PactFlow requires DSH external Session event producers; this DSH runtime is unsupported`。已确认该能力（`sessions.externalEventProducers`）仅存在于开发源码、两个官方发行版都没有 → **确为上游能力缺口**。待上游发行版纳入该能力后复验 |
 
-## E · 收尾（需授权）
+## E · 收尾
 
 | # | 事项 | 说明 |
 | --- | --- | --- |
-| 19 ◑ | 提交 / 推送 / 主目录同步 | **已范围化提交到本地分支**（42 提交，`.arts`/`.mimosa`/`.zcode` 已入 .gitignore）。**推送待授权**（外发动作）。**主目录同步已核实可行**（2026-09-11）：`/Users/ty/Codes/dsh-pactflow` 的 `main`=`818a1d9` 正是本分支的 merge-base → 本分支 **领先 42、落后 0**，两侧工作树均干净，故同步是**纯 fast-forward**；但合并 main 仍是 Git 变更操作，需你授权后执行 |
+| 19 ✅ | 提交 / 推送 / 主目录同步 | **提交**已范围化到本地分支（`.arts`/`.mimosa`/`.zcode` 已入 .gitignore）。**推送已完成**（2026-09-11，用户授权）：`git push -u origin codex/pactflow-hardening`，`local==remote`、0/0。**主目录同步**（`/Users/ty/Codes/dsh-pactflow`，`main=818a1d9`，纯 fast-forward）仍属 Git 变更操作，待单独授权 |
 
 ---
 
-## 当前需你裁决 / 授权的 3 件事（其余均已完成）
+## 当前需你裁决 / 授权的 2 件事
 
-本轮已闭环 13 项（含 3 个真实缺陷的发现与修复）。以下 3 项**无法由助手自行完成**，请逐项给出结论：
+本轮已闭环 P1-4（真实人工审批）与 P3-15（发布门禁不可满足性）——含 5 个真实缺陷的发现与修复。以下仅剩 2 项需要你：
 
 | # | 事项 | 需要你做什么 | 助手建议 |
 | --- | --- | --- | --- |
-| A | **推送**（E-19 收尾） | 明确说「推送」即可；命令：`git push -u origin codex/pactflow-hardening`（42 个本地提交、无 upstream） | **建议执行**：本地已提交且验证全绿；不推送则全部成果集中于单一工作树，无备份、无法协作 |
-| B | **P1-4 真实人工审批** | 由你在原生 DSH UI 亲自批准一次（步骤见 `docs/installation-operations-安装运维.md` §9.1） | **建议本轮完成**（约数分钟）：这是唯一能证明「人工门禁不可被自动绕过」的验收，自动化无法替代 |
-| C | **P2-6：A03 / A12 完整形态** | 裁决「做 / 不做 / 只提案」 | 建议**先出提案再决定**（不改代码）：A03=宿主侧独立验收基线；A12=卸载前 drain + 前端移交入口。属新能力语义，AGENTS.md 要求先确认目标 |
+| A | **主目录同步**（E-19 收尾） | 明确说「同步主目录」即可；本分支相对 `/Users/ty/Codes/dsh-pactflow` 的 `main` 为纯 fast-forward（已核实两侧干净） | **建议执行**：同步后主目录即为当前成果 |
+| B | **P2-6：A03 / A12 完整形态** | 裁决「做 / 不做 / 只提案」 | 建议**先出提案再决定**（不改代码）：A03=宿主侧独立验收基线；A12=卸载前 drain + 前端移交入口。属新能力语义，AGENTS.md 要求先确认目标 |
 
 **已裁决无需动作**：`deployed` 语义、强隔离承诺、F03 触发前置——均「保持现状」。
-**上游/结构阻断（不需你现在动作）**：`check:release`（需已安装官方 CLI，**且其「零跳过」断言在当前套件结构下不可满足**——见第 15 行）与官方 DSH 新版兼容复核。注意：approval 套件的真实断言依赖 P1-4，故 P1-4 完成后该项才具备通过条件。
-
-**若希望助手在无你参与时继续**，可授权的两条路径：① 起草 A03/A12 提案（只写提案、不改实现）；② 把 `test:real-approval` 骨架扩成可运行脚手架，使你那一次人工批准更省事。
+**上游阻断（不需你现在动作）**：官方 DSH 发行版兼容复核（`externalEventProducers` 缺口，见第 18 行）——`check:release` 的最后一个真实步骤（`verify:profile`）依赖它，故 `check:release` 目前仅剩此上游阻断；本仓侧的门禁不可满足性已修复。
