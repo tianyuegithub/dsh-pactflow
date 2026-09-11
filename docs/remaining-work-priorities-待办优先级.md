@@ -26,7 +26,7 @@
 
 | # | 事项 | 说明 | 风险/工作量 |
 | --- | --- | --- | --- |
-| 5 ✅ | R12 剩余：`DispatchHost` / `RecoveryHost` 收窄为窄端口 | **已完成**（change `harden-host-narrow-ports-dispatch-recovery`，已归档）：四端口全部剥离 `ctx`；`host-narrow-ports` spec 新增「派发与恢复宿主亦不得依赖整个上下文」+2 场景 | 已完成，500 测试兜底 |
+| 5 ✅ | R12 剩余：`DispatchHost` / `RecoveryHost` 收窄为窄端口 | **已完成**（change `harden-host-narrow-ports-dispatch-recovery`，已归档）：四端口全部剥离 `ctx`；`host-narrow-ports` spec 新增「派发与恢复宿主亦不得依赖整个上下文」+2 场景 | 已完成，543 测试兜底 |
 | 6 | A03 完整：宿主侧独立验收基线 | 把「验证策略摘要」纳入批准、测试配置变更单独提示、验证在确定候选 tree 上运行 | 中；属新能力语义，建议先确认目标 |
 | 7 ◑ | A11 完整：预算余项 | **输出/日志容量上限已交付**（change `harden-output-budget-authority`，已归档：预算成为输出上限的唯一权威且实际生效）；**剩两项判断当前不宜做**——token 用量（Harness 无 token 字段，需扩展上游能力）、paused 状态（属领域状态机变更，需先确认目标） | 剩项为上游/新目标 |
 | 8 ◑ | A10 完整：`tool-invocation` / `verification` 探针阶段 | **已交付有界增量**（change `harden-harness-capability-honesty`，已归档）：可证级别显式化、不可证级别显式不虚报、推导合并为一份、镜像/API 探针补报级别；真实集群探针 2/2 通过。**剩**：为这两级增设真实证据来源（需 Harness runner 上报工具调用 / 新增验证阶段，属新能力） | 剩项需上游/新能力 |
@@ -60,7 +60,7 @@
 
 | # | 事项 | 说明 |
 | --- | --- | --- |
-| 19 ◑ | 提交 / 推送 / 主目录同步 | **已范围化提交到本地分支**（29 提交，`.arts`/`.mimosa`/`.zcode` 已入 .gitignore）。**推送待授权**（外发动作）。**主目录同步已核实可行**（2026-09-11）：`/Users/ty/Codes/dsh-pactflow` 的 `main`=`818a1d9` 正是本分支的 merge-base → 本分支 **领先 40、落后 0**，两侧工作树均干净，故同步是**纯 fast-forward**；但合并 main 仍是 Git 变更操作，需你授权后执行 |
+| 19 ◑ | 提交 / 推送 / 主目录同步 | **已范围化提交到本地分支**（42 提交，`.arts`/`.mimosa`/`.zcode` 已入 .gitignore）。**推送待授权**（外发动作）。**主目录同步已核实可行**（2026-09-11）：`/Users/ty/Codes/dsh-pactflow` 的 `main`=`818a1d9` 正是本分支的 merge-base → 本分支 **领先 42、落后 0**，两侧工作树均干净，故同步是**纯 fast-forward**；但合并 main 仍是 Git 变更操作，需你授权后执行 |
 
 ---
 
@@ -70,7 +70,7 @@
 
 | # | 事项 | 需要你做什么 | 助手建议 |
 | --- | --- | --- | --- |
-| A | **推送**（E-19 收尾） | 明确说「推送」即可；命令：`git push -u origin codex/pactflow-hardening`（9 个本地提交、无 upstream） | **建议执行**：本地已提交且验证全绿；不推送则全部成果集中于单一工作树，无备份、无法协作 |
+| A | **推送**（E-19 收尾） | 明确说「推送」即可；命令：`git push -u origin codex/pactflow-hardening`（42 个本地提交、无 upstream） | **建议执行**：本地已提交且验证全绿；不推送则全部成果集中于单一工作树，无备份、无法协作 |
 | B | **P1-4 真实人工审批** | 由你在原生 DSH UI 亲自批准一次（步骤见 `docs/installation-operations-安装运维.md` §9.1） | **建议本轮完成**（约数分钟）：这是唯一能证明「人工门禁不可被自动绕过」的验收，自动化无法替代 |
 | C | **P2-6：A03 / A12 完整形态** | 裁决「做 / 不做 / 只提案」 | 建议**先出提案再决定**（不改代码）：A03=宿主侧独立验收基线；A12=卸载前 drain + 前端移交入口。属新能力语义，AGENTS.md 要求先确认目标 |
 
