@@ -194,11 +194,25 @@ export function apply(ctx: Context): void {
       )
       const approval = ctx.get('approval') as ApprovalService | undefined
       if (approval === undefined) throw new Error('PactFlow review approval requires the DSH Approval service')
+      // A03-d: the reviewer must see whether this need's deliveries touched the
+      // project's verification wiring (test/build/CI config) at approval time.
+      // Visible, never blocking — and "none" is stated explicitly so absence of
+      // the list cannot be mistaken for absence of changes.
+      const snapshot = await ctx.pactflow.snapshot(sessionId)
+      const needNodes = new Set(Object.values(snapshot.dag.byId)
+        .filter(node => node.needId === args.need_id).map(node => node.id))
+      const sensitive = [...new Set(Object.values(snapshot.runs.byId)
+        .filter(run => needNodes.has(run.nodeId))
+        .flatMap(run => [...run.gitResult?.validationSensitiveChanges ?? []]))].sort()
+      const SENSITIVE_CAP = 6
+      const sensitiveLine = sensitive.length === 0
+        ? '验证敏感文件改动：无'
+        : `验证敏感文件改动：${sensitive.slice(0, SENSITIVE_CAP).join('、')}${sensitive.length > SENSITIVE_CAP ? `（共 ${String(sensitive.length)} 项）` : ''}`
       const outcome = await approval.request({
         agent,
         toolName: 'pactflow_record_review',
         callId: exec.callId,
-        reason: `授权记录 PactFlow 评审\n需求：${args.need_id}\n修订：${String(args.expected_revision)}\n评审类型：${args.kind}\n决定：${args.decision}（${{ approved: '批准', rejected: '拒绝', 'changes-requested': '要求修改' }[args.decision]}）\n证据说明：\n${note}\n证据摘要：${evidenceDigest}`,
+        reason: `授权记录 PactFlow 评审\n需求：${args.need_id}\n修订：${String(args.expected_revision)}\n评审类型：${args.kind}\n决定：${args.decision}（${{ approved: '批准', rejected: '拒绝', 'changes-requested': '要求修改' }[args.decision]}）\n证据说明：\n${note}\n${sensitiveLine}\n证据摘要：${evidenceDigest}`,
         signal: exec.signal,
       })
       if (outcome !== 'allowed-once') throw new Error(`PactFlow review approval was ${outcome}`)

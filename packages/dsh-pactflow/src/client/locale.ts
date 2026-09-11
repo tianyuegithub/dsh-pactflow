@@ -35,6 +35,19 @@ export type PactFlowLocaleKey =
   | 'giteaProtected'
   | 'giteaUnprotected'
   | 'noVerification'
+  | 'retentionTitle'
+  | 'retentionNone'
+  | 'retentionBytes'
+  | 'retentionMeasured'
+  | 'retentionPartial'
+  | 'retentionOverBudget'
+  | 'retentionWithinBudget'
+  | 'retentionOverdue'
+  | 'handoverTitle'
+  | 'handoverExport'
+  | 'handoverCopy'
+  | 'handoverCopied'
+  | 'handoverNone'
   | 'empty'
 
 export const zh: Record<PactFlowLocaleKey, string> = {
@@ -72,6 +85,19 @@ export const zh: Record<PactFlowLocaleKey, string> = {
   giteaProtected: '默认分支已保护',
   giteaUnprotected: '默认分支未保护',
   noVerification: '无自动验证',
+  retentionTitle: '保留现场',
+  retentionNone: '无保留现场',
+  retentionBytes: '保留体积',
+  retentionMeasured: '已全部度量',
+  retentionPartial: '部分未度量',
+  retentionOverBudget: '已超磁盘预算',
+  retentionWithinBudget: '未超磁盘预算',
+  retentionOverdue: '逾期未决',
+  handoverTitle: '只读移交摘要',
+  handoverExport: '导出移交摘要',
+  handoverCopy: '复制',
+  handoverCopied: '已复制',
+  handoverNone: '尚未导出',
   empty: '暂无数据',
 }
 
@@ -110,6 +136,19 @@ export const en: Record<PactFlowLocaleKey, string> = {
   giteaProtected: 'Default branch protected',
   giteaUnprotected: 'Default branch unprotected',
   noVerification: 'No automatic verification',
+  retentionTitle: 'Retained scenes',
+  retentionNone: 'No retained scenes',
+  retentionBytes: 'Retained size',
+  retentionMeasured: 'all measured',
+  retentionPartial: 'partially measured',
+  retentionOverBudget: 'over disk budget',
+  retentionWithinBudget: 'within disk budget',
+  retentionOverdue: 'overdue',
+  handoverTitle: 'Read-only handover summary',
+  handoverExport: 'Export handover summary',
+  handoverCopy: 'Copy',
+  handoverCopied: 'Copied',
+  handoverNone: 'Not exported yet',
   empty: 'No data',
 }
 

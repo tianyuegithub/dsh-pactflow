@@ -1,6 +1,17 @@
 # DSH 零脉实施状态
 
-> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 72 文件 / 558 测试、45 个 change 已归档、已推送）。
+> 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 72 文件 / 561 测试、46 个 change 已归档、已推送）。
+
+## 2026-09-11 A03-d 评审可见验证清单 + A12-c 移交入口 + A05 保留现场 UI（change `surface-review-and-readonly-entries`，已归档）
+
+用户裁决「A03-d + A12-c + A05 UI」后实施；接线探查中**发现并修复一个真实缺陷**：
+
+- **缺陷（A03-d 前置）**：`gitResultSchema`（zod）未声明 `validationSensitiveChanges`，事件折叠时该字段被**剥除**——实测 `snapshot().runs.byId[*].gitResult.validationSensitiveChanges` 恒为 `undefined`，而文档曾称「经 snapshot() 可读」（又一例「声称与事实不符且无机制发现」）。修复：schema 增可选字段（向后兼容），并加**先红后绿**的投影存活测试。A05 的 `sizeBytes`/`retainUntil` 已在 schema 内，不受影响（已核对）。
+- **A03-d**：`pactflow_record_review` 的审批理由恒含一行「验证敏感文件改动：清单（或 无）」——清单取该 Need 全部运行的去重并集、排序、截断 6 条 + 等N项。评审者在原生审批弹窗即见「本次交付改了测试/构建/CI 配置」；`review-surface.spec.ts`（3）覆盖存活/有清单/显式「无」。
+- **A12-c**：浮层新增「导出移交摘要」只读入口（调既有 `projectHandover`，JSON 呈现 + 复制），含 `packageVersion`/`eventProducerVersion`。
+- **A05 UI**：浮层新增「保留现场」只读区（总数/保留体积/是否全度量/是否超预算/逾期清单），数据经既有只读 `retentionStatus` 并随运行时刷新。
+
+**验证**：`pnpm run check` 72 文件 / **561** 测试 / 13 包产物全绿；`test:web` overlay 9/9 通过（首轮外层 3 项失败经多次复跑确认是**冷启动 sidebar 指针拦截偶发**，且其中一个失败会把对话框留在打开态而级联影响后续用例——非本改动回归）；`openspec validate --all --strict` 37/37；archive 归并（无新 capability，无占位 Purpose）。
 
 ## 2026-09-11 完整 Mimosa 深度扫描 + SSRF 族处置（change `harden-egress-url-origin`，已归档）
 

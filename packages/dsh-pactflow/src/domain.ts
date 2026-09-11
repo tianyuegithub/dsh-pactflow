@@ -152,6 +152,9 @@ const gitResultSchema = pactFlowSchema<PactFlowGitResult>(z.object({
   branch: z.string().min(1), commit: z.string().regex(/^[0-9a-f]{40,64}$/),
   remoteRef: z.string().min(1), syncedAt: z.number().int().nonnegative(),
   validations: z.array(validationEvidenceSchema),
+  // Declared so the integrity signal survives the event fold; an undeclared
+  // field would be stripped on parse and never readable from the projection.
+  validationSensitiveChanges: z.array(z.string().min(1)).optional(),
 }))
 
 const k3sRunSpecSchema = pactFlowSchema<PactFlowK3sRunSpec>(z.object({

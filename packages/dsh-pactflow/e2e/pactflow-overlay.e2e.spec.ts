@@ -178,6 +178,56 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     expect(await dialog.textContent()).not.toContain('Live Need')
   })
 
+  it('presents retained failure scenes and exports the handover summary read-only', async () => {
+    // Own live session so the test does not depend on the earlier case's state.
+    const liveId = SessionId('pactflow-readonly-e2e')
+    await scaffold.ctx.sessionController.create({ sessionId: liveId, cwd: scaffold.workspaceCwd, agentPreset: 'pactflow' })
+    const session = scaffold.ctx.sessions.get(liveId)!
+    session.append('turn/start', { turn: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'aborted' } })
+    await scaffold.ctx.sessionController.rename({ sessionId: liveId, title: 'Readonly entries session' })
+    await scaffold.hostFetch('/api/pactflow/initialize', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'readonly-init', method: 'pactflow/initialize',
+        payload: { args: { sessionId: liveId, request: { name: 'Readonly Project' } } } }) })
+    // A retained failure scene: visible to a human, never auto-cleaned by this view.
+    // The cleanup must reference a real Need or the delivery fold rejects it.
+    session.append('pactflow/need-created', { v: 1, need: {
+      id: 'readonly-need', title: 'Readonly Need', description: '', phase: 'backlog',
+      revision: 1, createdAt: Date.now(), updatedAt: Date.now(),
+    } })
+    session.append('pactflow/cleanup-recorded', { v: 1, record: {
+      id: 'retained-scene', needId: 'readonly-need', target: 'git:pactflow/readonly/x',
+      state: 'failed', attempt: 1, retain: true, sizeBytes: 2_048, retainUntil: Date.now() - 60_000,
+    } })
+    await scaffold.ctx.sessions.flush(session)
+    await page.reload({ waitUntil: 'load' })
+    const ungrouped = page.getByRole('treeitem', { name: /^Ungrouped/ })
+    await ungrouped.waitFor({ timeout: 10_000 })
+    if (await ungrouped.getAttribute('aria-expanded') !== 'true') await ungrouped.click()
+    await page.getByRole('treeitem').filter({ hasText: 'Readonly entries session' }).last().click({ timeout: 5_000 })
+    await page.getByRole('button', { name: 'Open PactFlow' }).click()
+    const dialog = page.getByRole('dialog', { name: 'PactFlow' })
+    await expect.poll(() => dialog.textContent(), { timeout: 10_000 }).toContain('Readonly Project')
+
+    // A05: the retained scene (with its overdue flag) is visible read-only.
+    await expect.poll(() => dialog.textContent(), { timeout: 10_000 }).toContain('Retained scenes')
+    const retentionText = await dialog.textContent()
+    expect(retentionText).toContain('retained-scene')
+
+    // A12-c: the export entry renders the read-only handover summary, including
+    // the package/reader versions that make an old log traceable.
+    await dialog.getByRole('button', { name: 'Export handover summary' }).click()
+    const summary = dialog.locator('[data-handover="summary"]')
+    await summary.waitFor({ timeout: 10_000 })
+    const summaryText = (await summary.textContent()) ?? ''
+    expect(summaryText).toContain('packageVersion')
+    expect(summaryText).toContain('eventProducerVersion')
+    expect(summaryText).toContain('retained-scene')
+    expect(browserErrors).toEqual([])
+    if (process.env.PACTFLOW_WEB_EVIDENCE_DIR !== undefined) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'readonly-entries.png') })
+    await dialog.getByRole('button', { name: 'Close' }).click()
+  })
+
   it.each(['repository', 'protection'] as const)('closing the overlay cancels the pending Gitea %s connection', async stage => {
     let received = 0
     let closed = false

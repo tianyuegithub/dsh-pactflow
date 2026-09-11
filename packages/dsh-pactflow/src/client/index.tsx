@@ -209,13 +209,14 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     locale: NS,
     inject: (): OverlayInjected => ({
       load: async (sessionId, signal) => {
-        const [health, snapshot, templates, modelConnections, workerPools, workspaceProject] = await Promise.all([
+        const [health, snapshot, templates, modelConnections, workerPools, workspaceProject, retention] = await Promise.all([
           pactflow.health(signal),
           pactflow.snapshot(sessionId, signal),
           pactflow.listK3sTemplates(signal),
           pactflow.listModelConnections(signal),
           pactflow.listWorkerPools(signal),
           pactflow.workspaceProjectForSession(sessionId, signal),
+          pactflow.retentionStatus(sessionId),
         ])
         if (!health.ok) throw new Error(health.error.message)
         if (!snapshot.ok) throw new Error(snapshot.error.message)
@@ -232,12 +233,14 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           health: health.value, snapshot: snapshot.value,
           templates: templates.value, modelConnections: modelConnections.value, workerPools: workerPools.value,
           workspaceProject: workspaceProject.ok ? workspaceProject.value : null,
+          retention: retention.ok ? retention.value : null,
         }
       },
       loadRuntime: async (sessionId, signal) => {
-        const [workerPools, workspaceProject] = await Promise.all([
+        const [workerPools, workspaceProject, retention] = await Promise.all([
           pactflow.listWorkerPools(signal),
           pactflow.workspaceProjectForSession(sessionId, signal),
+          pactflow.retentionStatus(sessionId),
         ])
         if (!workerPools.ok) throw new Error(workerPools.error.message)
         if (!workspaceProject.ok && !workspaceProject.error.message.includes('is not live')) {
@@ -246,6 +249,7 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         return {
           workerPools: workerPools.value,
           workspaceProject: workspaceProject.ok ? workspaceProject.value : null,
+          retention: retention.ok ? retention.value : null,
         }
       },
       probeHarnessImage: async (templateId, signal) => {
@@ -260,6 +264,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
       },
       verifyGitea: async (sessionId, signal) => {
         const result = await pactflow.verifyGitea(sessionId, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      exportHandover: async (sessionId, signal) => {
+        const result = await pactflow.projectHandover(sessionId, signal)
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },

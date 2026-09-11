@@ -5,8 +5,8 @@
 
 状态取值：`passed`（有相称证据）/ `failed`（有失败证据）/ `blocked`（受阻于上游/授权/决策）/ `not-run`（未运行，不得计为通过）。
 
-**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 72 文件 / 558 测试 / 13 包产物，全绿；`git diff --check` 通过；
-`openspec validate --all --strict` 通过（**37 个 spec / 45 个已归档 change**）。分支**已推送**到 `origin`（`local==remote`，0/0）。
+**基线**：分支 `codex/pactflow-hardening`；`pnpm run check` = 72 文件 / 561 测试 / 13 包产物，全绿；`git diff --check` 通过；
+`openspec validate --all --strict` 通过（**37 个 spec / 46 个已归档 change**）。分支**已推送**到 `origin`（`local==remote`，0/0）。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
@@ -25,12 +25,12 @@
 | 运行时数据新鲜度（R11） | passed | `runtime-data-freshness`；`runtime-freshness.spec.ts`（7）。**接线已核实**：`overlay.tsx` 实际调用 `createFreshnessTracker` 与 `PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS` |
 | 集群连接身份（A07） | passed | `cluster-connection-identity`；`cluster-identity.spec.ts`（3） |
 | 时间合同分离（A02） | passed | `run-time-contracts`；`run-time-contracts.spec.ts`（3） |
-| 验证完整性信号（A03） | passed | `validation-integrity-signals`；`validation-integrity.spec.ts`（5）+ `verification-label.spec.ts`（3：**客户端把零验证显式标为「无自动验证」而非计数 0**）；零验证可识别已贯通「宿主数据 → 只读移交摘要 → 界面标注」 |
+| 验证完整性信号（A03） | passed | `validation-integrity-signals`；`validation-integrity.spec.ts`（5）+ `verification-label.spec.ts`（3：**零验证显式标为「无自动验证」**）+ `review-surface.spec.ts`（3：**清单在事件折叠后存活**——修复 `gitResultSchema` 未声明致字段被剥除的真实缺陷；**审批理由携带验证敏感清单/显式「无」**）。零验证与「改了测试配置」均已贯通到人眼前 |
 | 卸载前 drain 检查（A12-a） | passed | `uninstall-drain-safety`；`drain-status.spec.ts`（5：无责任/活跃 Run/未完成清理/**冷会话可读**/文档绑定 Remote 名）。新增只读 `@Remote('drainStatus')`，跨会话汇总非终态 Run 与未成功清理，只读不自动清理 |
-| 本地失败保留（A05） | passed | `local-failure-retention`；`local-failure-retention.spec.ts`（2）、`cleanup-retention-guard.spec.ts`（2） |
+| 本地失败保留（A05） | passed | `local-failure-retention`；`local-failure-retention.spec.ts`（2）、`cleanup-retention-guard.spec.ts`（2）+ **客户端保留现场只读区**（`overlay` 呈现总数/体积/度量/超预算/逾期，e2e 覆盖） |
 | 运行预算（A11） | passed | `run-budgets`；`run-budgets.spec.ts`（6，含 `retryNode` 强制 + **输出上限由预算单一权威决定并实际生效**） |
 | Harness 能力分级（A10） | passed | `harness-capability-levels`；`harness-capabilities.spec.ts`（9：级别推导 + **不可证级别不虚报**对抗守卫 + **声明可查询**）+ `k3s-cleanup.spec.ts#capability-level`（镜像/API 探针均报级别）+ **真实集群** `pactflow-harness-probes`（四模板 2/2） |
-| 只读项目移交（A12） | passed | `project-handover`；`project-handover.spec.ts`（5：含**包版本与 reader 版本可追溯**） |
+| 只读项目移交（A12） | passed | `project-handover`；`project-handover.spec.ts`（5：含**包版本与 reader 版本可追溯**）+ **前端只读入口**（`overlay` 导出摘要 JSON + 复制，e2e 覆盖） |
 | 代码输入过期追踪（F03 增强） | **partial** | `code-input-staleness`；检测器与记录已就位并通过测试，但**触发路径当前不可达**（成功节点不可重跑）——见 §4 |
 | 宿主窄端口（R12/J9） | passed | `host-narrow-ports`；`host-narrow-ports.spec.ts`（4：cleanup/probe + 派发/恢复均在不含 `ctx` 的宿主替身上驱动）+ `cleanup-retention-guard.spec.ts`（2）。`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost` 四个端口均已剥离整个 `ctx` |
 | K3s 批次收尾阶段（R04） | **passed** | `k3s-batch-finalization`；2026-09-11 真实集群验证 TTL 回收（两次）与零残留归零（两态）；见 `docs/b-class-k3s-acceptance-20260911.md` |
@@ -72,9 +72,9 @@
 
 - **A11 完整形态**：token/模型调用数用量统计（Harness termination document 无 token 字段，需先扩展 Harness 能力）、「预算耗尽进入 paused/needs-decision」（当前以**显式拒绝**表达，改为持久 paused 属领域状态机变更）。**输出/日志容量上限已交付**（预算单一权威，实际生效）。
 - **A10 完整形态**：为 `tool-invocation`/`verification` **增设专门探针阶段并做真实六级实证**——当前二者无可证证据（前者需 Harness runner 上报工具调用，不在本仓所有权内；后者需专门验证阶段），故诚实性上**不虚报**（已显式入合同与测试）；跨 Harness 能力协商未做。
-- **A12 完整形态**：**卸载前 drain 检查已交付**（`uninstall-drain-safety`，只读 `drainStatus` + 手册 §7 前置）、**版本可追溯已交付**（移交摘要 `packageVersion`/`eventProducerVersion`）；**剩前端移交入口**（UI 按钮触发导出移交摘要）未做。
-- **A03 完整形态**：**零验证可识别已贯通到界面**（`verification-label` 显式标注「无自动验证」）、验证基础设施改动可见已交付；**剩**宿主侧独立验收基线、按任务类型的最小验证策略——二者引入新的基线资产所有权/策略语义，属新目标，未做。
-- **A05 完整形态**：保留现场 UI 入口与只读查询的界面呈现仍未做；磁盘容量**已交付**（窗口/陈旧标记/容量计量/超预算标记）。
+- **A12 完整形态**：**已全部交付**——卸载前 drain 检查（`uninstall-drain-safety` + 手册 §7 前置）、版本可追溯（`packageVersion`/`eventProducerVersion`）、**前端移交入口**（浮层「导出移交摘要」只读 JSON + 复制）。
+- **A03 完整形态**：**零验证可识别与验证基础设施改动可见均已贯通到人眼前**（界面「无自动验证」标注 + 审批理由携带验证敏感清单，并修复字段被剥除的缺陷）；**剩**宿主侧独立验收基线、按任务类型的最小验证策略——二者引入新的基线资产所有权/策略语义，属新目标，未做。
+- **A05 完整形态**：**已全部交付**——磁盘容量（窗口/陈旧标记/容量计量/超预算标记）与**客户端只读呈现**（保留现场总数/体积/度量/超预算/逾期）。
 - **A04**：Gitea 保护分支的 `waiting-review/waiting-checks` 协作闭环（当前遇 required approvals/status checks 即拒绝自动收口）；需真实受保护仓库的审核/CI 状态，属 B 类环境前置。
 - **R12/J9 窄接口重构**：四个宿主端口（`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost`）均已剥离整个 `ctx`，改为窄端口；剩余未做的是「跨进程锁/时钟/环境」的显式可注入端口（D 类设计建议），属更大重构。
 - **A09**：本文件即该建议的落地；历史批次记录未合并（保留在实施状态与 archive）。

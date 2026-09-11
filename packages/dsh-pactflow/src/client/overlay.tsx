@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
-import type { PactFlowHealth, PactFlowSnapshot, PactFlowHarnessTemplateView, PactFlowHarnessProfileSettings, PactFlowModelConnectionSettings, PactFlowWorkerPoolStatus, PactFlowHarnessProbeResult, PactFlowApiProbeResult, PactFlowInfrastructureProbeResult, PactFlowGiteaStatus, PactFlowWorkspaceProjectConfig } from '../types.ts'
+import type { PactFlowHealth, PactFlowSnapshot, PactFlowHarnessTemplateView, PactFlowHarnessProfileSettings, PactFlowModelConnectionSettings, PactFlowWorkerPoolStatus, PactFlowHarnessProbeResult, PactFlowApiProbeResult, PactFlowInfrastructureProbeResult, PactFlowGiteaStatus, PactFlowWorkspaceProjectConfig, PactFlowRetentionSummary, PactFlowHandoverSummary } from '../types.ts'
 import { harnessProbeAvailability } from '../harness-discovery.ts'
 import { NS, type PactFlowLocaleKey } from './locale.ts'
 import { isHarnessProfile } from './resource-model.ts'
@@ -28,6 +28,10 @@ interface OverlayState {
   readonly probe: PactFlowHarnessProbeResult | PactFlowApiProbeResult | PactFlowInfrastructureProbeResult | null
   readonly giteaStatus: PactFlowGiteaStatus | null
   readonly workspaceProject: PactFlowWorkspaceProjectConfig | null
+  /** A05: read-only retained failure-scene status (capacity and overdue). */
+  readonly retention: PactFlowRetentionSummary | null
+  /** A12-c: the read-only handover summary shown by the export entry (null until requested). */
+  readonly handover: PactFlowHandoverSummary | null
 }
 
 export const overlay = createSnapshotStore<OverlayState>({
@@ -45,6 +49,8 @@ export const overlay = createSnapshotStore<OverlayState>({
   probe: null,
   giteaStatus: null,
   workspaceProject: null,
+  retention: null,
+  handover: null,
 })
 
 type HeaderActionProps =
@@ -59,17 +65,21 @@ export interface OverlayInjected {
     readonly modelConnections: readonly PactFlowModelConnectionSettings[]
     readonly workerPools: readonly PactFlowWorkerPoolStatus[]
     readonly workspaceProject: PactFlowWorkspaceProjectConfig | null
+    readonly retention: PactFlowRetentionSummary | null
   }>
   /** Refreshes only the runtime-bound fields that change outside the Session event log. */
   loadRuntime(sessionId: string, signal: AbortSignal): Promise<{
     readonly workerPools: readonly PactFlowWorkerPoolStatus[]
     readonly workspaceProject: PactFlowWorkspaceProjectConfig | null
+    readonly retention: PactFlowRetentionSummary | null
   }>
   probeHarnessImage(templateId: string, signal: AbortSignal): Promise<PactFlowInfrastructureProbeResult>
   probeApi(
     templateId: string, modelConnectionId: string, prompt: string, timeoutMs: number, signal: AbortSignal,
   ): Promise<PactFlowApiProbeResult>
   verifyGitea(sessionId: string, signal: AbortSignal): Promise<PactFlowGiteaStatus>
+  /** A12-c: read-only handover summary; never mutates state. */
+  exportHandover(sessionId: string, signal: AbortSignal): Promise<PactFlowHandoverSummary>
 }
 
 type OverlayProps =
@@ -88,7 +98,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
           open: true, sessionId, generation: overlay.getSnapshot().generation + 1,
           phase: 'idle', health: null, snapshot: null, error: null,
           templates: [], modelConnections: [], workerPools: [], probingTemplateId: null, probe: null,
-          giteaStatus: null, workspaceProject: null,
+          giteaStatus: null, workspaceProject: null, retention: null, handover: null,
         })
       }}
       style={buttonStyle}
@@ -99,7 +109,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage, verifyGitea, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage, verifyGitea, exportHandover, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
     ? sessions.byId[state.sessionId]?.projectionValues : undefined)
@@ -283,6 +293,46 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
                   : `运行时数据已于 ${new Date(freshnessState.lastSuccessAt).toLocaleTimeString()} 确认`}
             </p>
           </section>
+          {/* A05: retained failure scenes are read-only here — only the explicit
+              cleanup path may dispose of them, never this view. */}
+          <section style={diagnosticStyle}>
+            <strong>{t('retentionTitle')}</strong>
+            {state.retention === null ? <p style={hintStyle}>{t('empty')}</p> : (
+              <>
+                <p style={hintStyle}>
+                  {state.retention.total === 0 ? t('retentionNone') : `${t('retentionTitle')}: ${String(state.retention.total)}`}
+                  {' · '}
+                  {`${t('retentionBytes')}: ${String(state.retention.retainedBytes)} / ${String(state.retention.maxBytes)}`}
+                  {' · '}
+                  {state.retention.measured ? t('retentionMeasured') : t('retentionPartial')}
+                  {' · '}
+                  {state.retention.overBudget ? t('retentionOverBudget') : t('retentionWithinBudget')}
+                </p>
+                {state.retention.overdue.length > 0 && (
+                  <p style={hintStyle}>{`${t('retentionOverdue')}: ${state.retention.overdue
+                    .map(record => `${record.id} → ${record.target}`).join('；')}`}</p>
+                )}
+              </>
+            )}
+          </section>
+          <PactFlowHandoverEntry
+            sessionId={state.sessionId}
+            handover={state.handover}
+            t={t}
+            onExport={() => {
+              if (state.sessionId === null) return
+              const { sessionId, generation } = state
+              void startRequest(signal => exportHandover(sessionId, signal)).then(
+                handover => {
+                  if (isCurrent(sessionId, generation)) overlay.set({ ...overlay.getSnapshot(), handover })
+                },
+                error => {
+                  if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
+                  overlay.set({ ...overlay.getSnapshot(), error: error instanceof Error ? error.message : String(error) })
+                },
+              )
+            }}
+          />
           {snapshot !== null && (
             <PactFlowProjectionTables
               snapshot={snapshot}
@@ -348,6 +398,45 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
         </div>
       </section>
     </div>
+  )
+}
+
+function PactFlowHandoverEntry({
+  sessionId, handover, onExport, t,
+}: {
+  readonly sessionId: SessionId | null
+  readonly handover: PactFlowHandoverSummary | null
+  readonly onExport: () => void
+  readonly t: (key: PactFlowLocaleKey) => string
+}) {
+  const [copied, setCopied] = useState(false)
+  const text = handover === null ? null : JSON.stringify(handover, null, 2)
+  return (
+    <section style={diagnosticStyle}>
+      <strong>{t('handoverTitle')}</strong>
+      <div style={probeActionsStyle}>
+        <button type="button" onClick={onExport} disabled={sessionId === null} style={buttonStyle}>
+          {t('handoverExport')}
+        </button>
+        <button
+          type="button"
+          disabled={text === null}
+          style={buttonStyle}
+          onClick={() => {
+            if (text === null) return
+            // Read-only export: copy to clipboard, never write plugin state.
+            void navigator.clipboard?.writeText(text).then(
+              () => { setCopied(true) },
+              () => { setCopied(false) },
+            )
+          }}
+        >
+          {copied ? t('handoverCopied') : t('handoverCopy')}
+        </button>
+      </div>
+      <p style={hintStyle}>{text === null ? t('handoverNone') : ''}</p>
+      {text !== null && <pre style={preStyle} data-handover="summary">{text}</pre>}
+    </section>
   )
 }
 

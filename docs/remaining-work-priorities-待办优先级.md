@@ -2,7 +2,7 @@
 
 **日期**：2026-09-11
 **性质**：派生视图（非计划 owner）。计划与顺序的正文 owner 是 OpenSpec（`openspec/changes/`、`openspec/specs/`）；本清单只做跨 change 的三方汇总与优先级排序，供决策使用。
-**当前事实基线**：45 个 change 已归档、37 个 spec 有效、`pnpm run check` 72 文件 / 558 测试全绿；分支**已推送**到 `origin`（`local==remote`）。
+**当前事实基线**：46 个 change 已归档、37 个 spec 有效、`pnpm run check` 72 文件 / 561 测试全绿；分支**已推送**到 `origin`（`local==remote`）。
 
 排序原则：先消除**错误或冗余信息**（成本极低）→ 再补**行为已改但未经真实环境验证**的项（正确性风险最高）→ 再做**结构性/新能力**（工作量大）→ 最后是与目标/上游绑定的项。
 
@@ -27,11 +27,11 @@
 | # | 事项 | 说明 | 风险/工作量 |
 | --- | --- | --- | --- |
 | 5 ✅ | R12 剩余：`DispatchHost` / `RecoveryHost` 收窄为窄端口 | **已完成**（change `harden-host-narrow-ports-dispatch-recovery`，已归档）：四端口全部剥离 `ctx`；`host-narrow-ports` spec 新增「派发与恢复宿主亦不得依赖整个上下文」+2 场景 | 已完成，554 测试兜底 |
-| 6 ◑ | A03 完整：宿主侧独立验收基线 | **零验证可识别已贯通到界面**（change `harden-drain-and-verification-visibility`，已归档：`verification-label` 把零计数显式标为「无自动验证」，不再是计数 0）；**剩**宿主侧独立验收基线（Host 另存独立于任务仓的断言资产并运行）、按任务类型最小验证策略、测试配置变更单独审查——均引入新的基线资产所有权/策略语义，属新目标 | 剩项需定目标 |
+| 6 ◑ | A03 完整：宿主侧独立验收基线 | **零验证可识别与「改了测试配置」可见均已贯通到人眼前**（`verification-label` 显式标注 + `review-surface` 审批理由携带验证敏感清单，并修复字段被 zod 剥除的真实缺陷；change `surface-review-and-readonly-entries` 已归档）；**剩**宿主侧独立验收基线（Host 另存独立于任务仓的断言资产并运行）、按任务类型最小验证策略——均引入新的基线资产所有权/策略语义，属新目标 | 剩项需定目标 |
 | 7 ◑ | A11 完整：预算余项 | **输出/日志容量上限已交付**（change `harden-output-budget-authority`，已归档：预算成为输出上限的唯一权威且实际生效）；**剩两项判断当前不宜做**——token 用量（Harness 无 token 字段，需扩展上游能力）、paused 状态（属领域状态机变更，需先确认目标） | 剩项为上游/新目标 |
 | 8 ◑ | A10 完整：`tool-invocation` / `verification` 探针阶段 | **已交付有界增量**（change `harden-harness-capability-honesty`，已归档）：可证级别显式化、不可证级别显式不虚报、推导合并为一份、镜像/API 探针补报级别；真实集群探针 2/2 通过。**剩**：为这两级增设真实证据来源（需 Harness runner 上报工具调用 / 新增验证阶段，属新能力） | 剩项需上游/新能力 |
-| 9 ◑ | A12 完整：卸载前 drain 检查 + 前端移交入口 | **drain 检查已交付**（change `harden-drain-and-verification-visibility`，已归档：只读 `@Remote('drainStatus')` 跨会话汇总非终态 Run 与未完成清理、给出 `safeToUninstall`，手册 §7 卸载前置并由测试绑定 Remote 名；**只读不自动清理**）。**版本可追溯已交付**（移交摘要 `packageVersion`/`eventProducerVersion`）。**剩前端移交入口**（UI 按钮导出摘要）未做 | 剩 UI |
-| 10 ◑ | A05 完整：保留现场 UI 入口 + 磁盘体积上限 | **磁盘体积上限已交付**（change `harden-retention-capacity`，已归档：`sizeBytes` 有界测量 + `retainedBytes`/`measured`/`overBudget` 只读呈现）；**剩 UI 入口**未做 | 剩 UI（需浏览器套件） |
+| 9 ✅ | A12 完整：卸载前 drain 检查 + 前端移交入口 | **已全部交付**：drain 检查（`drainStatus` + 手册 §7 前置，只读不自动清理）、版本可追溯（`packageVersion`/`eventProducerVersion`）、**前端移交入口**（change `surface-review-and-readonly-entries` 已归档：浮层「导出移交摘要」只读 JSON + 复制，e2e 覆盖） | 已完成 |
+| 10 ✅ | A05 完整：保留现场 UI 入口 + 磁盘体积上限 | **已全部交付**：磁盘体积上限（`harden-retention-capacity`：`sizeBytes` 有界测量 + `retainedBytes`/`measured`/`overBudget` 只读呈现）+ **客户端只读呈现**（change `surface-review-and-readonly-entries` 已归档：浮层保留现场区呈现总数/体积/度量/超预算/逾期，e2e 覆盖） | 已完成 |
 
 ## P3 · 真实环境扩展与体验（按需）
 
@@ -70,9 +70,8 @@ E-19 主目录同步**已执行**（`/Users/ty/Codes/dsh-pactflow` 的 `main` �
 
 **仍属新目标、需另行定目标（未做，不影响当前正确性）**：
 
-- A03 的**宿主侧独立验收基线**（Host 另存独立于任务仓的断言资产并运行）、**按任务类型最小验证策略**、**测试配置变更单独审查**——引入新的基线资产所有权与策略语义。
-- A12 的**前端移交入口**（UI 按钮触发导出移交摘要）。
-- A05 的**保留现场 UI 入口**、A11 的 paused 状态等（见上表）。
+- A03 的**宿主侧独立验收基线**（Host 另存独立于任务仓的断言资产并运行）与**按任务类型最小验证策略**——引入新的基线资产所有权与策略语义。
+- A11 的 paused 状态（领域状态机变更）等（见上表）。
 
 **已裁决无需动作**：`deployed` 语义、强隔离承诺、F03 触发前置——均「保持现状」。
 **上游阻断（不需你现在动作）**：官方 DSH 发行版兼容复核（`externalEventProducers` 缺口，见第 18 行）——`check:release` 的最后一个真实步骤（`verify:profile`）依赖它，故 `check:release` 目前仅剩此上游阻断；本仓侧的门禁不可满足性已修复。
