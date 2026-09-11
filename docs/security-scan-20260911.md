@@ -1,6 +1,19 @@
 # Mimosa 深度安全扫描与处置（2026-09-11）
 
-本文件登记唯一一次完整密封扫描的收据与三族 finding 的处置结论。此前 `git commit`/`git push` 时多次出现 `scanner_enobufs`（未得到完整扫描结论）——本扫描即为补齐。
+本文件登记完整密封扫描的收据与三族 finding 的处置结论。此前 `git commit`/`git push` 时多次出现 `scanner_enobufs`（未得到完整扫描结论）——第一次扫描即为补齐。
+
+## 0. 第二次密封扫描（覆盖后续新增代码，2026-09-11 晚）
+
+在第一次扫描之后，仓库又合入了 `surface-review-and-readonly-entries`（schema 修复 + 审批理由 + 客户端两入口）。为让新代码也取得密封覆盖，重跑一次：
+
+| 项 | 值 |
+| --- | --- |
+| Scan ID | `scan-2026-09-11T14-59-19.217Z-0178b1d09938` |
+| Seal | `sha256:cdc341847e5b196a26f0a192f2e2ab0c7e975d16f82edb34e571ed26163c172c` |
+| 覆盖 / 结论 | 同为 `partial` / `inconclusive`（调用图动态派发缺口不变） |
+| Finding | 仍为 50 条（high 26 / medium 24），依赖 56 包 advisory 匹配 0 |
+
+**与第一次扫描逐条比对（finding 实例哈希）**：48 条实例哈希变化、2 条完全一致——变化者的**标题家族与严重度完全相同**（SSRF 19 / mongo-sort 23 / 硬编码凭据 3 / command-injection 4 / 跨文件污点 1），位置在 `lib/index.js`（构建产物）中整体平移 1 行左右（本批在 bundle 前部新增了 schema 字段与审批理由代码，属预期）。**无任何新增 finding 家族，三族处置结论不变**。
 
 ## 1. 扫描收据
 
