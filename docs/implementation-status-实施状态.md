@@ -2,6 +2,10 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 73 文件 / 565 测试、46 个 change 已归档、已推送）。
 
+## 2026-09-12 Anthropic 探针路径推导与运行时对齐（change `model-probe-path-convention`，已归档）
+
+紧接上一变更实机验收时暴露的**插件内在不一致**：探针把 `/messages` 直接拼 baseUrl，而运行时把 baseUrl 原样注入 `ANTHROPIC_BASE_URL`、由 Anthropic SDK 自拼 `/v1/messages`——baseUrl 不带 `/v1` 探针 404（Ark 实测 `/api/coding/messages` 不存在），带 `/v1` 则运行时路径翻倍，同一值无法两侧兼容。修复：探针 anthropic 分支 baseUrl 不以 `/v1` 结尾时拼 `v1/messages`、已含则不重复（官方 Anthropic、GLM Anthropic 兼容端点同受惠）。测试 `model-probe-path.spec.ts`（3 场景先红后绿：补全/不翻倍/与认证回退叠加同路径）。**验证**：`pnpm run check` 83 文件 / **597** 测试全绿；`openspec validate --all --strict` 43/43；tarball 内容核对（v1/messages 在包内）后重装重启。
+
 ## 2026-09-12 Anthropic 探针 401 自动 Bearer 重试（change `model-probe-auth-fallback`，已归档）
 
 真实部署（火山方舟 Coding 套餐 key）实测暴露的矛盾：模型连接卡「测试」对 anthropic 协议固定发 `x-api-key`，而 Ark 只认 Bearer——探针必红，但 Worker 实跑（K3s 注入 `ANTHROPIC_AUTH_TOKEN`）本就 Bearer 可通。本次按用户裁决把探针改为双风格兼容：

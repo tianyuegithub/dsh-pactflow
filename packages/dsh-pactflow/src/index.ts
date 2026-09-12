@@ -2798,8 +2798,11 @@ export class PactFlowService extends TypertRemoteService {
 
   private async probeModelConnection(model: PactFlowModelConnectionSettings, apiKey: string): Promise<void> {
     const base = new URL(model.baseUrl)
+    // Anthropic runtime clients (ANTHROPIC_BASE_URL + Anthropic SDK) resolve
+    // {base}/v1/messages; the probe must hit the identical endpoint, adding
+    // the /v1 segment only when the configured base does not already end in it.
     const suffix = model.apiMode === 'anthropic-messages'
-      ? 'messages'
+      ? base.pathname.replace(/\/+$/, '').endsWith('/v1') ? 'messages' : 'v1/messages'
       : model.apiMode === 'openai-responses' ? 'responses' : 'chat/completions'
     base.pathname = `${base.pathname.replace(/\/$/, '')}/${suffix}`
     const body = model.apiMode === 'anthropic-messages'
