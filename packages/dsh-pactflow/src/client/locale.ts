@@ -35,6 +35,8 @@ export type PactFlowLocaleKey =
   | 'giteaProtected'
   | 'giteaUnprotected'
   | 'noVerification'
+  | 'pausedTitle'
+  | 'resume'
   | 'retentionTitle'
   | 'retentionNone'
   | 'retentionBytes'
@@ -85,6 +87,8 @@ export const zh: Record<PactFlowLocaleKey, string> = {
   giteaProtected: '默认分支已保护',
   giteaUnprotected: '默认分支未保护',
   noVerification: '无自动验证',
+  pausedTitle: '已暂停节点（重试预算耗尽，等待人工恢复）',
+  resume: '恢复',
   retentionTitle: '保留现场',
   retentionNone: '无保留现场',
   retentionBytes: '保留体积',
@@ -136,6 +140,8 @@ export const en: Record<PactFlowLocaleKey, string> = {
   giteaProtected: 'Default branch protected',
   giteaUnprotected: 'Default branch unprotected',
   noVerification: 'No automatic verification',
+  pausedTitle: 'Paused nodes (retry budget exhausted; waiting for human resume)',
+  resume: 'Resume',
   retentionTitle: 'Retained scenes',
   retentionNone: 'No retained scenes',
   retentionBytes: 'Retained size',

@@ -178,6 +178,7 @@ import type {
   RecordPactFlowReviewRequest,
   RenewPactFlowRunRequest,
   RetryPactFlowNodeRequest,
+  ResumePactFlowNodeRequest,
   SettlePactFlowRunRequest,
   TransitionPactFlowNeedRequest,
   UpdatePactFlowNodeDependenciesRequest,
@@ -1398,16 +1399,48 @@ export class PactFlowService extends TypertRemoteService {
     if (active !== undefined) {
       throw new Error(`PactFlow node "${current.id}" still owns an active Run "${active.id}"`)
     }
+    if (current.state === 'paused') {
+      throw new Error(`PactFlow node "${current.id}" is paused (retry budget exhausted); waiting for human resume`)
+    }
     if (current.state !== 'failed' && current.state !== 'cancelled') {
       throw new Error(`PactFlow node "${current.id}" cannot retry from state ${current.state}`)
     }
-    // A11: retries are budgeted. Refuse past the attempt budget with an explicit
-    // reason instead of looping indefinitely.
+    // A11: retries are budgeted. Exhausting the budget PAUSES the node durably
+    // (visible, dispatch-refused) instead of throwing an identical error on
+    // every future attempt — resuming is an explicit human decision.
     const nextAttempt = Object.values(this.runState(session))
       .filter(run => run.nodeId === current.id)
       .reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1
     const verdict = evaluateAttemptBudget(this.runBudget.maxAttempts, nextAttempt)
-    if (verdict.exhausted) throw new Error(`PactFlow node "${current.id}" exceeded its retry budget: ${verdict.detail}`)
+    if (verdict.exhausted) {
+      const paused: PactFlowNode = {
+        ...current,
+        state: 'paused',
+        revision: current.revision + 1,
+        updatedAt: Date.now(),
+      }
+      this.events.append(session, 'pactflow/node-updated', { v: 1, node: paused })
+      return paused
+    }
+    const node: PactFlowNode = {
+      ...current,
+      state: this.dependenciesSucceeded(this.dagState(session), current.dependencies) ? 'ready' : 'pending',
+      revision: current.revision + 1,
+      updatedAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/node-updated', { v: 1, node })
+    return node
+  }
+
+  /** A11: explicit human resume for a paused node; the decision is logged in history. */
+  @Remote('resumeNode')
+  resumeNode(sessionId: string, request: ResumePactFlowNodeRequest): PactFlowNode {
+    const session = this.livePactFlowSession(sessionId)
+    const current = this.node(session, request.nodeId)
+    this.requireRevision('node', current.id, current.revision, request.expectedRevision)
+    if (current.state !== 'paused') {
+      throw new Error(`PactFlow node "${current.id}" is not paused (state ${current.state})`)
+    }
     const node: PactFlowNode = {
       ...current,
       state: this.dependenciesSucceeded(this.dagState(session), current.dependencies) ? 'ready' : 'pending',
@@ -1437,6 +1470,9 @@ export class PactFlowService extends TypertRemoteService {
   ): PactFlowClaimResult {
     const current = this.node(session, request.nodeId)
     this.requireRevision('node', current.id, current.revision, request.expectedRevision)
+    if (current.state === 'paused') {
+      throw new Error(`PactFlow node "${current.id}" is paused (retry budget exhausted); waiting for human resume`)
+    }
     if (current.state !== 'ready') throw new Error(`PactFlow node "${current.id}" is not ready`)
     const provider = request.provider.trim()
     if (provider.length === 0) throw new Error('PactFlow Run provider must be non-empty')

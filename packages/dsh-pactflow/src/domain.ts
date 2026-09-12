@@ -206,7 +206,7 @@ const needSchema = pactFlowSchema<PactFlowNeed>(z.object({
 
 const nodeSchema = pactFlowSchema<PactFlowNode>(z.object({
   id: pactFlowIdSchema<'node'>(), needId: pactFlowIdSchema<'need'>(), title: z.string().min(1),
-  state: z.enum(['pending', 'ready', 'claimed', 'running', 'blocked', 'review', 'succeeded', 'failed', 'cancelled', 'archived']),
+  state: z.enum(['pending', 'ready', 'claimed', 'running', 'blocked', 'review', 'paused', 'succeeded', 'failed', 'cancelled', 'archived']),
   revision: z.number().int().positive(), dependencies: z.array(pactFlowIdSchema<'node'>()), updatedAt: z.number().int().nonnegative(),
   codeInputs: z.array(pactFlowIdSchema<'node'>()).optional(),
 }))

@@ -50,6 +50,7 @@ const STATE_COPY: Readonly<Record<PactFlowNodeState, PactFlowDagStateCopy>> = {
   running: { label: '正在执行', tone: 'active' },
   blocked: { label: '暂时阻塞', tone: 'warning' },
   review: { label: '等待评审', tone: 'warning' },
+  paused: { label: '已暂停（等待人工恢复）', tone: 'warning' },
   succeeded: { label: '已完成', tone: 'success' },
   failed: { label: '执行失败', tone: 'danger' },
   cancelled: { label: '已取消', tone: 'neutral' },

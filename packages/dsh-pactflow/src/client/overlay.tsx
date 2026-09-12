@@ -80,6 +80,8 @@ export interface OverlayInjected {
   verifyGitea(sessionId: string, signal: AbortSignal): Promise<PactFlowGiteaStatus>
   /** A12-c: read-only handover summary; never mutates state. */
   exportHandover(sessionId: string, signal: AbortSignal): Promise<PactFlowHandoverSummary>
+  /** A11: explicit human resume for a paused node. */
+  resumeNode(sessionId: string, nodeId: string, expectedRevision: number, signal: AbortSignal): Promise<unknown>
 }
 
 type OverlayProps =
@@ -109,7 +111,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage, verifyGitea, exportHandover, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage, verifyGitea, exportHandover, resumeNode, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
     ? sessions.byId[state.sessionId]?.projectionValues : undefined)
@@ -315,6 +317,24 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
               </>
             )}
           </section>
+          {snapshot !== null && <PactFlowPausedNodes
+            snapshot={snapshot}
+            sessionId={state.sessionId}
+            t={t}
+            onResume={(nodeId, expectedRevision) => {
+              if (state.sessionId === null) return
+              const { sessionId, generation } = state
+              void startRequest(signal => resumeNode(sessionId, nodeId, expectedRevision, signal)).then(
+                () => {
+                  if (isCurrent(sessionId, generation)) refreshRuntime()
+                },
+                error => {
+                  if (!isCurrent(sessionId, generation) || (error instanceof DOMException && error.name === 'AbortError')) return
+                  overlay.set({ ...overlay.getSnapshot(), error: error instanceof Error ? error.message : String(error) })
+                },
+              )
+            }}
+          />}
           <PactFlowHandoverEntry
             sessionId={state.sessionId}
             handover={state.handover}
@@ -398,6 +418,29 @@ export function PactFlowOverlay({ load, loadRuntime, probeApi, probeHarnessImage
         </div>
       </section>
     </div>
+  )
+}
+
+/** A11: paused nodes wait for an explicit human resume; nothing resumes itself. */
+function PactFlowPausedNodes({ snapshot, sessionId, onResume, t }: {
+  readonly snapshot: PactFlowSnapshot
+  readonly sessionId: SessionId | null
+  readonly onResume: (nodeId: string, expectedRevision: number) => void
+  readonly t: (key: PactFlowLocaleKey) => string
+}) {
+  const paused = Object.values(snapshot.dag.byId).filter(node => node.state === 'paused')
+  if (paused.length === 0) return null
+  return (
+    <section style={diagnosticStyle}>
+      <strong>{t('pausedTitle')}</strong>
+      {paused.map(node => (
+        <div key={String(node.id)} style={probeActionsStyle}>
+          <span>{String(node.id)} · {String(node.title)}</span>
+          <button type="button" disabled={sessionId === null} style={buttonStyle}
+            onClick={() => onResume(String(node.id), node.revision)}>{t('resume')}</button>
+        </div>
+      ))}
+    </section>
   )
 }
 

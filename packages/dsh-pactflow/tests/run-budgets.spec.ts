@@ -81,11 +81,14 @@ describe('PactFlow retry budget enforcement', () => {
       runId: claimed.run.id, claimId: claimed.run.claimId,
       expectedNodeRevision: claimed.node.revision, state: 'failed', outcome: 'worker failed',
     })
-    try {
-      ctx.pactflow.retryNode(session.id, { nodeId: node.id, expectedRevision: failed.node.revision })
-      throw new Error('expected retry to be refused')
-    } catch (error) {
-      expect(String((error as Error).message)).toMatch(/exceeded its retry budget.*exceeds the budget/)
-    } finally { await ctx.fiber.dispose() }
+    // A11: exhaustion now PAUSES the node durably instead of refusing with an
+    // identical error on every future attempt; resuming is a human decision.
+    const paused = ctx.pactflow.retryNode(session.id, { nodeId: node.id, expectedRevision: failed.node.revision })
+    expect(paused.state).toBe('paused')
+    expect(() => ctx.pactflow.retryNode(session.id, { nodeId: node.id, expectedRevision: paused.revision }))
+      .toThrow(/paused.*waiting for human resume/)
+    expect(() => ctx.pactflow.claimNode(session.id, {
+      nodeId: node.id, expectedRevision: paused.revision, provider: 'spawn', leaseDurationMs: 60_000,
+    })).toThrow(/paused.*waiting for human resume/)
   })
 })

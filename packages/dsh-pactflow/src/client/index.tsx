@@ -282,6 +282,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
+      resumeNode: async (sessionId, nodeId, expectedRevision, signal) => {
+        const result = await pactflow.resumeNode({ sessionId, nodeId, expectedRevision }, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
     }),
   }, PactFlowOverlay))
   return disposeRemote

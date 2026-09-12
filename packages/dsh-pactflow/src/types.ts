@@ -70,6 +70,7 @@ export type PactFlowNodeState =
   | 'running'
   | 'blocked'
   | 'review'
+  | 'paused'
   | 'succeeded'
   | 'failed'
   | 'cancelled'
@@ -796,6 +797,12 @@ export interface ClaimPactFlowNodeRequest {
   readonly expectedRevision: number
   readonly provider: string
   readonly leaseDurationMs: number
+}
+
+/** Owner request to resume a paused node (A11); resuming is an explicit human decision. */
+export interface ResumePactFlowNodeRequest {
+  readonly nodeId: string
+  readonly expectedRevision: number
 }
 
 export interface RenewPactFlowRunRequest {
