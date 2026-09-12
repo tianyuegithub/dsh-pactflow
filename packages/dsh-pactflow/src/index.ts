@@ -2086,9 +2086,12 @@ export class PactFlowService extends TypertRemoteService {
       const combination = `${profile.templateId}\u0000${profile.modelConnectionId}`
       if (seenCombinations.has(combination)) throw new Error('duplicate Agent Profile Harness/model combination')
       seenCombinations.add(combination)
+      // 1-12 is the project-side declared demand; the shared Worker Pool
+      // arbitrates actual concurrency at runtime (excess queues), so the
+      // profile quantity is deliberately not bounded by pool capacity.
       if (!Number.isSafeInteger(profile.maxConcurrency) || profile.maxConcurrency < 1
-        || profile.maxConcurrency > pool.maxConcurrency) {
-        throw new Error(`Agent Profile "${profile.id}" Worker quantity must be 1-${String(pool.maxConcurrency)}`)
+        || profile.maxConcurrency > 12) {
+        throw new Error(`Agent Profile "${profile.id}" Worker quantity must be 1-12`)
       }
       this.infrastructure.resolveExecution(pool.id, profile.templateId, profile.modelConnectionId)
     }

@@ -208,8 +208,8 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   const upsertProfile = (): void => {
     if (draftTemplate === undefined) { setError('请选择 Harness'); return }
     if (draftModel === undefined) { setError('请选择兼容模型'); return }
-    if (!Number.isSafeInteger(draftConcurrency) || draftConcurrency < 1) {
-      setError('Worker 数量必须是大于 0 的整数'); return
+    if (!Number.isSafeInteger(draftConcurrency) || draftConcurrency < 1 || draftConcurrency > 12) {
+      setError('Worker 数量必须是 1-12 的整数'); return
     }
     const duplicate = agentProfiles.some(profile => profile.id !== editingProfileId
       && profile.templateId === draftTemplate.id && profile.modelConnectionId === draftModel.id)
@@ -358,7 +358,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                     <div style={connectorStyle}><IconPlusOutline16 /></div>
                     <div style={quotaModuleStyle}>
                       <div style={moduleLabelStyle}><IconQueueOutline14 /><span>Worker 数量</span></div>
-                      <input type="number" min={1} value={draftConcurrency} onChange={event => { setDraftConcurrency(Number(event.currentTarget.value)); setError(null) }} style={moduleSelectStyle} />
+                      <input type="number" min={1} max={12} value={draftConcurrency} onChange={event => { setDraftConcurrency(Number(event.currentTarget.value)); setError(null) }} style={moduleSelectStyle} />
                       <span style={moduleMetaStyle}>本项目的并发上限（非预留）· 池全局上限 {String(pool?.maxConcurrency ?? 0)}，超出部分自动排队</span>
                     </div>
                   </div>
