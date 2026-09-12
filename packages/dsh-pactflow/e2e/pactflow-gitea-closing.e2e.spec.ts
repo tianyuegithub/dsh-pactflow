@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture } from '../tests/execution-plan-fixture.ts'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
@@ -103,6 +104,7 @@ realDescribe('PactFlow real Gitea closing', () => {
           })
         },
       } as never)
+      await approveExecutionPlanFixture(ctx, session.id, 'create the acceptance proof commit', { kind: 'git', provider: 'spawn' }, node.id)
       const task = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: node.id,
         expectedRevision: node.revision,

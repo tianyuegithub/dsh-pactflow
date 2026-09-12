@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture } from '../tests/execution-plan-fixture.ts'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -115,6 +116,11 @@ describe.skipIf(!enabled)('PactFlow real K3s Worker', { timeout: 900_000 }, () =
     const node = ctx.pactflow.createNode(session.id, {
       id: 'worker', needId: 'real-k3s', title: 'Worker', dependencies: [],
     })
+    await approveExecutionPlanFixture(ctx, session.id, [
+        'In the current repository create dsh-k3s-e2e-proof.txt containing exactly DSH K3S OK followed by a newline.',
+        'Run test -f dsh-k3s-e2e-proof.txt, then git add the file and commit with message dsh k3s e2e.',
+        'Do not modify any other file, switch branches, merge, or deploy.',
+      ].join(' '), { kind: 'k3s', templateId: 'dsh-deepseek-v4flash' }, node.id)
     const settled = await ctx.pactflow.dispatchK3sNode(session.id, {
       nodeId: node.id,
       expectedRevision: node.revision,

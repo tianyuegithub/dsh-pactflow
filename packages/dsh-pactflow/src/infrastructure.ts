@@ -113,6 +113,7 @@ export class PactFlowInfrastructure {
           runtimeTemplates.push({
             id: executionTemplateId,
             harness: template.harness,
+            ...(template.interactionProtocol ? { interactionProtocol: template.interactionProtocol } : {}),
             apiMode: model.apiMode,
             image: pactFlowImageOf(registryForTemplate, template),
             model: model.model,
@@ -375,6 +376,7 @@ export class PactFlowInfrastructure {
     registries: ReadonlyMap<string, PactFlowRegistrySettings>,
   ): void {
     validId(template.id, 'Harness template')
+    if (template.interactionProtocol !== undefined && (template.harness !== 'dsh' || template.interactionProtocol !== 'dsh-worker-interactions/v1')) throw new Error('远程交互协议仅支持已适配的 DSH 执行器')
     if (!isLegacyTemplate(template)) {
       nonEmpty(template.displayName, `Harness template "${template.id}" displayName`)
       if (!registries.has(template.registryId)) {

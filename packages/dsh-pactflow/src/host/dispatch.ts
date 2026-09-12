@@ -9,6 +9,8 @@ import type { PactFlowGitWorkspace, PactFlowGitAuthSecret } from '../git-workspa
 import type { PactFlowInfrastructure } from '../infrastructure.ts'
 import type { PactFlowK3sWorker, PactFlowRunCleanupRecorder } from '../k3s-worker.ts'
 import { pactFlowK3sSpecDigest } from '../k3s-worker.ts'
+import { localMavenCache, type RecoverySnapshot } from '../local-workspace.ts'
+import { preflightLocalExecution } from '../local-preflight.ts'
 import {
   PactFlowRunId,
   type ClaimPactFlowNodeRequest,
@@ -37,6 +39,9 @@ import {
  * instance-level overrides (tests) remain authoritative.
  */
 export interface DispatchHost {
+  recoveryForDispatch(session: Session, nodeId: string, recovery: NonNullable<DispatchPactFlowLocalNodeRequest['recovery']>): Promise<RecoverySnapshot>
+  interactionSigningPublicKey(): Promise<string>
+  assertExecutionPlan(session: Session, nodeId: string, prompt: string, execution: import('../types.ts').PactFlowExecutionPlan['nodes'][number]['execution']): Promise<import('../types.ts').PactFlowExecutionPlan['nodes'][number]['execution']>
   /** Narrow ports instead of the whole Cordis Context (R12). */
   readonly agents: () => AgentRegistry | undefined
   readonly subagents: () => SubagentRuntime | undefined
@@ -188,6 +193,13 @@ export async function dispatchK3sNodeWithSignalImpl(
   if (signal?.aborted) throw new Error('PactFlow K3s dispatch was cancelled before claim')
   const session = host.livePactFlowSession(sessionId)
   const project = host.requireProject(session)
+  const planRoute = { kind: 'k3s' as const, templateId: request.templateId,
+    ...(request.agentProfileId === undefined ? {} : { agentProfileId: request.agentProfileId }),
+    ...(request.modelConnectionId === undefined ? {} : { modelConnectionId: request.modelConnectionId }),
+    ...(request.workerPoolId === undefined ? {} : { workerPoolId: request.workerPoolId }) }
+  const approvedRoute = await host.assertExecutionPlan(session, request.nodeId, request.prompt, planRoute)
+  if (approvedRoute.kind !== 'k3s') throw new Error('Approved execution route is not K3s')
+  request = { ...request, ...approvedRoute }
   const workspaceProject = await host.workspaceProjectForSession(session)
   const projectGit = project.git ?? host.workspaceGitBinding(workspaceProject)
   const workspaceSnapshot = JSON.stringify(workspaceProject)
@@ -233,6 +245,7 @@ export async function dispatchK3sNodeWithSignalImpl(
     : await host.resolveCredential(resolved.modelConnection.apiKeyCredentialRef, 'model API key')
   const k3sDraft: PactFlowK3sRunSpec = {
     ...planned,
+    ...(planned.interactionProtocol ? { interactionPublicKey: await host.interactionSigningPublicKey(), interactionRunId: runId } : {}),
     ...(workspaceProject === undefined ? {} : { projectConfigRevision: workspaceProject.revision }),
     ...(selectedProfile === undefined ? {} : { agentProfileId: selectedProfile.id }),
     ...(resolved.poolId === undefined ? {} : { workerPoolId: resolved.poolId }),
@@ -293,6 +306,7 @@ export async function dispatchK3sNodeWithSignalImpl(
       if (currentRoute.worker !== worker || currentRoute.configurationSnapshot !== resolved.configurationSnapshot) {
         throw new Error('PactFlow dispatch execution configuration changed while waiting')
       }
+      await host.assertExecutionPlan(session, request.nodeId, request.prompt, planRoute)
       if (signal?.aborted) throw new Error('PactFlow K3s dispatch was cancelled before claim')
     } catch (error) {
       host.events.append(session, 'pactflow/run-queue-cancelled', {
@@ -348,6 +362,8 @@ export async function dispatchK3sNodeWithSignalImpl(
       }, Math.max(1_000, Math.floor(leaseDurationMs / 2)))
       let remoteResult: PactFlowK3sResult
       try {
+        await host.assertExecutionPlan(session, request.nodeId, request.prompt, planRoute)
+        controller.signal.throwIfAborted()
         // From here `run()` owns the prepared secrets and releases them on every
         // terminal path, so the discard guard must stand down.
         runStarted = true
@@ -467,6 +483,8 @@ export async function dispatchGitNodeWithSignalImpl(
   if (signal?.aborted) throw new Error('PactFlow Git dispatch was cancelled before claim')
   const session = host.livePactFlowSession(sessionId)
   const execution = host.localExecution(session, request, true)
+  const planRoute = { kind: 'git' as const, provider: request.provider, ...(request.recovery ? { recovery: request.recovery } : {}) }
+  await host.assertExecutionPlan(session, request.nodeId, request.prompt, planRoute)
   const project = host.requireProject(session)
   const workspaceProject = await host.workspaceProjectForSession(session)
   const binding = project.git ?? host.workspaceGitBinding(workspaceProject)
@@ -504,6 +522,7 @@ export async function dispatchGitNodeWithSignalImpl(
       }
       host.requireRevision('node', node.id, host.node(session, request.nodeId).revision, request.expectedRevision)
       host.requireRevision('project', project.id, host.requireProject(session).revision, project.revision)
+      await host.assertExecutionPlan(session, request.nodeId, request.prompt, planRoute)
       if (signal?.aborted) throw new Error('PactFlow Git dispatch was cancelled before claim')
     } catch (error) {
       host.events.append(session, 'pactflow/run-queue-cancelled', {
@@ -512,11 +531,24 @@ export async function dispatchGitNodeWithSignalImpl(
       throw error
     }
     const runId = PactFlowRunId(`run-${randomUUID()}`)
-    const git = await host.git.plan(session.header.cwd, session.id, runId, node, binding, host.codeInputCommits(session, node))
-    host.requireRevision('project', project.id, host.requireProject(session).revision, project.revision)
+    let recovery: RecoverySnapshot | undefined
+    let git: PactFlowGitRunSpec
+    try {
+      recovery = request.recovery ? await host.recoveryForDispatch(session, String(node.id), request.recovery) : undefined
+      const plannedGit = await host.git.plan(session.header.cwd, session.id, runId, node, binding, host.codeInputCommits(session, node), 'isolated-clone')
+      if (recovery && recovery.baseCommit !== plannedGit.baseCommit) throw new Error('候选基线与当前任务基线不一致，需重新评审，未启动执行代理')
+      git = { ...plannedGit, ...(recovery ? { recoveryInput: { runId: recovery.runId, digest: recovery.digest, sourceHead: recovery.sourceHead } } : {}) }
+      await host.assertExecutionPlan(session, request.nodeId, request.prompt, planRoute)
+      host.requireRevision('project', project.id, host.requireProject(session).revision, project.revision)
+      signal?.throwIfAborted()
+    } catch (error) {
+      host.events.append(session, 'pactflow/run-queue-cancelled', { v: 1, queueId, reason: host.boundedOutcome(error), cancelledAt: Date.now() })
+      throw error
+    }
     const owned = host.claimNodeInSession(session, request, { runId, git })
     try {
       await host.git.materialize(session.header.cwd, git)
+      if (recovery) await host.git.loadRecovery(git, recovery)
     } catch (error) {
       const settled = host.settleRunInSession(session, {
         runId: owned.run.id,
@@ -553,6 +585,13 @@ export async function executeClaimedImpl(
   }
   let child: SubagentRun
   try {
+    await host.assertExecutionPlan(session, request.nodeId, request.prompt, { kind: 'git', provider: request.provider, ...(request.recovery ? { recovery: request.recovery } : {}) })
+    const assertPreflight = git?.checkoutKind === 'isolated-clone'
+      ? await preflightLocalExecution(execution.parent, execution.subagents, request.provider, git, await host.git.metadataPath(session.header.cwd), controller.signal)
+      : undefined
+    host.requireRevision('node', owned.node.id, host.node(session, owned.node.id).revision, owned.node.revision)
+    if (owned.run.leaseDeadline <= Date.now()) throw new Error('执行准备超过运行租约，未启动业务执行代理')
+    assertPreflight?.()
     child = await execution.subagents.start(request.provider, {
       label: owned.node.title,
       prompt: [{ type: 'text', text: execution.prompt }],
@@ -560,9 +599,11 @@ export async function executeClaimedImpl(
       signal: controller.signal,
       ...git === undefined ? {} : { cwd: git.worktreePath },
       // A08: shadow the read-only orchestrator persona so the Worker can write.
-      ...execution.persona === undefined ? {} : { persona: execution.persona },
+      ...execution.persona === undefined ? {} : { persona: execution.persona + (git?.checkoutKind === 'isolated-clone'
+        ? ` This is a self-contained repository, not a linked worktree. Maven commands MUST include the single argument -Dmaven.repo.local=${JSON.stringify(localMavenCache(git))}; this private cache is inside the task Git metadata and must never be committed. You may warm it by COPYING regular files from ~/.m2/repository; never hardlink, follow symlinks outside that cache, copy settings.xml, or write shared ~/.m2. Git hooks and signing are disabled for this task. ${git.recoveryInput ? `The uncommitted starting changes come exclusively from retained Run ${git.recoveryInput.runId}, digest ${git.recoveryInput.digest}. They are unverified candidate input: inspect every change, correct it if needed, rerun validation, then commit. Do not modify or delete the retained source or combine another candidate.` : ''}` : '') },
     })
   } catch (error) {
+    externalSignal?.removeEventListener('abort', forwardAbort)
     const settled = host.settleRunInSession(session, {
       runId: owned.run.id,
       claimId: owned.run.claimId,
@@ -574,6 +615,7 @@ export async function executeClaimedImpl(
     return settled
   }
   let timer: ReturnType<typeof setInterval> | undefined
+  let childDisposed = false
   try {
     owned = host.renewRun(session.id, {
       runId: owned.run.id,
@@ -595,6 +637,9 @@ export async function executeClaimedImpl(
     let result: SubagentResult
     try {
       result = await child.result
+      // Retire the execution owner before inspecting its writable repository on the Host.
+      await child.dispose()
+      childDisposed = true
     } catch (error) {
       const settled = host.settleRunInSession(session, {
         runId: owned.run.id,
@@ -609,12 +654,13 @@ export async function executeClaimedImpl(
     let gitResult: PactFlowGitResult | undefined
     if (result.stopReason === 'completed' && git !== undefined) {
       try {
-        const localResult = await host.git.validateResult(git, await host.assertValidationProfilesCurrent(session, git))
+        const localResult = await host.git.validateResult(git, await host.assertValidationProfilesCurrent(session, git), controller.signal)
         gitResult = await host.git.syncResult(
           session.header.cwd,
           git,
           localResult,
           await host.resolveGitAuth(git),
+          controller.signal,
         )
       } catch (error) {
         // Diagnosability: a Git-side rejection alone ("produced no commit") hides
@@ -644,6 +690,6 @@ export async function executeClaimedImpl(
   } finally {
     if (timer !== undefined) clearInterval(timer)
     if (externalSignal !== undefined) externalSignal.removeEventListener('abort', forwardAbort)
-    await child.dispose()
+    if (!childDisposed) await child.dispose()
   }
 }

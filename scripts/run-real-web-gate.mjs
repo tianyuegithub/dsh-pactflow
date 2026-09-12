@@ -47,6 +47,7 @@ function kubectlReachable() {
  */
 export function checkWebGatePrerequisites() {
   const missing = []
+  if (!/^.+@sha256:[a-f0-9]{64}$/.test(process.env.PACTFLOW_RELAY_IMAGE ?? '')) missing.push('PACTFLOW_RELAY_IMAGE immutable acceptance image')
   if (!kubectlReachable()) missing.push('DSH_K3S_E2E environment (kubectl cannot reach namespace pactflow)')
   if (resolveCredential('PACTFLOW_GITEA_API_TOKEN') === undefined) missing.push('PACTFLOW_GITEA_API_TOKEN credential ref')
   if (resolveCredential('DEEPSEEK_API_KEY') === undefined) missing.push('DEEPSEEK_API_KEY credential ref (record-mode model suites)')
@@ -65,6 +66,8 @@ export function realWebGateEnvironment() {
     DSH_SNAPSHOT: 'record',
     DSH_REAL_CRASH: '1',
     DSH_REAL_APPROVAL: '1',
+    DSH_AUTOPILOT_E2E: '1',
+    DSH_WORKER_INTERACTIONS_E2E: '1',
     ...gateCredentialEnvironment(),
   })
 }

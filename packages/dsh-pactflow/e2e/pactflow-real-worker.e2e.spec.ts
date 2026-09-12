@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -54,6 +54,7 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
   let scaffold: WebScaffold
   let browser: Browser
   let page: Page
+  let sourceRoot: string
   let bundleAnchor: Awaited<ReturnType<typeof localBundleAnchor>> | undefined
 
   beforeAll(async () => {
@@ -66,12 +67,18 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
         roots: [{ path: `${PACKAGE_ROOT}/presets`, trust: 'user' }],
       },
     })
-    createGitFixture(scaffold.workspaceCwd)
+    // The original fixture was entirely under tmpdir(), which is independently
+    // writable under workspace-write and masked the external Git metadata denial.
+    // connectFreshWorkspace stages and connects `<root>/workspace`, i.e. exactly
+    // the fixture clone root; passing the clone itself would nest an empty
+    // non-checkout directory and break Git binding.
+    sourceRoot = await mkdtemp(join(homedir(), '.pactflow-real-local-'))
+    createGitFixture(sourceRoot)
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
-    await connectFreshWorkspace(page, scaffold.workspaceCwd)
+    await connectFreshWorkspace(page, sourceRoot)
     await page.getByRole('button', { name: 'Standard mode' }).click()
     const menu = page.getByRole('menu')
     await menu.waitFor({ timeout: 15_000 })
@@ -92,6 +99,7 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
       return
     }
     await scaffold?.close()
+    if (sourceRoot) await rm(sourceRoot, { recursive: true, force: true })
     if (bundleAnchor !== undefined) await rm(bundleAnchor.directory, { recursive: true, force: true })
   })
 
@@ -103,14 +111,19 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
       '1. initialize project named Real Worker E2E;',
       '2. bind Git remote origin and default branch main using the current project revision;',
       '3. create need id real-worker, title Real Worker, description real model Git acceptance;',
-      '4. create root node id worker-node under need real-worker with no dependencies;',
-      '5. dispatch that node through the Git worktree provider with DSH provider spawn and lease 60000ms. The Worker prompt must be: In the current task worktree, create worker.txt containing exactly worker done followed by a newline, verify the file, git add it, and commit it with message worker done. Do not switch branches or modify any other file.',
+      '4. call pactflow_confirm_execution_plan with ONE single-node plan (node id worker-node, title Real Worker, no dependencies, provider spawn) and wait for the native choice; the Host will create the selected node;',
+      '5. after approval dispatch that exact node/prompt/route through pactflow_dispatch_git with DSH provider spawn and lease 60000ms. The Worker prompt must be: In the current task repository, create worker.txt containing exactly worker done followed by a newline, verify the file, git add it, and commit it with message worker done. Do not switch branches or modify any other file.',
       'Wait for the Worker result, then reply with a brief completion statement.',
     ].join(' '))
     const expectedSessionId = await livePactFlowSession(scaffold)
     expect(expectedSessionId).toBeDefined()
     await composer.press('Enter')
     const sessionId = expectedSessionId as string
+    const question = page.locator('[data-question-key]')
+    await question.waitFor({ timeout: 120000 })
+    expect(await question.innerText()).toContain('worker.txt')
+    await question.getByRole('radio', { name: /^批准单节点方案/ }).click()
+    await question.getByRole('button', { name: 'Submit', exact: true }).click()
     await expect.poll(() => scaffold.ctx.sessions.get(sessionId)?.events
       .findLast(event => event.type === 'pactflow/run-settled'), {
       timeout: 240_000,
@@ -158,6 +171,7 @@ describe.skipIf(!record)('PactFlow real local Worker', { timeout: 300_000 }, () 
       expect(settled.data.node.state).toBe('succeeded')
       expect(settled.data.run.gitResult?.commit).toMatch(/^[0-9a-f]{40,64}$/)
       expect(settled.data.run.gitResult?.branch).toBe(settled.data.run.git?.branch)
+      expect(settled.data.run.git?.checkoutKind).toBe('isolated-clone')
       expect(readFileSync(join(settled.data.run.git!.worktreePath, 'worker.txt'), 'utf8')).toBe('worker done\n')
     }
   })

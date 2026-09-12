@@ -15,7 +15,7 @@ export const backdropStyle: CSSProperties = {
   zIndex: 100,
   display: 'grid',
   placeItems: 'center',
-  background: 'rgba(1, 12, 11, 0.72)',
+  background: 'var(--dsw-alias-bg-mask-1)',
   pointerEvents: 'auto',
 }
 
@@ -26,10 +26,10 @@ export const panelStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
-  border: '1px solid var(--border, #36504c)',
+  border: '1px solid var(--dsw-alias-border-l2)',
   borderRadius: 12,
-  background: 'var(--surface, #071c1a)',
-  color: 'var(--text, #f4e3c8)',
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-primary)',
   boxShadow: '0 28px 80px rgba(0, 0, 0, 0.45)',
 }
 
@@ -38,7 +38,7 @@ export const headerStyle: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'space-between',
   padding: '24px 28px',
-  borderBottom: '1px solid var(--border, #263d39)',
+  borderBottom: '1px solid var(--dsw-alias-border-l2)',
   flex: '0 0 auto',
 }
 
@@ -47,11 +47,11 @@ export const subtitleStyle: CSSProperties = { margin: '6px 0 0', opacity: 0.72 }
 export const bodyStyle: CSSProperties = {
   width: '100%', minWidth: 0, boxSizing: 'border-box', padding: 28, overflowY: 'auto', overflowX: 'hidden',
 }
-export const preStyle: CSSProperties = { padding: 16, overflow: 'auto', background: '#03100f' }
+export const preStyle: CSSProperties = { padding: 16, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-1)' }
 export const diagnosticStyle: CSSProperties = {
-  border: '1px solid var(--border, #263d39)', borderRadius: 8, padding: 12, marginBottom: 16,
+  border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: 12, marginBottom: 16,
 }
-export const errorStyle: CSSProperties = { ...preStyle, color: '#ff8b8b' }
+export const errorStyle: CSSProperties = { ...preStyle, color: 'var(--dsw-alias-label-error)' }
 export const probeStyle: CSSProperties = { ...preStyle, maxHeight: 320, whiteSpace: 'pre-wrap' }
 export const settingsCardStyle: CSSProperties = {
   border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12, padding: 20,
@@ -60,8 +60,8 @@ export const settingsCardStyle: CSSProperties = {
 export const hintStyle: CSSProperties = { opacity: 0.72, margin: 0 }
 export const settingsEditorStyle: CSSProperties = {
   width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 280,
-  border: '1px solid var(--border, #36504c)', borderRadius: 6,
-  background: 'var(--surface, #03100f)', color: 'var(--text, #f4e3c8)',
+  border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6,
+  background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', padding: 12,
 }
 export const resourceSectionStyle: CSSProperties = {
@@ -200,7 +200,7 @@ export const gridStyle: CSSProperties = {
 }
 export const cardStyle: CSSProperties = {
   minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', overflow: 'hidden', overflowWrap: 'anywhere',
-  border: '1px solid #263d39', borderRadius: 8, padding: 16,
+  border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: 16,
 }
 export const sectionTitleStyle: CSSProperties = { margin: '0 0 12px', fontSize: 16 }
 export const tableStyle: CSSProperties = { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' }

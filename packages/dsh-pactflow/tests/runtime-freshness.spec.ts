@@ -64,7 +64,8 @@ describe('PactFlow runtime freshness wiring', () => {
     expect(overlay).toContain('freshness.current.onFailure()')
     expect(overlay).toContain('freshness.current.onSuccess()')
     expect(overlay).toContain('freshnessState.stale')
-    expect(overlay).toContain('尚未确认')
+    // The workbench presents this read timestamp in diagnostics, not as readiness.
+    expect(overlay).toContain("freshnessState.lastSuccessAt === null ? '尚未读取'")
     // Context change resets freshness so a previous owner's timestamp is not shown.
     expect(overlay).toContain('freshness.current = createFreshnessTracker()')
     // The initial load's runtime data counts as confirmed (no false "unconfirmed" flash).

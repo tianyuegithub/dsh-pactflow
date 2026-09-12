@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture, unconfinedWorkerContextFixture } from './execution-plan-fixture.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -34,7 +35,7 @@ async function harness(root: string, name: string): Promise<Harness> {
   const need = ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
   const node = ctx.pactflow.createNode(session.id, { id: 'node', needId: need.id, title: 'Node', dependencies: [] })
   const started = vi.fn()
-  const parent = { id: session.id, session }
+  const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
   ctx.provide('agents', { get: () => parent } as never)
   ctx.provide('subagents', {
     getProvider: () => ({ capabilities: { cwd: true } }),
@@ -64,6 +65,7 @@ describe('PactFlow local dispatch admission', () => {
       const originalAcquire = capacity.acquire.bind(capacity)
       const acquire = vi.fn((...args: unknown[]) => originalAcquire(...args))
       capacity.acquire = acquire
+      await approveExecutionPlanFixture(ctx, sessionId, 'commit', { kind: 'git', provider: 'spawn' }, 'node')
       const settled = await ctx.pactflow.dispatchGitNode(sessionId, {
         nodeId: 'node', expectedRevision: nodeRevision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'commit',
       })
@@ -89,6 +91,7 @@ describe('PactFlow local dispatch admission', () => {
       const resume = capacity.pauseAdmission()
       const live = ctx.sessions.get(sessionId)!
       let settledState: string | undefined
+      await approveExecutionPlanFixture(ctx, sessionId, 'commit', { kind: 'git', provider: 'spawn' }, 'node')
       const pending = ctx.pactflow.dispatchGitNode(sessionId, {
         nodeId: 'node', expectedRevision: nodeRevision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'commit',
       }).then(result => { settledState = result.run.state; return result }, () => undefined)

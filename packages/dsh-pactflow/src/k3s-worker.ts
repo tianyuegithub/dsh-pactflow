@@ -1,3 +1,6 @@
+import { StringDecoder } from 'node:string_decoder'
+import { PassThrough, Writable } from 'node:stream'
+import type { WorkerBridgeMessage, WorkerBridgeAnswer } from './worker-interaction-types.ts'
 /** K3s Job provider for immutable PactFlow Worker runs. */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -7,6 +10,7 @@ import {
   BatchV1Api,
   CoreV1Api,
   KubeConfig,
+  Exec,
   Observable,
   type ConfigurationOptions,
   type V1ConfigMap,
@@ -145,6 +149,7 @@ export function pactFlowK3sSpecDigest(
     modelSecretName: spec.modelSecretName, gitSecretName: spec.gitSecretName,
     cpuRequest: spec.cpuRequest, memoryRequest: spec.memoryRequest,
     cpuLimit: spec.cpuLimit, memoryLimit: spec.memoryLimit,
+    ...(spec.interactionProtocol ? { interactionProtocol: spec.interactionProtocol, interactionPublicKey: spec.interactionPublicKey, interactionRunId: spec.interactionRunId } : {}),
     activeDeadlineSeconds: spec.activeDeadlineSeconds,
     finishedJobTtlSeconds: spec.finishedJobTtlSeconds,
     runNonceHash: spec.runNonceHash, claimTokenHash: spec.claimTokenHash,
@@ -191,6 +196,7 @@ export type PactFlowK3sObservation =
 
 /** Host-side K3s client; Pods receive no API token and never write Session events. */
 export class PactFlowK3sWorker {
+  private readonly execClient: Exec
   private readonly batch: BatchV1Api
   private readonly core: CoreV1Api
   private readonly templates = new Map<string, PactFlowHarnessTemplateConfig>()
@@ -229,6 +235,7 @@ export class PactFlowK3sWorker {
       server: cluster?.server ?? '(unknown)',
       ca: createHash('sha256').update(caMaterial).digest('hex'),
     })).digest('hex')
+    this.execClient = new Exec(kubeconfig)
     this.batch = kubeconfig.makeApiClient(BatchV1Api)
     this.core = kubeconfig.makeApiClient(CoreV1Api)
   }
@@ -366,6 +373,7 @@ export class PactFlowK3sWorker {
       model: template.model,
       baseUrl: template.baseUrl,
       modelSecretName: template.modelSecretName,
+      ...(template.interactionProtocol ? { interactionProtocol: template.interactionProtocol } : {}),
       gitSecretName,
       inputSecretName: `dsh-pf-${suffix}-input`,
       ...(git === undefined ? {} : { expectedBranch: git.branch, expectedBaseCommit: git.baseCommit }),
@@ -1007,6 +1015,58 @@ export class PactFlowK3sWorker {
     return undefined
   }
 
+  /** A fixed image-owned connector, never a caller-supplied command. */
+  async openInteractionChannel(spec: PactFlowK3sRunSpec, receive: (message: WorkerBridgeMessage, podUid: string) => void,
+    disconnected: () => void): Promise<{ podUid: string; send(answer: WorkerBridgeAnswer): Promise<void>; close(): void } | undefined> {
+    if (spec.interactionProtocol !== 'dsh-worker-interactions/v1' || spec.harness !== 'dsh' || !spec.jobUid) throw new Error('Worker interaction capability is unavailable')
+    const job = await this.withRequestDeadline(options => this.batch.readNamespacedJob({ name: spec.jobName, namespace: spec.namespace }, options))
+    const mismatch = this.validateJobIdentity(spec, job)
+    if (mismatch) throw new Error(mismatch)
+    const pods = await this.withRequestDeadline(options => this.core.listNamespacedPod({ namespace: spec.namespace, labelSelector: `job-name=${spec.jobName}` }, options))
+    const pod = pods.items.find(pod => pod.status?.phase === 'Running' && this.ownsProbePod(pod, spec.jobName, spec.jobUid!))
+    if (!pod?.metadata?.name || !pod.metadata.uid) return undefined
+    const name = pod.metadata.name; const podUid = pod.metadata.uid
+    await this.ownedCleanupUid(spec, async () => pod)
+    if (pod.spec?.containers.find(container => container.name === 'worker')?.image !== spec.image) throw new Error('Worker image identity mismatch')
+    const input = new PassThrough(); const decoder = new StringDecoder('utf8'); let buffer = ''; let verified = false; let ended = false
+    const early: WorkerBridgeMessage[] = []
+    const output = new Writable({ write(chunk, _encoding, callback) {
+      buffer += decoder.write(chunk)
+      if (Buffer.byteLength(buffer) > 65536) { callback(new Error('Worker interaction frame exceeds limit')); return }
+      let end: number
+      try {
+        while ((end = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)
+          const message = JSON.parse(line) as WorkerBridgeMessage
+          if (verified) receive(message, podUid)
+          else { if (early.length >= 4) throw new Error('Worker interaction handshake flood'); early.push(message) }
+        }
+        callback()
+      } catch { callback(new Error('Invalid worker interaction frame')) }
+    } })
+    const discard = new Writable({ write(_chunk, _encoding, callback) { callback() } })
+    const end = () => { if (!ended) { ended = true; input.destroy(); disconnected() } }
+    let established: { close(): void } | undefined
+    const close = () => { input.destroy(); established?.close(); end() }
+    output.on('error', close)
+    let timedOut = false
+    const opening = this.execClient.exec(spec.namespace, name, 'worker', ['node', '/opt/pactflow-worker/connect.mjs'], output, discard, input, false, () => end())
+    void opening.then(socket => { if (timedOut || ended) socket.close() }, () => {})
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { timedOut = true; close(); reject(new Error('Worker interaction connection timed out')) }, this.requestTimeoutMs) })
+    let socket: Awaited<typeof opening>
+    try { socket = await Promise.race([opening, timeout]) } finally { clearTimeout(timer) }
+    established = socket
+    socket.on('close', end); socket.on('error', end)
+    const verify = async () => {
+      const current = await this.withRequestDeadline(options => this.core.readNamespacedPod({ name, namespace: spec.namespace }, options))
+      if (current.metadata?.uid !== podUid) throw new Error('Worker Pod changed during interaction')
+      await this.ownedCleanupUid(spec, async () => current)
+    }
+    try { await verify(); verified = true; for (const message of early) receive(message, podUid) } catch (error) { close(); throw error }
+    return { podUid, close, send: async answer => { await verify(); if (ended) throw new Error('Worker interaction disconnected'); input.write(JSON.stringify(answer) + '\n') } }
+  }
+
   /** Wait for a Job created before the current Host activation. */
   async waitExisting(spec: PactFlowK3sRunSpec, signal: AbortSignal): Promise<PactFlowK3sResult> {
     return await this.waitForResult(spec, signal, false)
@@ -1167,6 +1227,7 @@ export class PactFlowK3sWorker {
       metadata: { name: spec.configMapName, namespace: spec.namespace, labels: this.labels(spec), annotations: this.annotations(spec) },
       data: {
         'worker.sh': WORKER_SCRIPT,
+        ...(spec.interactionProtocol ? { 'interaction-public-key.pem': spec.interactionPublicKey! } : {}),
       },
     }
   }
@@ -1407,9 +1468,14 @@ export class PactFlowK3sWorker {
 
   private modelEnvironment(spec: Pick<
     PactFlowK3sRunSpec,
-    'harness' | 'apiMode' | 'model' | 'baseUrl' | 'modelSecretName' | 'activeDeadlineSeconds'
+    'harness' | 'apiMode' | 'model' | 'baseUrl' | 'modelSecretName' | 'activeDeadlineSeconds' | 'interactionProtocol' | 'interactionRunId'
   >): V1EnvVar[] {
     const common: V1EnvVar[] = [
+      ...(spec.interactionProtocol ? [
+        { name: 'PACTFLOW_INTERACTION_PROTOCOL', value: spec.interactionProtocol },
+        { name: 'PACTFLOW_RUN_ID', value: spec.interactionRunId ?? '' },
+        { name: 'PACTFLOW_POD_UID', valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } } },
+      ] : []),
       { name: 'WORKER_TYPE', value: spec.harness },
       { name: 'MODEL', value: spec.model },
       { name: 'HARNESS_TIMEOUT_SECONDS', value: String(Math.max(1, spec.activeDeadlineSeconds - 30)) },
@@ -1779,6 +1845,7 @@ export class PactFlowK3sWorker {
   private validateTemplate(template: PactFlowHarnessTemplateConfig): void {
     this.requireDnsName('template id', template.id)
     this.requireDnsName('modelSecretName', template.modelSecretName)
+    if (template.interactionProtocol !== undefined && (template.harness !== 'dsh' || template.interactionProtocol !== 'dsh-worker-interactions/v1')) throw new Error('Unsupported worker interaction protocol')
     if (PACTFLOW_HARNESS_API_MODE[template.harness] !== template.apiMode) {
       throw new Error(`PactFlow Harness ${template.harness} does not support ${template.apiMode}`)
     }
@@ -1910,7 +1977,11 @@ done < /tmp/code-inputs.txt
 BASELINE_COMMIT="$(git -C /workspace/repo rev-parse HEAD)"
 cd /workspace/repo
 set +e
-PROMPT_PATH=/tmp/prompt.txt /usr/local/bin/pactflow-harness-runner.sh
+if [ "$(printenv PACTFLOW_INTERACTION_PROTOCOL)" = "dsh-worker-interactions/v1" ]; then
+    PROMPT_PATH=/tmp/prompt.txt /opt/pactflow-worker/runner.sh
+else
+    PROMPT_PATH=/tmp/prompt.txt /usr/local/bin/pactflow-harness-runner.sh
+fi
 AGENT_EXIT_CODE=$?
 set -e
 HARNESS_VERSION="$(cat /tmp/harness-version.txt 2>/dev/null || true)"

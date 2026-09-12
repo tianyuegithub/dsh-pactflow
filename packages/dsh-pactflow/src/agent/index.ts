@@ -65,6 +65,45 @@ export function apply(ctx: Context): void {
   })
 
   ctx.tools.register(defineTool({
+    name: 'pactflow_block_autopilot',
+    description: 'Report a concrete blocker and pause an active scoped autopilot. This never grants, resumes or increases authority or budget.',
+    parameters: { need_id: { type: 'string', required: true }, reason: { type: 'string', required: true } },
+    output: OUTPUT,
+    execute(args, exec) {
+      ctx.pactflow.blockAutopilot(requireSessionId(exec.agent?.session.id), args.need_id, args.reason)
+      return Promise.resolve({ blocked: true })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'pactflow_confirm_execution_plan',
+    description: 'Before any Worker dispatch, present concrete execution plans for native human selection. Prefer one complete delivery node including implementation, tests and records; split only for concrete independent benefit. The Host creates the selected nodes and records approval. Do not use for ordinary read-only questions. Use the exact approved node prompts/routes when dispatching; cancellation/custom feedback does not authorize work.',
+    parameters: {
+      need_id: { type: 'string', required: true },
+      recommended_id: { type: 'string', required: true },
+      plans: { type: 'array', required: true, items: { type: 'object', additionalProperties: true,
+        properties: {
+          id: { type: 'string', required: true }, mode: { type: 'string', required: true, enum: ['single', 'split'] },
+          summary: { type: 'string', required: true }, rationale: { type: 'string', required: true },
+          nodes: { type: 'array', required: true, items: { type: 'object', additionalProperties: true, properties: {
+            id: { type: 'string', required: true }, title: { type: 'string', required: true },
+            prompt: { type: 'string', required: true, description: 'Complete bounded Worker instruction including validation and task-branch commit; dispatched verbatim.' },
+            acceptance: { type: 'array', required: true, items: { type: 'string' } },
+            dependencies: { type: 'array', required: true, items: { type: 'string' } },
+            codeInputs: { type: 'array', required: true, items: { type: 'string' }, description: 'Subset of dependencies whose exact commits this node consumes.' },
+            execution: { type: 'object', required: true, additionalProperties: true, description: 'For K3s: {kind:"k3s",templateId,agentProfileId?,modelConnectionId?,workerPoolId?}; for local Git: {kind:"git",provider,recovery?:{runId,digest}}. Recovery must refer to an available retained candidate returned by pactflow_local_recovery_candidates. Select registered resources only.' },
+          } } },
+        } } },
+    },
+    output: OUTPUT,
+    async execute(args, exec) {
+      if (exec.agent === undefined) throw new Error('Execution plan confirmation requires a calling Agent')
+      return jsonObject(await ctx.pactflow.confirmExecutionPlan(exec.agent, exec.callId,
+        { needId: args.need_id, recommendedId: args.recommended_id, plans: args.plans }, exec.signal))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_bind_git',
     description: 'Bind the current Session workspace to an existing credential-free Git remote and remote-tracking default branch.',
     parameters: {
@@ -118,7 +157,7 @@ export function apply(ctx: Context): void {
     output: OUTPUT,
     async execute(_args, exec) {
       const sessionId = requireSessionId(exec.agent?.session.id)
-      return jsonObject(await ctx.pactflow.snapshot(sessionId))
+      return jsonObject({ ...await ctx.pactflow.snapshot(sessionId), executionOptions: await ctx.pactflow.executionOptions(sessionId) })
     },
   }))
 
@@ -135,7 +174,7 @@ export function apply(ctx: Context): void {
       return jsonObject(await ctx.pactflow.closeGitNeed(requireSessionId(exec.agent?.session.id), {
         needId: args.need_id,
         expectedRevision: args.expected_revision,
-      }))
+      }, exec.signal))
     },
   }))
 
@@ -187,6 +226,11 @@ export function apply(ctx: Context): void {
     async execute(args, exec) {
       const agent = exec.agent
       if (agent === undefined) throw new Error('PactFlow review approval requires a calling Agent')
+      const automatic = await ctx.pactflow.tryAutopilotReview(String(agent.session.id), {
+        needId: args.need_id, expectedRevision: args.expected_revision, kind: args.kind, decision: args.decision, note: args.note,
+      })
+      if (automatic !== null) return jsonObject(automatic)
+      if (args.kind === 'plan' && args.decision === 'approved') throw new Error('请使用 pactflow_confirm_execution_plan 选择并批准具体执行方案，不要重复发起通用计划审批')
       const sessionId = requireSessionId(agent.session.id)
       const note = pactFlowReviewNote(args.note)
       const evidenceDigest = pactFlowReviewEvidenceDigest(
@@ -245,7 +289,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'pactflow_create_node',
-    description: 'Create one DAG node under an existing Need. Dependencies must name existing nodes in the same Need.',
+    description: 'Create a node only for an explicit independent deliverable, never a mere implementation/test/documentation step. Prefer pactflow_confirm_execution_plan, which creates the user-selected nodes. Adding a node invalidates prior execution approval. Dependencies must name existing nodes in the same Need.',
     parameters: {
       id: { type: 'string', required: true, description: 'Unique lower-kebab-case node id.' },
       need_id: { type: 'string', required: true },
@@ -288,24 +332,36 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'pactflow_local_recovery_candidates',
+    description: 'Read retained failed local candidates for one node. Returns provenance and content digests only. Select one candidate in a newly confirmed execution plan; never mark old failed runs successful.',
+    parameters: { node_id: { type: 'string', required: true } },
+    output: OUTPUT,
+    async execute(args, exec) { return jsonObject({ candidates: await ctx.pactflow.localRecoveryCandidates(requireSessionId(exec.agent?.session.id), args.node_id) }) },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_dispatch_git',
-    description: 'Create a Host-owned task branch/worktree, execute one DSH Subagent there, and succeed only when it leaves a clean descendant commit.',
+    description: 'Create a Host-owned independent task repository, check the native sandbox and toolchain, execute one DSH Subagent there, and succeed only when it leaves a clean descendant commit. Optional retained candidate must match the confirmed execution route recovery reference.',
     parameters: {
       node_id: { type: 'string', required: true },
       expected_revision: { type: 'integer', required: true },
       provider: { type: 'string', required: true, description: 'Installed Provider that advertises per-run cwd support.' },
       prompt: { type: 'string', required: true, description: 'Complete Worker instruction that explicitly requires editing, testing, and committing in the supplied worktree.' },
       lease_duration_ms: { type: 'integer', required: true, description: 'Lease duration from 1000 through 86400000.' },
+      recovery_run_id: { type: 'string', description: 'Optional retained failed Run selected in the confirmed execution route recovery.runId.' },
+      recovery_digest: { type: 'string', description: 'Exact candidate content digest in the confirmed execution route recovery.digest.' },
     },
     output: OUTPUT,
     timeoutMs: 86_400_000,
     async execute(args, exec) {
+      if ((args.recovery_run_id === undefined) !== (args.recovery_digest === undefined)) throw new Error('恢复运行与摘要必须同时提供')
       return jsonObject(await ctx.pactflow.dispatchGitNodeWithSignal(requireSessionId(exec.agent?.session.id), {
         nodeId: args.node_id,
         expectedRevision: args.expected_revision,
         provider: args.provider,
         prompt: args.prompt,
         leaseDurationMs: args.lease_duration_ms,
+        ...(args.recovery_run_id && args.recovery_digest ? { recovery: { runId: args.recovery_run_id, digest: args.recovery_digest } } : {}),
       }, exec.signal))
     },
   }))

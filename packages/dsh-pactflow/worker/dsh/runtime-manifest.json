@@ -1,0 +1,7 @@
+{
+  "protocol": "dsh-worker-interactions/v1",
+  "adapterVersion": "1.0.0",
+  "dshVersion": "0.1.1-rc.2",
+  "questionApi": "provider-v1",
+  "baseImage": "192.168.31.200:8080/datavdl/pactflow-worker@sha256:3342bb490d91ff8e39255e4b0e477967f4ccd9c7fb4380a1ec13cc654debdcea"
+}

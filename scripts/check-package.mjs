@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const FORBIDDEN_PREFIXES = ['node_modules/', 'packages/', 'src/', 'tests/', 'test/', 'e2e/']
@@ -68,8 +68,20 @@ const packageRoot = resolve(root, 'packages/dsh-pactflow')
 
 export function checkPackage() {
 const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+const runtimeManifest = JSON.parse(readFileSync(join(packageRoot, 'worker/dsh/runtime-manifest.json'), 'utf8'))
+const releaseManifest = JSON.parse(readFileSync(join(packageRoot, 'worker/dsh/release-manifest.json'), 'utf8'))
+for (const field of ['protocol', 'adapterVersion', 'dshVersion', 'questionApi']) {
+  if (releaseManifest[field] !== runtimeManifest[field]) throw new Error(`worker release manifest disagrees on ${field}`)
+}
+if (!/^.+@sha256:[a-f0-9]{64}$/.test(releaseManifest.image)) throw new Error('worker release image is not immutable')
 const required = [
   'lib/index.js',
+  'lib/worker/plugin.js',
+  'lib/worker/connect.js',
+  'worker/dsh/runtime-manifest.json',
+  'worker/dsh/release-manifest.json',
+  'worker/dsh/Dockerfile',
+  'worker/dsh/runner.mjs',
   'lib/client.js',
   'lib/typert.host.js',
   'lib/typert.host.d.ts',
@@ -111,7 +123,18 @@ try {
   execFileSync('npm', ['pack', '--pack-destination', staging], { cwd: packageRoot, stdio: ['ignore', 'ignore', 'inherit'] })
   const tarball = readdirSync(staging).find(name => name.endsWith('.tgz'))
   if (tarball === undefined) throw new Error('npm pack produced no tarball')
-  assertArtifactManifest(tarballEntries(join(staging, tarball)), required, declaredEntries(manifest))
+  const packedPath = join(staging, tarball)
+  const paths = assertArtifactManifest(tarballEntries(packedPath), required, declaredEntries(manifest))
+  // Multi-entry builds share chunks. Check the exact packed import closure, so
+  // matching entry files alone cannot hide a missing shared runtime chunk.
+  const present = new Set(paths)
+  for (const file of paths.filter(path => path.endsWith('.js'))) {
+    const source = execFileSync('tar', ['-xOf', packedPath, `package/${file}`], { encoding: 'utf8' })
+    for (const match of source.matchAll(/(?:from\s*|import\s*)(['"])(\.\.?\/[^'"]+)\1/g)) {
+      const dependency = posix.normalize(posix.join(posix.dirname(file), match[2]))
+      if (!present.has(dependency)) throw new Error(`packed module ${file} imports missing ${dependency}`)
+    }
+  }
 } finally {
   rmSync(staging, { recursive: true, force: true })
 }

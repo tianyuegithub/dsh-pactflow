@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture } from '../packages/dsh-pactflow/tests/execution-plan-fixture.ts'
 /**
  * Multi-process crash-restart driver (authorized B-class run).
  *
@@ -70,6 +71,7 @@ async function start() {
   })
 
   // Real dispatch; we do NOT await it — the parent kills us while the Job is live.
+  await approveExecutionPlanFixture(ctx, session.id, 'Create crash-restart-proof.txt containing CRASH OK and commit it. Do not modify any other file, switch branches, merge, or deploy.', { kind: 'k3s', templateId: 'dsh-deepseek-v4flash' }, node.id)
   void ctx.pactflow.dispatchK3sNode(session.id, {
     nodeId: node.id, expectedRevision: ctx.pactflow.dag(session.id).byId.node.revision,
     templateId: 'dsh-deepseek-v4flash', leaseDurationMs: 600_000,

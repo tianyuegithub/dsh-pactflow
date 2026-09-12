@@ -10,6 +10,7 @@
     "src/client/index.tsx",
     "src/client/locale.ts",
     "src/client/overlay.tsx",
+    "src/client/autopilot-controls.tsx",
     "src/client/resource-model.ts",
     "src/client/styles.ts",
     "src/client/settings-contract.ts",
@@ -30,6 +31,11 @@
     "src/client/card-drafts.ts",
     "src/schema.ts",
     "src/harness-discovery.ts",
-    "src/types.ts"
+    "src/types.ts",
+    "src/worker-interaction-types.ts",
+    "src/client/worker-interactions.tsx",
+    "src/client/workbench-styles.ts",
+    "src/client/workbench-labels.ts",
+    "src/client/session-workbench-view.tsx"
   ]
 }

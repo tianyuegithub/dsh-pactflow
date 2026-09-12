@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture } from '../tests/execution-plan-fixture.ts'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -102,6 +103,11 @@ describe.skipIf(!enabled)('PactFlow K3s full Harness task matrix', { timeout: 90
       })
       const file = `${template.id}-k3s-e2e-proof.txt`
       const content = `${template.id.toUpperCase()} K3S OK\n`
+      await approveExecutionPlanFixture(ctx, session.id, [
+          `Create ${file} containing exactly ${content.trim()} followed by a newline.`,
+          `Run test -f ${file}, git add ${file}, and commit with message ${template.id} k3s e2e.`,
+          'Do not modify another file, switch branches, merge, or deploy.',
+        ].join(' '), { kind: 'k3s', templateId: template.id }, node.id)
       const settled = await ctx.pactflow.dispatchK3sNode(session.id, {
         nodeId: node.id, expectedRevision: node.revision, templateId: template.id,
         leaseDurationMs: 600_000,

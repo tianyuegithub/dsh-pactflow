@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture, unconfinedWorkerContextFixture } from './execution-plan-fixture.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
@@ -122,13 +123,14 @@ describe('PactFlow retention status end to end', () => {
       await ctx.pactflow.bindGit(session.id, { expectedRevision: initialized.revision, remote: 'origin', defaultBranch: 'main' })
       const need = ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
       const node = ctx.pactflow.createNode(session.id, { id: 'node', needId: need.id, title: 'Node', dependencies: [] })
-      const parent = { id: session.id, session }
+      const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
       ctx.provide('agents', { get: () => parent } as never)
       ctx.provide('subagents', {
         getProvider: () => ({ capabilities: { cwd: true } }),
         start: () => Promise.reject(new Error('local worker failed')),
       } as never)
 
+      await approveExecutionPlanFixture(ctx, session.id, 'commit', { kind: 'git', provider: 'spawn' }, node.id)
       const settled = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: node.id, expectedRevision: node.revision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'commit',
       })

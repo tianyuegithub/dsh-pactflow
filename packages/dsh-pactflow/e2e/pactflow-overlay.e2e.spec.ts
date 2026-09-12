@@ -1,12 +1,13 @@
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
   launchWebScaffold,
   seedSession,
@@ -15,6 +16,7 @@ import {
 import { newEnglishPage } from '../../../../deepseek-harness-pactflow-p0/apps/web/tests/support.ts'
 import { PACTFLOW_EVENT_TYPES_V0_1 } from '../src/domain.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { executionDigest } from '../src/execution-plan.ts'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SEED_ID = 'pactflow-overlay-e2e'
@@ -40,7 +42,7 @@ async function localBundleAnchor(): Promise<{ readonly directory: string, readon
 
 function seedLog(): string {
   const createdAt = 1_788_000_000_000
-  const need = { id: 'need-e2e', title: 'Need title', description: 'Browser evidence',
+  const need = { id: 'need-e2e', title: 'Need title', description: `Browser evidence\n${'完整需求原文用于验证长文本折叠，不应遮蔽执行状态。'.repeat(40)}\nLONG_DETAIL_END`,
     phase: 'backlog', revision: 1, createdAt, updatedAt: createdAt }
   const event = (seq: number, type: string, data: unknown): string => JSON.stringify({
     type, seq, time: createdAt + seq, data,
@@ -113,6 +115,12 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     if (bundleAnchor !== undefined) await rm(bundleAnchor.directory, { recursive: true, force: true })
   })
 
+  afterEach(async () => {
+    if (!page) return
+    const pane = page.getByRole('dialog', { name: 'PactFlow', exact: true })
+    if (await pane.count() > 0) await pane.getByRole('button', { name: 'Close', exact: true }).click()
+  })
+
   it('shows the conditional entry and renders real Projection tables', async () => {
     await page.getByRole('treeitem', { name: /^Ungrouped/ }).click()
     await page.locator('[role="treeitem"]').last().click()
@@ -124,14 +132,90 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     await dialog.waitFor({ timeout: 15_000 })
     await expect.poll(async () => await dialog.textContent(), { timeout: 15_000 })
       .toContain('Seeded Project')
-    for (const text of ['Seeded Project', 'Need title', 'Node title', '等待派发']) {
-      const content = dialog.getByText(text, { exact: true }).first()
-      await content.waitFor({ timeout: 15_000 })
-      expect(await content.count()).toBeGreaterThan(0)
+    expect(await dialog.getByLabel('选择需求', { exact: true }).inputValue()).toBe('need-e2e')
+    const descriptionDetails = dialog.locator('details').filter({ hasText: '完整需求说明' })
+    expect(await descriptionDetails.getAttribute('open')).toBeNull()
+    expect(await dialog.getByText(/LONG_DETAIL_END/).isVisible()).toBe(false)
+    await descriptionDetails.locator('summary').click()
+    expect(await dialog.getByText(/LONG_DETAIL_END/).isVisible()).toBe(true)
+    await descriptionDetails.locator('summary').click()
+    for (const text of ['Seeded Project', 'Node title', '等待派发']) {
+      await dialog.getByText(text, { exact: true }).first().waitFor({ timeout: 15000 })
     }
+    expect(await dialog.getByText('Worker Pool capacity', { exact: true }).count()).toBe(0)
+    expect(await dialog.getByRole('button', { name: 'API test', exact: true }).count()).toBe(0)
+    await dialog.getByRole('button', { name: '挂机设置', exact: true }).click()
+    const autopilot = dialog.getByRole('region', { name: '按需求挂机控制' })
+    await autopilot.getByText('调整预算', { exact: true }).click()
+    expect(await autopilot.getByLabel('编排模型调用次数（1—1000）').inputValue()).toBe('60')
+    expect(await autopilot.getByRole('button', { name: '准备挂机', exact: true }).isVisible()).toBe(true)
+    await dialog.getByRole('tab', { name: '进展', exact: true }).click()
     if (process.env.PACTFLOW_WEB_EVIDENCE_DIR !== undefined) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'overlay.png') })
     expect(await page.locator('vite-error-overlay').count()).toBe(0)
     expect(browserErrors).toEqual([])
+  })
+
+  it('uses native theme surfaces and traps keyboard focus without losing the composer draft', async () => {
+    const composer = page.locator('[data-composer-input][contenteditable="true"]').last()
+    await composer.fill('未发送的界面验收草稿')
+    await page.emulateMedia({ colorScheme: 'dark' })
+    const open = page.getByRole('button', { name: 'Open PactFlow', exact: true })
+    await open.click()
+    const dialog = page.getByRole('dialog', { name: 'PactFlow', exact: true })
+    await dialog.getByRole('tab', { name: '进展', exact: true }).waitFor()
+    const surface = () => dialog.evaluate(element => {
+      const style = getComputedStyle(element)
+      const probe = document.createElement('span')
+      probe.style.color = 'var(--dsw-alias-bg-layer-2)'; element.append(probe)
+      const expected = getComputedStyle(probe).color; probe.remove()
+      return { actual: style.backgroundColor, expected }
+    })
+    await expect.poll(async () => { const s = await surface(); return s.actual === s.expected }).toBe(true)
+    const dark = (await surface()).actual
+    for (let count = 0; count < 14; count++) {
+      await page.keyboard.press(count < 7 ? 'Tab' : 'Shift+Tab')
+      expect(await dialog.evaluate(element => element.contains(document.activeElement))).toBe(true)
+    }
+    if (process.env.PACTFLOW_WEB_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'workbench-progress-dark.png') })
+    await page.emulateMedia({ colorScheme: 'light' })
+    await expect.poll(async () => (await surface()).actual).not.toBe(dark)
+    const light = await surface(); expect(light.actual).toBe(light.expected)
+    await dialog.getByRole('tab', { name: '验收交付', exact: true }).click()
+    await dialog.getByText('评审决定', { exact: true }).waitFor()
+    if (process.env.PACTFLOW_WEB_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'workbench-delivery-light.png') })
+    await page.setViewportSize({ width: 390, height: 844 })
+    expect(await dialog.evaluate(element => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    if (process.env.PACTFLOW_WEB_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'workbench-mobile.png') })
+    await page.keyboard.press('Escape')
+    expect(await dialog.count()).toBe(0)
+    expect(await open.evaluate(element => document.activeElement === element)).toBe(true)
+    expect(await composer.textContent()).toBe('未发送的界面验收草稿')
+    await composer.fill('')
+    await page.setViewportSize({ width: 1280, height: 900 })
+  })
+
+  it('rejects an autopilot preview for another Need or revision before showing authorization', async () => {
+    const previewRoute = '**/api/pactflow/autopilotPreview'
+    let wrongRevision = false
+    await page.route(previewRoute, async route => {
+      const rpcId = route.request().postDataJSON().rpcId
+      await route.fulfill({ json: { type: 'server-response', rpcId, result: { ok: true, value: {
+        needId: wrongRevision ? 'need-e2e' : 'another-need', needRevision: wrongRevision ? 999 : 5,
+        title: 'Wrong preview', description: '', repository: 'fixture', branch: 'main',
+        scopeDigest: 'a'.repeat(64), executionOptions: [], validationProfiles: [],
+      } } } })
+    })
+    try {
+      await page.getByRole('button', { name: 'Open PactFlow' }).click()
+      const pane = page.getByRole('dialog', { name: 'PactFlow', exact: true })
+      await pane.getByRole('button', { name: '挂机设置', exact: true }).click()
+      for (const revisionMismatch of [false, true]) {
+        wrongRevision = revisionMismatch
+        await pane.getByRole('button', { name: '准备挂机', exact: true }).click()
+        await pane.getByText('挂机预览与当前需求不匹配，请刷新后重试', { exact: true }).waitFor()
+        expect(await pane.getByRole('button', { name: '授权并开始挂机', exact: true }).count()).toBe(0)
+      }
+    } finally { await page.unroute(previewRoute) }
   })
 
   it('updates the open overlay from live Host projection changes without reopening', async () => {
@@ -162,6 +246,11 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     await page.getByRole('button', { name: 'Open PactFlow' }).click()
     const dialog = page.getByRole('dialog', { name: 'PactFlow' })
     await expect.poll(() => dialog.textContent(), { timeout: 5_000 }).toContain('Live Project')
+    await dialog.getByText('尚未开始执行需求', { exact: true }).waitFor()
+    expect(await dialog.getByLabel('编排模型调用次数（1—1000）').count()).toBe(0)
+    expect(await dialog.getByText('暂无数据', { exact: true }).count()).toBe(0)
+    if (process.env.PACTFLOW_WEB_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'workbench-empty-light.png') })
+
     const response = await scaffold.hostFetch('/api/pactflow/createNeed', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'client-request', rpcId: 'pactflow-live-need', method: 'pactflow/createNeed',
@@ -210,13 +299,16 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     await expect.poll(() => dialog.textContent(), { timeout: 10_000 }).toContain('Readonly Project')
 
     // A05: the retained scene (with its overdue flag) is visible read-only.
+    await dialog.getByRole('button', { name: /保留现场/ }).click()
     await expect.poll(() => dialog.textContent(), { timeout: 10_000 }).toContain('Retained scenes')
     const retentionText = await dialog.textContent()
     expect(retentionText).toContain('retained-scene')
 
     // A12-c: the export entry renders the read-only handover summary, including
     // the package/reader versions that make an old log traceable.
-    await dialog.getByRole('button', { name: 'Export handover summary' }).click()
+    await dialog.getByRole('button', { name: '移交摘要', exact: true }).click()
+    await dialog.getByRole('button', { name: '生成移交摘要', exact: true }).click()
+    await dialog.getByText('结构化数据', { exact: true }).click()
     const summary = dialog.locator('[data-handover="summary"]')
     await summary.waitFor({ timeout: 10_000 })
     const summaryText = (await summary.textContent()) ?? ''
@@ -262,6 +354,7 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
       await page.getByRole('treeitem').filter({ hasText: 'Live projection session' }).last().click()
       await page.getByRole('button', { name: 'Open PactFlow' }).click()
       const dialog = page.getByRole('dialog', { name: 'PactFlow' })
+      await dialog.getByRole('tab', { name: '验收交付', exact: true }).click()
       await dialog.getByRole('button', { name: 'Verify Gitea' }).click()
       await expect.poll(() => received, { timeout: 5_000 }).toBe(stage === 'repository' ? 1 : 2)
       await dialog.getByRole('button', { name: 'Close' }).click()
@@ -410,6 +503,7 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     await page.getByRole('treeitem').filter({ hasText: 'Live projection session' }).last().click()
     await page.getByRole('button', { name: 'Open PactFlow' }).click()
     const dialog = page.getByRole('dialog', { name: 'PactFlow' })
+    await dialog.getByRole('button', { name: '运行诊断', exact: true }).click()
     await expect.poll(() => dialog.textContent(), { timeout: 5_000 })
       .toContain(`修订 ${String(firstRevision)}`)
     // Change the workspace configuration while the overlay is open. The
@@ -467,5 +561,227 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
       expect(browserErrors).toEqual([])
       await projectPanel.getByRole('button', { name: '关闭', exact: true }).click()
     } finally { await page.setViewportSize({ width: 1680, height: 1000 }) }
+  })
+
+  it('distinguishes list and catalog failures from empty results and ignores a previous opening response', async () => {
+    const loadingPage = await newEnglishPage(browser)
+    const directory = join(scaffold.workspaceCwd, 'panel-reopen')
+    await mkdir(directory, { recursive: true })
+    const workspace = (await scaffold.ctx.workspaceController.create({ path: directory })).workspace
+    let failList = true
+    let failCatalog = true
+    let releaseOld!: () => void
+    const oldGate = new Promise<void>(resolve => { releaseOld = resolve })
+    let oldStarted = false
+    let oldCaptured = false
+    let oldFinished = false
+    await loadingPage.route('**/api/pactflow/listWorkspaceProjectSummaries', async route => {
+      if (failList) await route.abort()
+      else await route.continue()
+    })
+    await loadingPage.route('**/api/pactflow/listModelConnections', async route => {
+      if (failCatalog) await route.abort()
+      else await route.continue()
+    })
+    await loadingPage.route('**/api/pactflow/workspaceProjectDetails', async route => {
+      const id = route.request().postDataJSON().payload.args.workspaceId
+      const hold = id === workspace.workspaceId && !oldStarted
+      if (hold) oldStarted = true
+      const response = await route.fetch()
+      if (hold) { oldCaptured = true; await oldGate }
+      await route.fulfill({ response })
+      if (hold) oldFinished = true
+    })
+    try {
+      await loadingPage.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+      const open = loadingPage.getByRole('button', { name: '零脉项目', exact: true })
+      await open.click()
+      const panel = loadingPage.getByRole('dialog', { name: '零脉项目', exact: true })
+      await panel.getByRole('button', { name: '重试工作区列表' }).waitFor()
+      await panel.getByRole('button', { name: '重试资源目录' }).waitFor()
+      expect(await panel.getByText('尚无工作区。', { exact: true }).count()).toBe(0)
+      failList = false
+      await panel.getByRole('button', { name: '重试工作区列表' }).click()
+      const row = panel.getByRole('navigation', { name: '工作区项目' }).getByRole('button', { name: /panel-reopen/ })
+      await row.click()
+      await expect.poll(() => oldCaptured).toBe(true)
+      await panel.getByRole('button', { name: '关闭', exact: true }).click()
+      await panel.waitFor({ state: 'detached' })
+      execFileSync('git', ['init', '-b', 'main', directory], { stdio: 'ignore' })
+      await open.click()
+      await panel.getByText('已初始化', { exact: true }).waitFor()
+      failCatalog = false
+      const catalogResponse = loadingPage.waitForResponse(response => response.url().endsWith('/api/pactflow/listModelConnections') && response.status() === 200)
+      await panel.getByRole('button', { name: '重试资源目录' }).click()
+      await catalogResponse
+      await panel.getByRole('button', { name: '重试资源目录' }).waitFor({ state: 'hidden' })
+      await panel.getByText('正在加载资源目录…', { exact: true }).waitFor({ state: 'hidden' })
+      expect(await panel.getByRole('button', { name: '重试资源目录' }).count()).toBe(0)
+      releaseOld()
+      await expect.poll(() => oldFinished).toBe(true)
+      expect(await panel.getByText('已初始化', { exact: true }).isVisible()).toBe(true)
+      expect(await panel.getByText('未初始化', { exact: true }).count()).toBe(0)
+    } finally { releaseOld(); await loadingPage.close() }
+  })
+
+  it('renders navigation before slow details and catalogs, isolates late selection responses, and retries failures', async () => {
+    // Isolated browser transport gates delay real Host results; no fabricated
+    // successful payloads, session replay, or Git facts replace the real path.
+    const loadingPage = await newEnglishPage(browser)
+    const a = join(scaffold.workspaceCwd, 'panel-loading-a')
+    const b = join(scaffold.workspaceCwd, 'panel-loading-b')
+    await mkdir(a, { recursive: true }); await mkdir(b, { recursive: true })
+    execFileSync('git', ['init', '-b', 'main', a], { stdio: 'ignore' })
+    const wa = (await scaffold.ctx.workspaceController.create({ path: a })).workspace
+    const wb = (await scaffold.ctx.workspaceController.create({ path: b })).workspace
+    let releaseDetails!: () => void
+    let releaseCatalog!: () => void
+    const detailGate = new Promise<void>(resolve => { releaseDetails = resolve })
+    const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
+    let catalogReleased = false
+    let failDetails = false
+    let migrationCalls = 0
+    let failMigration = true
+    const detailRequests: string[] = []
+    let lateResponses = 0
+    await loadingPage.route('**/api/pactflow/workspaceProjectDetails', async route => {
+      const id = route.request().postDataJSON().payload.args.workspaceId as string
+      detailRequests.push(id)
+      if (failDetails) { await route.abort(); return }
+      const response = await route.fetch()
+      if (id !== wb.workspaceId) await detailGate
+      await route.fulfill({ response })
+      if (id !== wb.workspaceId) lateResponses += 1
+    })
+    await loadingPage.route('**/api/pactflow/listModelConnections', async route => {
+      const response = await route.fetch()
+      await catalogGate
+      await route.fulfill({ response })
+      catalogReleased = true
+    })
+    await loadingPage.route('**/api/pactflow/workspaceMigrationCandidates', async route => {
+      migrationCalls += 1
+      if (failMigration) await route.abort()
+      else await route.continue()
+    })
+    try {
+      await loadingPage.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+      await loadingPage.getByRole('button', { name: '零脉项目', exact: true }).click()
+      const panel = loadingPage.getByRole('dialog', { name: '零脉项目', exact: true })
+      const nav = panel.getByRole('navigation', { name: '工作区项目' })
+      await nav.getByRole('button', { name: /panel-loading-a/ }).waitFor({ timeout: 5_000 })
+      expect(await panel.getByText('尚无工作区。', { exact: true }).count()).toBe(0)
+      expect(await panel.getByText('正在加载项目详情…', { exact: true }).isVisible()).toBe(true)
+      expect(catalogReleased).toBe(false)
+      expect(migrationCalls).toBe(0)
+      await nav.getByRole('button', { name: /panel-loading-a/ }).click()
+      await expect.poll(() => detailRequests).toContain(wa.workspaceId)
+      await nav.getByRole('button', { name: /panel-loading-b/ }).click()
+      await panel.getByRole('heading', { name: 'Git 仓库', exact: true }).waitFor({ timeout: 5_000 })
+      expect(await panel.getByRole('button', { name: '保存 Agent 策略', exact: true }).isEnabled()).toBe(false)
+      releaseDetails(); releaseCatalog()
+      await expect.poll(() => lateResponses).toBeGreaterThan(0)
+      // A is initialized, B is not: both the selected row AND its real Git
+      // facts must survive the delayed A response.
+      expect(await panel.getByText('未初始化', { exact: true }).isVisible()).toBe(true)
+      const selectedStyle = await nav.getByRole('button', { name: /panel-loading-b/ }).getAttribute('style')
+      expect(selectedStyle).not.toBe(await nav.getByRole('button', { name: /panel-loading-a/ }).getAttribute('style'))
+      await panel.getByRole('button', { name: '查询迁移候选', exact: true }).click()
+      await panel.getByRole('button', { name: '重试迁移候选', exact: true }).waitFor()
+      expect(await panel.getByText('当前工作区没有可迁移的会话配置。').count()).toBe(0)
+      failMigration = false
+      await panel.getByRole('button', { name: '重试迁移候选', exact: true }).click()
+      await panel.getByText('当前工作区没有可迁移的会话配置。').waitFor()
+      expect(migrationCalls).toBe(2)
+      failDetails = true
+      await nav.getByRole('button', { name: /panel-loading-a/ }).click()
+      await panel.getByRole('button', { name: '重试项目详情', exact: true }).waitFor()
+      expect(await panel.getByRole('heading', { name: 'Git 仓库', exact: true }).count()).toBe(0)
+      failDetails = false
+      await panel.getByRole('button', { name: '重试项目详情', exact: true }).click()
+      await panel.getByRole('heading', { name: 'Git 仓库', exact: true }).waitFor()
+      expect(await panel.getByText('已初始化', { exact: true }).isVisible()).toBe(true)
+    } finally {
+      releaseDetails(); releaseCatalog()
+      await loadingPage.close()
+    }
+  })
+  it('opens the current unconfigured workspace and never falls back to a different project', async () => {
+    const directory = join(scaffold.workspaceCwd, 'navigation-current')
+    await mkdir(directory, { recursive: true })
+    const workspace = (await scaffold.ctx.workspaceController.create({ path: directory })).workspace
+    const sessionId = SessionId('navigation-current-session')
+    await scaffold.ctx.sessionController.create({ sessionId, cwd: directory, agentPreset: 'pactflow' })
+    const session = scaffold.ctx.sessions.get(sessionId)!
+    session.append('turn/start', { turn: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'aborted' } })
+    await scaffold.ctx.sessionController.rename({ sessionId, title: 'Navigation session' })
+    await page.reload({ waitUntil: 'load' })
+    await page.getByRole('treeitem', { name: /^navigation-current/ }).click()
+    await page.getByRole('treeitem').filter({ hasText: 'Navigation session' }).last().click()
+    // Remember another project first; the workbench navigation must override it.
+    await page.getByRole('button', { name: '零脉项目', exact: true }).click()
+    const projectPanel = page.getByRole('dialog', { name: '零脉项目', exact: true })
+    await projectPanel.getByRole('navigation').getByRole('button', { name: /panel-loading-a/ }).click()
+    await projectPanel.getByRole('button', { name: '关闭', exact: true }).click()
+    const detailIds: string[] = []
+    const detailRoute = '**/api/pactflow/workspaceProjectDetails'
+    const listRoute = '**/api/pactflow/listWorkspaceProjectSummaries'
+    await page.route(detailRoute, async route => {
+      detailIds.push(route.request().postDataJSON().payload.args.workspaceId)
+      await route.continue()
+    })
+    try {
+      await page.getByRole('button', { name: 'Open PactFlow' }).click()
+      await page.getByRole('dialog', { name: 'PactFlow', exact: true }).getByRole('button', { name: '项目配置', exact: true }).click()
+      await projectPanel.getByRole('heading', { name: 'Git 仓库', exact: true }).waitFor()
+      expect(detailIds).toEqual([workspace.workspaceId])
+      expect(await projectPanel.getByText('未初始化', { exact: true }).isVisible()).toBe(true)
+      await projectPanel.getByRole('button', { name: '关闭', exact: true }).click()
+      // Isolate a stale/missing registry entry at the read boundary.
+      await page.route(listRoute, async route => {
+        const response = await route.fetch()
+        const body = await response.json()
+        body.result.value = body.result.value.filter((row: { workspaceId: string }) => row.workspaceId !== workspace.workspaceId)
+        await route.fulfill({ response, json: body })
+      })
+      detailIds.length = 0
+      await page.getByRole('button', { name: 'Open PactFlow' }).click()
+      await page.getByRole('dialog', { name: 'PactFlow', exact: true }).getByRole('button', { name: '项目配置', exact: true }).click()
+      await projectPanel.getByText('当前会话未匹配到已登记工作区，请从左侧明确选择要配置的工作区。').waitFor()
+      expect(detailIds).toEqual([])
+      expect(await projectPanel.getByRole('heading', { name: 'Git 仓库', exact: true }).count()).toBe(0)
+    } finally {
+      await page.unroute(detailRoute); await page.unroute(listRoute)
+      if (await projectPanel.count()) await projectPanel.getByRole('button', { name: '关闭', exact: true }).click()
+    }
+  })
+
+  it('disables pending interaction controls when their deadline passes without a host event', async () => {
+    // Boundary fixture: real Session projections and controls, no worker is dispatched.
+    const session = scaffold.ctx.sessions.get(SessionId('navigation-current-session'))!
+    const now = Date.now()
+    session.append('pactflow/need-created', { v: 1, need: { id: 'expiry-need', title: 'Expiry Need', description: '', phase: 'backlog', revision: 1, createdAt: now, updatedAt: now } })
+    const node = { id: 'expiry-node', needId: 'expiry-need', title: 'Expiry node', state: 'ready', revision: 1, dependencies: [], updatedAt: now }
+    session.append('pactflow/node-created', { v: 1, node })
+    const runId = `run-${randomUUID()}`
+    session.append('pactflow/run-claimed', { v: 1, node: { ...node, state: 'claimed', revision: 2 }, run: {
+      id: runId, nodeId: node.id, nodeRevision: 2, attempt: 1, provider: 'isolated-ui-fixture', claimId: 'expiry-claim', state: 'claimed', leaseDeadline: now + 60000, updatedAt: now,
+    } })
+    const request = { protocol: 'dsh-worker-interactions/v1' as const, bootId: 'expiry-boot', requestId: 'expiry-request', kind: 'approval' as const,
+      createdAt: now, expiresAt: now + 5000, title: 'Expiry approval fixture', detail: 'Do not execute' }
+    session.append('pactflow/worker-interaction', { v: 1, record: {
+      id: 'expiry-record', sessionId: session.id, needId: node.needId, runId, podUid: 'fixture-pod', revision: 1,
+      expiresAt: request.expiresAt, request, digest: executionDigest(request), state: 'pending', updatedAt: now, reason: '',
+    } })
+    await page.getByRole('button', { name: 'Open PactFlow' }).click()
+    const pane = page.getByRole('dialog', { name: 'PactFlow', exact: true })
+    const approve = pane.getByRole('button', { name: '批准', exact: true })
+    await approve.waitFor()
+    expect(await approve.isEnabled()).toBe(true)
+    await expect.poll(() => approve.isDisabled(), { timeout: 8000 }).toBe(true)
+    expect(await pane.getByRole('button', { name: '拒绝', exact: true }).isDisabled()).toBe(true)
+    expect(await pane.getByText('已过期：等待人工处理已达到期限', { exact: true }).isVisible()).toBe(true)
+    expect(scaffold.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')!.workerInteractions!['expiry-record']!.state).toBe('pending')
   })
 })

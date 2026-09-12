@@ -122,7 +122,17 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     name: 'sidebar.footer.action', id: 'pactflow-projects',
     inject: (): PactFlowProjectPanelFace => ({
       list: async () => {
-        const result = await pactflow.listWorkspaceProjects()
+        const result = await pactflow.listWorkspaceProjectSummaries()
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      details: async workspaceId => {
+        const result = await pactflow.workspaceProjectDetails(workspaceId)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      migrationCandidates: async workspaceId => {
+        const result = await pactflow.workspaceMigrationCandidates(workspaceId)
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
@@ -218,33 +228,37 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     order: 30,
     locale: NS,
     inject: (): OverlayInjected => ({
+      answerWorkerInteraction: async (sessionId, request) => {
+        const result = await pactflow.answerWorkerInteraction(sessionId, request)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      autopilotPreview: async (sessionId, needId) => {
+        const result = await pactflow.autopilotPreview(sessionId, needId)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      startAutopilot: async (sessionId, request) => {
+        const result = await pactflow.startAutopilot(sessionId, request)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      controlAutopilot: async (sessionId, needId, revision, action) => {
+        const result = await pactflow.controlAutopilot(sessionId, needId, revision, action)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
       load: async (sessionId, signal) => {
-        const [health, snapshot, templates, modelConnections, workerPools, workspaceProject, retention] = await Promise.all([
-          pactflow.health(signal),
-          pactflow.snapshot(sessionId, signal),
-          pactflow.listK3sTemplates(signal),
-          pactflow.listModelConnections(signal),
-          pactflow.listWorkerPools(signal),
-          pactflow.workspaceProjectForSession(sessionId, signal),
-          pactflow.retentionStatus(sessionId),
+        const [health, snapshot, workerPools, workspaceProject, retention] = await Promise.all([
+          pactflow.health(signal), pactflow.snapshot(sessionId, signal), pactflow.listWorkerPools(signal),
+          pactflow.workspaceProjectForSession(sessionId, signal), pactflow.retentionStatus(sessionId),
         ])
         if (!health.ok) throw new Error(health.error.message)
         if (!snapshot.ok) throw new Error(snapshot.error.message)
-        if (!templates.ok) throw new Error(templates.error.message)
-        if (!modelConnections.ok) throw new Error(modelConnections.error.message)
         if (!workerPools.ok) throw new Error(workerPools.error.message)
-        // A persisted session remains inspectable after cold restore. The
-        // project mapping is live-session-only, so absence is distinct from a
-        // failed snapshot and is rendered as the existing empty state.
-        if (!workspaceProject.ok && !workspaceProject.error.message.includes('is not live')) {
-          throw new Error(workspaceProject.error.message)
-        }
-        return {
-          health: health.value, snapshot: snapshot.value,
-          templates: templates.value, modelConnections: modelConnections.value, workerPools: workerPools.value,
-          workspaceProject: workspaceProject.ok ? workspaceProject.value : null,
-          retention: retention.ok ? retention.value : null,
-        }
+        if (!workspaceProject.ok && !workspaceProject.error.message.includes('is not live')) throw new Error(workspaceProject.error.message)
+        return { health: health.value, snapshot: snapshot.value, workerPools: workerPools.value,
+          workspaceProject: workspaceProject.ok ? workspaceProject.value : null, retention: retention.ok ? retention.value : null }
       },
       loadRuntime: async (sessionId, signal) => {
         const [workerPools, workspaceProject, retention] = await Promise.all([
@@ -261,16 +275,6 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           workspaceProject: workspaceProject.ok ? workspaceProject.value : null,
           retention: retention.ok ? retention.value : null,
         }
-      },
-      probeHarnessImage: async (templateId, signal) => {
-        const result = await pactflow.probeInfrastructure({ kind: 'harness', id: templateId }, signal)
-        if (!result.ok) throw new Error(result.error.message)
-        return result.value
-      },
-      probeApi: async (templateId, modelConnectionId, prompt, timeoutMs, signal) => {
-        const result = await pactflow.probeApi({ templateId, modelConnectionId, prompt, timeoutMs }, signal)
-        if (!result.ok) throw new Error(result.error.message)
-        return result.value
       },
       verifyGitea: async (sessionId, signal) => {
         const result = await pactflow.verifyGitea(sessionId, signal)

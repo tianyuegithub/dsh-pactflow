@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture } from './execution-plan-fixture.ts'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
@@ -77,6 +78,7 @@ describe('PactFlow post-queue admission', () => {
       Reflect.set(ctx.pactflow, 'git', { plan: async () => ({ ...binding, baseCommit: 'a'.repeat(40),
         branch: 'pactflow/task', worktreePath: '/isolated/task' }), materialize })
       const controller = new AbortController()
+      await approveExecutionPlanFixture(ctx, session.id, 'task', { kind: 'k3s', templateId: 'dsh' }, node.id)
       const pending = ctx.pactflow.dispatchK3sNodeWithSignal(session.id, { nodeId: node.id,
         expectedRevision: node.revision, templateId: 'dsh', prompt: 'task', leaseDurationMs: 60_000 }, controller.signal)
       void pending.catch(() => {})

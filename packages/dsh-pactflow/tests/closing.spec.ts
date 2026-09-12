@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture, unconfinedWorkerContextFixture } from './execution-plan-fixture.ts'
 import { execFileSync } from 'node:child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -153,7 +154,7 @@ describe('PactFlow Gitea closing', () => {
           id: 'dep', needId: need.id, title: 'Dep', dependencies: ['node'], codeInputs: ['node'],
         })
       }
-      const parent = { id: session.id, session }
+      const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
       ctx.provide('agents', { get: () => parent } as never)
       ctx.provide('subagents', {
         getProvider: () => ({ capabilities: { cwd: true } }),
@@ -168,6 +169,7 @@ describe('PactFlow Gitea closing', () => {
           })
         },
       } as never)
+      await approveExecutionPlanFixture(ctx, session.id, 'commit', { kind: 'git', provider: 'spawn' }, node.id)
       const task = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: node.id, expectedRevision: node.revision, provider: 'spawn',
         leaseDurationMs: 60_000, prompt: 'commit',
@@ -178,6 +180,7 @@ describe('PactFlow Gitea closing', () => {
       let chainTask: PactFlowClaimResult | undefined
       if (mode === 'code-input-chain') {
         const dep = ctx.pactflow.dag(session.id).byId.dep!
+        await approveExecutionPlanFixture(ctx, session.id, 'commit on top', { kind: 'git', provider: 'spawn' }, 'dep')
         chainTask = await ctx.pactflow.dispatchGitNode(session.id, {
           nodeId: 'dep', expectedRevision: dep.revision, provider: 'spawn',
           leaseDurationMs: 60_000, prompt: 'commit on top',
@@ -233,6 +236,7 @@ describe('PactFlow Gitea closing', () => {
         // approved delivery subject no longer matches the current task set. Every node
         // is succeeded, so only the subject-binding check can reject closing.
         const extra = ctx.pactflow.createNode(session.id, { id: 'extra', needId: need.id, title: 'Extra', dependencies: [] })
+        await approveExecutionPlanFixture(ctx, session.id, 'commit', { kind: 'git', provider: 'spawn' }, extra.id)
         const extraRun = await ctx.pactflow.dispatchGitNode(session.id, {
           nodeId: extra.id, expectedRevision: extra.revision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'commit',
         })
@@ -269,6 +273,14 @@ describe('PactFlow Gitea closing', () => {
         expect(ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases).toEqual({})
         expect(mergeCommit).toBe('') // Persist responsibility before the irreversible merge.
         Reflect.set(ctx.pactflow, 'events', events)
+        // The intent is now required before the integration push, not merely
+        // before merging. Failed persistence leaves an unpublished local scene;
+        // no remote mutation may be used as an implicit recovery carrier.
+        expect(git(['--git-dir', remote, 'for-each-ref', '--format=%(refname)', 'refs/heads/pactflow/closing/'])).toBe('')
+        await expect(ctx.pactflow.closeGitNeed(session.id, { needId: need.id, expectedRevision: current.revision }))
+          .rejects.toThrow('unpushed local closing attempt')
+        await ctx.fiber.dispose()
+        return
       }
       if (mode === 'release-failure' || mode === 'release-drift') {
         const events = Reflect.get(ctx.pactflow, 'events')

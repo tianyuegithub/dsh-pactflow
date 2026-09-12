@@ -199,4 +199,51 @@ describe.skipIf(!enabled)('PactFlow real human approval in the native DSH UI', {
 
     expect(await page.locator('[data-approval-key]').count()).toBe(0)
   })
+
+  it('answers a progress-only question without creating work or asking execution approval', async () => {
+    const sessionId = await livePactFlowSession(scaffold) as string
+    const before = scaffold.ctx.sessions.get(sessionId)!.events.length
+    const composer = page.locator('[data-composer-input][contenteditable="true"]').last()
+    await writeComposerDraft(page, composer, '看一下当前需求的完成进度如何？请依据已有记录简短回答。')
+    const settled = scaffold.whenTurnSettled(120_000)
+    await composer.press('Enter'); await settled
+    const fresh = eventsOf(scaffold.ctx.sessions.get(sessionId)!).slice(before)
+    expect(fresh.some(event => ['pactflow/project-initialized', 'pactflow/need-created', 'pactflow/node-created', 'pactflow/run-queued', 'pactflow/run-claimed', 'approval/asked'].includes(event.type))).toBe(false)
+    expect(await page.locator('[data-question-key]').count()).toBe(0)
+  })
+
+  it('recommends a complete delivery node and waits for native choice before recording the plan', async () => {
+    const sessionId = await livePactFlowSession(scaffold) as string
+    await writeFile(join(scaffold.workspaceCwd, 'demo-button.ts'), "export const label = '保寸'\n")
+    const before = scaffold.ctx.sessions.get(sessionId)!.events.length
+    const composer = page.locator('[data-composer-input][contenteditable="true"]').last()
+    await writeComposerDraft(page, composer, [
+      '新需求：把 demo-button.ts 的按钮文案错字“保寸”修正为“保存”，补相应测试，并更新简短说明。',
+      '这次范围已明确，请提供可供我选择确认的具体执行方案；执行规格使用 pactflow_view 返回的可用项。',
+      '本轮只做到我提交方案选择后就停止，不实际派发，也不要触发其它需求/设计审批。',
+    ].join(' '))
+    const settled = scaffold.whenTurnSettled(180_000)
+    await composer.press('Enter')
+    const question = page.locator('[data-question-key]')
+    await question.waitFor({ timeout: 120_000 })
+    const pending = eventsOf(scaffold.ctx.sessions.get(sessionId)!).slice(before)
+    expect(pending.some(event => event.type === 'pactflow/node-created')).toBe(false)
+    expect(pending.filter(event => event.type === 'approval/asked')).toHaveLength(1)
+    expect(pending.filter(event => event.type === 'approval/decided')).toHaveLength(0)
+    expect(await page.locator('[data-approval-key]').count()).toBe(0)
+    await question.getByRole('radio', { name: /^批准单节点方案/ }).click()
+    await question.getByRole('button', { name: 'Submit', exact: true }).click()
+    await settled
+    const fresh = eventsOf(scaffold.ctx.sessions.get(sessionId)!).slice(before)
+    const reviews = fresh.filter(event => event.type === 'pactflow/review-recorded')
+    expect(reviews).toHaveLength(1)
+    const review = reviews[0]!.data.review as { executionPlan?: { plan: { mode: string; nodes: unknown[] } } }
+    expect(review.executionPlan?.plan.mode).toBe('single')
+    expect(review.executionPlan?.plan.nodes).toHaveLength(1)
+    expect(fresh.filter(event => event.type === 'pactflow/node-created')).toHaveLength(1)
+    expect(fresh.filter(event => event.type === 'approval/asked')).toHaveLength(1)
+    expect(fresh.some(event => event.type === 'pactflow/run-claimed')).toBe(false)
+    expect(await page.locator('[data-question-key]').count()).toBe(0)
+    expect(await page.locator('[data-approval-key]').count()).toBe(0)
+  })
 })

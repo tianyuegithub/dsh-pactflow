@@ -6,6 +6,8 @@ import {
   PACTFLOW_EVENT_TYPES_V0_1,
   PACTFLOW_EVENT_TYPES_V0_2,
   PACTFLOW_EVENT_TYPES_V0_3,
+  PACTFLOW_EVENT_TYPES_V0_4,
+  PACTFLOW_EVENT_TYPES_V0_5,
 } from '../src/domain.ts'
 
 // The operator manual states how many external event types each release writes and
@@ -19,9 +21,9 @@ const opsDoc = readFileSync(
 
 describe('PactFlow operator manual event-count accuracy', () => {
   it('documents the current writer count matching the shipped tuple', () => {
-    // "0.2.1 当前写入 **17** 类外部事件（PACTFLOW_EVENT_TYPES_V0_3）"
-    expect(PACTFLOW_EVENT_TYPES).toBe(PACTFLOW_EVENT_TYPES_V0_3)
-    expect(opsDoc).toContain(`当前写入 **${String(PACTFLOW_EVENT_TYPES_V0_3.length)}** 类外部事件`)
+    // The current producer adds durable autopilot control events.
+    expect(PACTFLOW_EVENT_TYPES).toBe(PACTFLOW_EVENT_TYPES_V0_5)
+    expect(opsDoc).toContain(`当前写入 **${String(PACTFLOW_EVENT_TYPES_V0_5.length)}** 类外部事件`)
   })
 
   it('documents the read-only legacy reader counts matching their tuples', () => {
@@ -35,7 +37,7 @@ describe('PactFlow operator manual event-count accuracy', () => {
     expect(PACTFLOW_EVENT_TYPES_V0_1.length).toBe(12)
     expect(PACTFLOW_EVENT_TYPES_V0_2.length).toBe(13)
     // Every legacy vocabulary must be a subset of what the current release can read.
-    for (const legacy of [PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_EVENT_TYPES_V0_2]) {
+    for (const legacy of [PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_EVENT_TYPES_V0_2, PACTFLOW_EVENT_TYPES_V0_3, PACTFLOW_EVENT_TYPES_V0_4]) {
       for (const type of legacy) expect(PACTFLOW_EVENT_TYPES).toContain(type)
     }
   })

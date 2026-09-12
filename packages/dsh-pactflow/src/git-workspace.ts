@@ -3,9 +3,10 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { validationSensitiveChanges } from './validation-integrity.ts'
+import { applyRecovery, assertLocalCheckout, captureRecovery, isolatedGit, isWithin, localGitEnvironment, localMavenCache, materializeLocalCheckout, protectedGitArgs, type RecoverySnapshot } from './local-workspace.ts'
 import type {
   BindPactFlowGitRequest,
   PactFlowGitAuth,
@@ -117,6 +118,7 @@ export class PactFlowGitWorkspace {
     node: PactFlowNode,
     binding: PactFlowGitBinding,
     codeInputs: readonly { readonly dependency?: string; readonly branch: string; readonly commit: string }[] = [],
+    checkoutKind?: 'isolated-clone',
   ): Promise<PactFlowGitRunSpec> {
     const root = await this.requireWorkspaceRoot(workspace)
     const currentUrl = this.credentialFreeRemote(await this.git(root, ['remote', 'get-url', binding.remote]))
@@ -130,6 +132,7 @@ export class PactFlowGitWorkspace {
     const projectKey = createHash('sha256').update(sessionId).digest('hex').slice(0, 20)
     const worktreePath = join(this.worktreeRoot, projectKey, runId)
     return {
+      ...(checkoutKind === undefined ? {} : { checkoutKind }),
       remote: binding.remote,
       remoteUrl: binding.remoteUrl,
       defaultBranch: binding.defaultBranch,
@@ -168,6 +171,10 @@ export class PactFlowGitWorkspace {
     const root = await this.requireWorkspaceRoot(workspace)
     if (await this.exists(spec.worktreePath)) throw new Error('PactFlow Git worktree path already exists')
     await mkdir(dirname(spec.worktreePath), { recursive: true, mode: 0o700 })
+    if (spec.checkoutKind === 'isolated-clone') {
+      await materializeLocalCheckout(root, spec)
+      return
+    }
     await this.git(root, ['worktree', 'add', '-b', spec.branch, spec.worktreePath, spec.baseCommit])
     // F03: fold each declared code input (exact predecessor commit) into the task
     // baseline before the Worker starts, so a dependent task can build on it.
@@ -197,38 +204,61 @@ export class PactFlowGitWorkspace {
   }
 
   /** Validate a clean commit, run Host commands, then prove the commit and tree stayed unchanged. */
-  async validateResult(spec: PactFlowGitRunSpec, authorizedCommands: readonly PactFlowValidationCommand[] = []): Promise<PactFlowGitCommitEvidence> {
+  async validateResult(spec: PactFlowGitRunSpec, authorizedCommands: readonly PactFlowValidationCommand[] = [], signal?: AbortSignal): Promise<PactFlowGitCommitEvidence> {
     assertPactFlowValidationAuthorization(spec, authorizedCommands)
     const commands = this.validationCommands(authorizedCommands)
     const before = await this.validateCommit(spec)
     const validations: PactFlowValidationEvidence[] = []
     for (const command of commands) {
-      validations.push(await this.runValidation(spec.worktreePath, command))
+      const effective = spec.checkoutKind === 'isolated-clone' && /^mvn(?:\.cmd)?$/.test(basename(command.command))
+        ? { ...command, args: [...command.args, `-Dmaven.repo.local=${localMavenCache(spec)}`] } : command
+      validations.push(await this.runValidation(spec.worktreePath, effective, signal, spec.checkoutKind === 'isolated-clone' ? localMavenCache(spec) : undefined))
     }
     const after = await this.validateCommit(spec)
     if (after.commit !== before.commit) throw new Error('PactFlow validation changed the Worker commit')
     // Surface (do not block on) task commits that rewrite the verification wiring.
     let sensitive: readonly string[] = []
     try {
-      const diff = await this.git(spec.worktreePath, ['diff', '--name-only', `${before.commit}~1..${before.commit}`])
+      const inspect = spec.checkoutKind === 'isolated-clone' ? isolatedGit : this.git.bind(this)
+      const diff = await inspect(spec.worktreePath, ['diff', '--no-ext-diff', '--no-textconv', '--name-only', `${before.commit}~1..${before.commit}`])
       sensitive = validationSensitiveChanges(diff)
     } catch { sensitive = [] }
     return { ...after, validations, ...(sensitive.length === 0 ? {} : { validationSensitiveChanges: sensitive }) }
   }
 
   private async validateCommit(spec: PactFlowGitRunSpec): Promise<Omit<PactFlowGitCommitEvidence, 'validations'>> {
-    const branch = await this.git(spec.worktreePath, ['branch', '--show-current'])
+    if (spec.checkoutKind === 'isolated-clone') await assertLocalCheckout(spec)
+    const inspect = spec.checkoutKind === 'isolated-clone' ? isolatedGit : this.git.bind(this)
+    const branch = await inspect(spec.worktreePath, ['branch', '--show-current'])
     if (branch !== spec.branch) throw new Error('PactFlow Worker changed the Host-owned task branch')
-    const dirty = await this.git(spec.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
+    const dirty = await inspect(spec.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
     if (dirty.length > 0) throw new Error('PactFlow Worker left uncommitted changes in its worktree')
-    const commit = await this.git(spec.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
+    const commit = await inspect(spec.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
     if (commit === spec.baseCommit) throw new Error('PactFlow Worker produced no commit')
     try {
-      await this.git(spec.worktreePath, ['merge-base', '--is-ancestor', spec.baseCommit, commit])
+      await inspect(spec.worktreePath, ['merge-base', '--is-ancestor', spec.baseCommit, commit])
     } catch {
       throw new Error('PactFlow Worker commit is not descended from the Run baseline')
     }
     return { branch, commit }
+  }
+
+  async recoverySnapshot(workspace: string | undefined, runId: string, spec: PactFlowGitRunSpec): Promise<RecoverySnapshot> {
+    const root = await this.requireWorkspaceRoot(workspace)
+    if (!isWithin(resolve(this.worktreeRoot), resolve(spec.worktreePath))
+      || !isWithin(await realpath(this.worktreeRoot), await realpath(spec.worktreePath))) throw new Error('候选不属于宿主管理目录')
+    if (spec.checkoutKind === 'isolated-clone') await assertLocalCheckout(spec)
+    else if (await realpath(await isolatedGit(spec.worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
+      !== await realpath(await isolatedGit(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']))) throw new Error('候选 Git 元数据归属不匹配')
+    return await captureRecovery(runId, spec)
+  }
+
+  async loadRecovery(spec: PactFlowGitRunSpec, input: RecoverySnapshot): Promise<void> {
+    await applyRecovery(spec, input)
+  }
+
+  async metadataPath(workspace: string | undefined): Promise<string> {
+    return await isolatedGit(await this.requireWorkspaceRoot(workspace), ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   }
 
   /** Push the task branch, fetch it through the root checkout, and bind the final commit. */
@@ -237,19 +267,29 @@ export class PactFlowGitWorkspace {
     spec: PactFlowGitRunSpec,
     result: PactFlowGitCommitEvidence,
     secret?: PactFlowGitAuthSecret,
+    signal?: AbortSignal,
   ): Promise<PactFlowGitResult> {
     const root = await this.requireWorkspaceRoot(workspace)
+    if (spec.checkoutKind === 'isolated-clone') {
+      await assertLocalCheckout(spec)
+      if (this.credentialFreeRemote(await this.git(root, ['remote', 'get-url', spec.remote])) !== spec.remoteUrl) throw new Error('主仓远程身份变化，拒绝同步本地任务')
+    }
     if ((spec.auth === undefined) !== (secret === undefined)) {
       throw new Error('PactFlow Git authentication does not match the Run spec')
     }
     await this.withAuthentication(secret, async (environment) => {
-      await this.git(spec.worktreePath, [
-        'push', '--porcelain', spec.remote, `HEAD:refs/heads/${spec.branch}`,
-      ], environment)
-      await this.git(root, [
-        'fetch', '--no-tags', spec.remote,
+      signal?.throwIfAborted()
+      const isolated = spec.checkoutKind === 'isolated-clone'
+      const target = isolated ? spec.remoteUrl : spec.remote
+      const effectiveEnvironment = isolated ? localGitEnvironment(environment) : environment
+      const args = (values: string[]) => isolated ? protectedGitArgs(values) : values
+      await this.git(spec.worktreePath, args([
+        'push', '--porcelain', target, `HEAD:refs/heads/${spec.branch}`,
+      ]), effectiveEnvironment, signal)
+      await this.git(root, args([
+        'fetch', '--no-tags', target,
         `refs/heads/${spec.branch}:refs/remotes/${spec.remote}/${spec.branch}`,
-      ], environment)
+      ]), effectiveEnvironment)
     })
     const remoteRef = `refs/remotes/${spec.remote}/${spec.branch}`
     const fetched = await this.git(root, ['rev-parse', '--verify', `${remoteRef}^{commit}`])
@@ -327,6 +367,8 @@ export class PactFlowGitWorkspace {
     authorizedCommands: readonly PactFlowValidationCommand[] = [],
     priorIdentity?: PactFlowClosingGit,
     baseline: readonly PactFlowValidationCommand[] = [],
+    beforePush?: (closing: PactFlowClosingGit) => Promise<void>,
+    signal?: AbortSignal,
   ): Promise<PactFlowClosingGit> {
     assertPactFlowValidationAuthorization(binding, authorizedCommands)
     const root = await this.requireWorkspaceRoot(workspace)
@@ -408,6 +450,19 @@ export class PactFlowGitWorkspace {
       return { branch, commit, worktreePath }
     }
     if (await this.exists(worktreePath) || (await this.git(root, ['branch', '--list', branch])).length > 0) {
+      if (priorIdentity !== undefined && await this.exists(worktreePath)
+        && await this.git(worktreePath, ['branch', '--show-current']) === branch
+        && await this.git(worktreePath, ['rev-parse', 'HEAD']) === priorIdentity.commit
+        && await this.git(worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']) === '') {
+        await this.verifyTaskTips(root, prefix, branches, priorIdentity.commit)
+        await this.verifyTaskSet(root, branches, priorIdentity.commit, baseCommit)
+        await this.withAuthentication(secret, async environment => {
+          await beforePush?.(priorIdentity)
+          signal?.throwIfAborted()
+          await this.git(worktreePath, ['push', '--porcelain', binding.remote, `HEAD:refs/heads/${branch}`], environment, signal)
+        })
+        return priorIdentity
+      }
       throw new Error('PactFlow found an unpushed local closing attempt; clean it before retry')
     }
     await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 })
@@ -427,7 +482,7 @@ export class PactFlowGitWorkspace {
     const baselineValidations: PactFlowValidationEvidence[] = []
     for (const command of baseline) {
       try {
-        baselineValidations.push({ ...(await this.runValidation(worktreePath, command)), source: 'host-baseline' })
+        baselineValidations.push({ ...(await this.runValidation(worktreePath, command, signal)), source: 'host-baseline' })
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         throw new Error(`PactFlow host baseline validation failed and blocks closing (${command.command} ${command.args.join(' ')}): ${detail}`)
@@ -445,12 +500,16 @@ export class PactFlowGitWorkspace {
       ...(binding.validationProfileRevisions === undefined ? {} : { validationProfileRevisions: { ...binding.validationProfileRevisions } }),
       ...(binding.legacyUntrusted === true ? { legacyUntrusted: true } : {}),
       ...binding.auth === undefined ? {} : { auth: binding.auth },
-    }, authorizedCommands)
+    }, authorizedCommands, signal)
     await this.verifyTaskSet(worktreePath, branches, result.commit, baseCommit)
+    const closing: PactFlowClosingGit = { branch, commit: result.commit, worktreePath,
+      ...(baselineValidations.length === 0 ? {} : { baselineValidations }) }
     await this.withAuthentication(secret, async (environment) => {
+      await beforePush?.(closing)
+      signal?.throwIfAborted()
       await this.git(worktreePath, [
         'push', '--porcelain', binding.remote, `HEAD:refs/heads/${branch}`,
-      ], environment)
+      ], environment, signal)
     })
     return {
       branch, commit: result.commit, worktreePath,
@@ -603,6 +662,7 @@ export class PactFlowGitWorkspace {
     mergeCommit: string,
     secret?: PactFlowGitAuthSecret,
     authorizedCommands: readonly PactFlowValidationCommand[] = [],
+    signal?: AbortSignal,
   ): Promise<PactFlowGitCommitEvidence> {
     assertPactFlowValidationAuthorization(binding, authorizedCommands)
     const root = await this.requireWorkspaceRoot(workspace)
@@ -624,7 +684,7 @@ export class PactFlowGitWorkspace {
       if (dirty.length > 0) throw new Error('PactFlow merge validation left local changes')
       const validations: PactFlowValidationEvidence[] = []
       for (const command of this.validationCommands(authorizedCommands)) {
-        validations.push(await this.runValidation(worktreePath, command))
+        validations.push(await this.runValidation(worktreePath, command, signal))
       }
       const after = await this.git(worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
       if (after !== mergeCommit) throw new Error('PactFlow merge validation changed the merge commit')
@@ -705,15 +765,28 @@ export class PactFlowGitWorkspace {
     if ((binding.auth === undefined) !== (secret === undefined)) {
       throw new Error('PactFlow Git authentication does not match the project binding')
     }
-    await this.cleanupOwnedCheckout(workspace, { branch: spec.branch, worktreePath: spec.worktreePath, commit: expectedCommit },
-      'pactflow/', async () => this.withAuthentication(secret, async environment => {
+    const removeRemote = async () => this.withAuthentication(secret, async environment => {
         const ref = `refs/heads/${spec.branch}`
         const output = await this.git(root, ['ls-remote', '--heads', binding.remote, ref], environment)
         const tip = output.split('\n').map(line => line.split(/\s+/)).find(([, name]) => name === ref)?.[0]
         if (tip === undefined) return
         if (tip !== expectedCommit) throw new Error('PactFlow task cleanup remote commit changed')
         await this.git(root, ['push', '--porcelain', `--force-with-lease=${ref}:${expectedCommit}`, binding.remote, `:${ref}`], environment)
-      }))
+      })
+    if (spec.checkoutKind === 'isolated-clone') {
+      if (!spec.branch.startsWith('pactflow/') || !isWithin(resolve(this.worktreeRoot), resolve(spec.worktreePath))) throw new Error('独立仓库清理路径越界')
+      const present = await this.exists(spec.worktreePath)
+      if (present) {
+        if (!isWithin(await realpath(this.worktreeRoot), await realpath(spec.worktreePath))) throw new Error('独立仓库清理路径别名越界')
+        await assertLocalCheckout(spec)
+        if (await isolatedGit(spec.worktreePath, ['rev-parse', 'HEAD']) !== expectedCommit
+          || await isolatedGit(spec.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']) !== '') throw new Error('独立仓库清理要求提交未变化且工作区干净')
+      }
+      await removeRemote()
+      if (present) await rm(spec.worktreePath, { recursive: true })
+      return
+    }
+    await this.cleanupOwnedCheckout(workspace, { branch: spec.branch, worktreePath: spec.worktreePath, commit: expectedCommit }, 'pactflow/', removeRemote)
   }
 
   private async requireWorkspaceRoot(workspace: string | undefined): Promise<string> {
@@ -871,15 +944,21 @@ export class PactFlowGitWorkspace {
   private runValidation(
     cwd: string,
     validation: PactFlowValidationCommand,
+    signal?: AbortSignal,
+    mavenCache?: string,
   ): Promise<PactFlowValidationEvidence> {
     const startedAt = Date.now()
     const environment = minimalValidationEnvironment()
+    // JAVA_TOOL_OPTIONS also reaches mvnw and Java launched by shell/wrapper commands.
+    // JVM option parsing supports quoted paths, unlike shell expansion of MAVEN_OPTS.
+    if (mavenCache !== undefined) environment.JAVA_TOOL_OPTIONS = `-Dmaven.repo.local=${JSON.stringify(mavenCache)}`
     return new Promise((resolveEvidence, reject) => {
       execFile(validation.command, validation.args, {
         cwd,
         encoding: 'utf8',
         maxBuffer: 1024 * 1024,
         timeout: validation.timeoutMs,
+        ...(signal === undefined ? {} : { signal }),
         shell: false,
         env: { ...environment, CI: '1', GIT_TERMINAL_PROMPT: '0' },
       }, (error) => {
@@ -894,11 +973,12 @@ export class PactFlowGitWorkspace {
   }
 
 
-  private git(cwd: string, args: readonly string[], environment?: NodeJS.ProcessEnv): Promise<string> {
+  private git(cwd: string, args: readonly string[], environment?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string> {
     return new Promise((resolveOutput, reject) => {
       execFile('git', ['-C', cwd, ...args], {
         encoding: 'utf8',
         maxBuffer: 1024 * 1024,
+        ...(signal === undefined ? {} : { signal }),
         env: environment ?? { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       }, (error, stdout) => {
         if (error !== null) {

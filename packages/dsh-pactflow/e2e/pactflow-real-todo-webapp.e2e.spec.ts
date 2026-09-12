@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture } from '../tests/execution-plan-fixture.ts'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -110,6 +111,7 @@ describe.skipIf(!enabled)('PactFlow real todo web app dogfood', { timeout: 900_0
       // A dependent node starts pending and must only become ready once its dependency succeeds.
       expect(dagState(session, 'todo-readme')).toBe('pending')
 
+      await approveExecutionPlanFixture(ctx, session.id, PAGE_PROMPT, { kind: 'k3s', templateId: template.id }, pageNode.id)
       const pageRun = await ctx.pactflow.dispatchK3sNode(session.id, {
         nodeId: pageNode.id, expectedRevision: pageNode.revision, templateId: template.id,
         leaseDurationMs: 600_000, prompt: PAGE_PROMPT,
@@ -125,6 +127,7 @@ describe.skipIf(!enabled)('PactFlow real todo web app dogfood', { timeout: 900_0
 
       // Node 2 runs on top of node 1: its worktree must carry node 1's commit (code input).
       const readmeNodeState = ctx.pactflow.dag(session.id).byId['todo-readme']!
+      await approveExecutionPlanFixture(ctx, session.id, README_PROMPT, { kind: 'k3s', templateId: template.id }, readmeNode.id)
       const readmeRun = await ctx.pactflow.dispatchK3sNode(session.id, {
         nodeId: readmeNode.id, expectedRevision: readmeNodeState.revision, templateId: template.id,
         leaseDurationMs: 600_000, prompt: README_PROMPT,

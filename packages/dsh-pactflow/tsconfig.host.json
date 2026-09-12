@@ -11,6 +11,8 @@
     "src/domain.ts",
     "src/execution-capacity.ts",
     "src/git-workspace.ts",
+    "src/local-workspace.ts",
+    "src/local-preflight.ts",
     "src/gitea.ts",
     "src/host/cleanup.ts",
     "src/host/dispatch.ts",
@@ -28,6 +30,10 @@
     "src/redaction.ts",
     "src/run-ledger.ts",
     "src/review-authorization.ts",
+    "src/execution-plan.ts",
+    "src/autopilot.ts",
+    "src/host/autopilot-driver.ts",
+    "src/host/execution-plan-choice.ts",
     "src/run-budget.ts",
     "src/project-handover.ts",
     "src/schema.ts",
@@ -36,6 +42,14 @@
     "src/input-staleness.ts",
     "src/retention-policy.ts",
     "src/workspace-project.ts",
-    "src/workspace-lock.ts"
+    "src/workspace-lock.ts",
+    "src/worker-interaction-types.ts",
+    "src/worker-interactions.ts",
+    "src/host/worker-interactions.ts",
+    "src/worker/bridge.ts",
+    "src/worker/plugin.ts",
+    "src/worker/connect.ts",
+    "src/host/interaction-signing.ts",
+    "src/worker/redact.ts"
   ]
 }

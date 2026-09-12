@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture, unconfinedWorkerContextFixture } from './execution-plan-fixture.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -32,7 +33,7 @@ describe('PactFlow code-input staleness reachability', () => {
       const need = ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
       const a = ctx.pactflow.createNode(session.id, { id: 'a', needId: need.id, title: 'A', dependencies: [] })
       ctx.pactflow.createNode(session.id, { id: 'b', needId: need.id, title: 'B', dependencies: ['a'], codeInputs: ['a'] })
-      const parent = { id: session.id, session }
+      const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
       ctx.provide('agents', { get: () => parent } as never)
       let sequence = 0
       ctx.provide('subagents', {
@@ -50,11 +51,13 @@ describe('PactFlow code-input staleness reachability', () => {
         },
       } as never)
 
+      await approveExecutionPlanFixture(ctx, session.id, 'A', { kind: 'git', provider: 'spawn' }, 'a')
       const runA = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: 'a', expectedRevision: a.revision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'A',
       })
       expect(runA.run.state).toBe('succeeded')
       const b = ctx.pactflow.dag(session.id).byId.b!
+      await approveExecutionPlanFixture(ctx, session.id, 'B', { kind: 'git', provider: 'spawn' }, 'b')
       const runB = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: 'b', expectedRevision: b.revision, provider: 'spawn', leaseDurationMs: 60_000, prompt: 'B',
       })

@@ -519,7 +519,10 @@ export function PactFlowSettingsCard({
         rows={draft.templates.filter(isHarnessProfile)} disabled={actionDisabled}
         columns={templateColumns}
         create={() => newTemplate(draft.templates, draft.registries[0]?.id ?? '')}
-        onChange={rows => changeRows('harness', 'templates', rows)}
+        onChange={rows => changeRows('harness', 'templates', rows.map(row => {
+          if (row.harness === 'dsh' && row.interactionProtocol) return row
+          const { interactionProtocol, ...plain } = row; void interactionProtocol; return plain
+        }))}
         onAdd={row => beginAdd('harness', row)} addDisabled={activeEditor !== null}
         modeFor={row => modeFor('harness', row.id)} summaryFor={row => summaryFor('harness', row)}
         canSave={row => canSaveResource('harness', row.id)} savingId={savingId}
@@ -529,7 +532,7 @@ export function PactFlowSettingsCard({
         labelForOption={(_row, column, value) => column.key === 'registryId'
           ? draft.registries.find(registry => registry.id === value)?.displayName ?? value
           : friendlyOption(value)}
-        renderExtraFields={(row, _index, update) => <HarborArtifactField
+        renderExtraFields={(row, _index, update) => <><HarborArtifactField
           artifacts={harborArtifacts[row.registryId] ?? []}
           value={`${row.repository}\u0000${row.artifactDigest}`}
           onChange={(value) => {
@@ -537,7 +540,11 @@ export function PactFlowSettingsCard({
             update('repository', repository ?? '')
             update('artifactDigest', artifactDigest ?? '')
           }}
-        />}
+        />{row.harness === 'dsh' && <label style={{ display: 'grid', gap: 6 }}>
+          <span><input type="checkbox" disabled={actionDisabled} checked={row.interactionProtocol === 'dsh-worker-interactions/v1'}
+            onChange={event => update('interactionProtocol', event.currentTarget.checked ? 'dsh-worker-interactions/v1' : '')} /> 启用远程审批与提问</span>
+          <small>仅用于已适配零脉交互协议的 DSH 专用镜像；不支持的镜像会明确失败。</small>
+        </label>}</>}
         probeKind="harness" probingId={probingId} onProbe={probe}
         testLogFor={row => testLogs[`harness:${row.id}`]}
         showLogFor={row => expandedLogs.has(`harness:${row.id}`)}

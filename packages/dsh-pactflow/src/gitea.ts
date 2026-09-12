@@ -255,9 +255,10 @@ export class PactFlowGiteaClient {
     binding: PactFlowGiteaBinding,
     token: string,
     input: { readonly title: string; readonly body: string; readonly head: string; readonly base: string },
+    signal?: AbortSignal,
   ): Promise<PactFlowGiteaPullRequest> {
     const response = await this.request<PullRequestResponse>(binding, token, '/pulls', {
-      method: 'POST', body: input, expectedStatus: 201,
+      method: 'POST', body: input, expectedStatus: 201, ...(signal === undefined ? {} : { signal }),
     })
     return this.pullRequest(response)
   }
@@ -293,10 +294,13 @@ export class PactFlowGiteaClient {
     token: string,
     number: number,
     headCommit: string,
+    signal?: AbortSignal,
+    beforeMerge?: () => Promise<void>,
   ): Promise<PactFlowGiteaPullRequest> {
     for (let attempt = 0; attempt < 40; attempt += 1) {
+      signal?.throwIfAborted()
       const response = await this.request<PullRequestResponse>(
-        binding, token, `/pulls/${String(number)}`,
+        binding, token, `/pulls/${String(number)}`, signal === undefined ? {} : { signal },
       )
       if (response.head?.sha !== headCommit) {
         throw new Error('PactFlow Gitea PR head changed before merge')
@@ -304,11 +308,14 @@ export class PactFlowGiteaClient {
       if (response.merged === true) return this.pullRequest(response)
       if (response.mergeable === true) {
         try {
+          await beforeMerge?.()
+          signal?.throwIfAborted()
           await this.request<undefined>(binding, token, `/pulls/${String(number)}/merge`, {
             method: 'POST',
             body: { Do: 'merge', head_commit_id: headCommit, delete_branch_after_merge: true, force_merge: false },
             expectedStatus: 200,
             noContent: true,
+            ...(signal === undefined ? {} : { signal }),
           })
           const merged = await this.request<PullRequestResponse>(
             binding, token, `/pulls/${String(number)}`,

@@ -1,3 +1,4 @@
+import { approveExecutionPlanFixture, unconfinedWorkerContextFixture } from './execution-plan-fixture.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -63,7 +64,7 @@ describe('PactFlow domain foundation', () => {
     ])
     expect(session.events[0]?.data).toMatchObject({
       producer: 'dsh-pactflow',
-      version: '0.3.0',
+      version: '0.6.0',
     })
     expect(ctx.pactflow.project(session.id)).toEqual({ project })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowProject).toEqual({ project })
@@ -444,7 +445,7 @@ describe('PactFlow domain foundation', () => {
     const node = ctx.pactflow.createNode(session.id, {
       id: 'worker-node', needId: 'need', title: 'Worker node', dependencies: [],
     })
-    const parent = { id: session.id, session }
+    const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
     let disposed = false
     let receivedPrompt = ''
     ctx.provide('agents', { get: () => parent } as never)
@@ -466,6 +467,7 @@ describe('PactFlow domain foundation', () => {
       },
     } as never)
 
+    await approveExecutionPlanFixture(ctx, session.id, 'Implement the node', { kind: 'git', provider: 'spawn' }, node.id)
     const settled = await ctx.pactflow.dispatchLocalNode(session.id, {
       nodeId: node.id,
       expectedRevision: node.revision,
@@ -495,6 +497,7 @@ describe('PactFlow domain foundation', () => {
     const infrastructure = ctx.pactflow.createNode(session.id, {
       id: 'infrastructure', needId: 'need', title: 'Infrastructure', dependencies: [],
     })
+    await approveExecutionPlanFixture(ctx, session.id, 'infrastructure failure', { kind: 'git', provider: 'spawn' }, infrastructure.id)
     const failed = await ctx.pactflow.dispatchLocalNode(session.id, {
       nodeId: infrastructure.id,
       expectedRevision: infrastructure.revision,
@@ -546,7 +549,7 @@ describe('PactFlow domain foundation', () => {
       const node = ctx.pactflow.createNode(session.id, {
         id: 'git-node', needId: 'need', title: 'Git node', dependencies: [],
       })
-      const parent = { id: session.id, session }
+      const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
       let childCwd = ''
       ctx.provide('agents', { get: () => parent } as never)
       ctx.provide('subagents', {
@@ -568,6 +571,7 @@ describe('PactFlow domain foundation', () => {
         },
       } as never)
 
+      await approveExecutionPlanFixture(ctx, session.id, 'commit the task', { kind: 'git', provider: 'spawn' }, node.id)
       const settled = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: node.id, expectedRevision: node.revision, provider: 'spawn',
         leaseDurationMs: 60_000, prompt: 'commit the task',
@@ -605,6 +609,7 @@ describe('PactFlow domain foundation', () => {
       })).rejects.toThrow(/cannot select a task worktree/)
       expect(ctx.pactflow.dag(session.id).byId['no-commit']).toMatchObject({ state: 'ready', revision: 1 })
 
+      await approveExecutionPlanFixture(ctx, session.id, 'no commit', { kind: 'git', provider: 'spawn' }, noCommit.id)
       const missingCommit = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: noCommit.id, expectedRevision: noCommit.revision, provider: 'spawn',
         leaseDurationMs: 60_000, prompt: 'no commit',
@@ -629,6 +634,7 @@ describe('PactFlow domain foundation', () => {
       const invalid = ctx.pactflow.createNode(session.id, {
         id: 'invalid', needId: 'need', title: 'Invalid', dependencies: [],
       })
+      await approveExecutionPlanFixture(ctx, session.id, 'validation failure', { kind: 'git', provider: 'spawn' }, invalid.id)
       const validationFailure = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: invalid.id, expectedRevision: invalid.revision, provider: 'spawn',
         leaseDurationMs: 60_000, prompt: 'validation failure',
@@ -699,7 +705,7 @@ describe('PactFlow domain foundation', () => {
       const node = ctx.pactflow.createNode(session.id, {
         id: 'auth-node', needId: 'need', title: 'Auth node', dependencies: [],
       })
-      const parent = { id: session.id, session }
+      const parent = { id: session.id, session, ctx: unconfinedWorkerContextFixture() }
       ctx.provide('agents', { get: () => parent } as never)
       ctx.provide('subagents', {
         getProvider: () => ({ capabilities: { cwd: true } }),
@@ -714,6 +720,7 @@ describe('PactFlow domain foundation', () => {
           })
         },
       } as never)
+      await approveExecutionPlanFixture(ctx, session.id, 'commit through authenticated HTTP', { kind: 'git', provider: 'spawn' }, node.id)
       const settled = await ctx.pactflow.dispatchGitNode(session.id, {
         nodeId: node.id, expectedRevision: node.revision, provider: 'spawn',
         leaseDurationMs: 60_000, prompt: 'commit through authenticated HTTP',
@@ -799,12 +806,15 @@ describe('PactFlow domain foundation', () => {
 
     expect(ctx.tools.schemas(agent).map(schema => schema.name).sort()).toEqual([
       'pactflow_bind_git',
+      'pactflow_block_autopilot',
       'pactflow_close_git_need',
+      'pactflow_confirm_execution_plan',
       'pactflow_create_need',
       'pactflow_create_node',
       'pactflow_dispatch_git',
       'pactflow_dispatch_k3s',
       'pactflow_initialize',
+      'pactflow_local_recovery_candidates',
       'pactflow_record_review',
       'pactflow_retry_cleanup',
       'pactflow_retry_node',

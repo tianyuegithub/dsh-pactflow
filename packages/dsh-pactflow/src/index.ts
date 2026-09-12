@@ -1,3 +1,6 @@
+import { WorkerInteractionSigner } from './host/interaction-signing.ts'
+import { PactFlowWorkerInteractions } from './host/worker-interactions.ts'
+import type { AnswerWorkerInteractionRequest, WorkerInteractionRecord } from './worker-interaction-types.ts'
 import { fileURLToPath } from 'node:url'
 import { pactFlowValidationProfilesSchema } from './schema.ts'
 import { createHash, randomUUID } from 'node:crypto'
@@ -9,6 +12,15 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle, Session } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ApprovalService } from '@deepseek-ai/dsh-user-approval'
+import type { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
+import { executionDigest, executionPlanRequestSchema, executionPlanSchema, planNodeMatches } from './execution-plan.ts'
+import { confirmExecutionPlanChoice } from './host/execution-plan-choice.ts'
+import type { PactFlowExecutionPlan } from './types.ts'
+import type { PactFlowAutopilotRecord, PactFlowAutopilotPreview, PactFlowStartAutopilotRequest } from './types.ts'
+import { autopilotLimitsSchema, autopilotRecordSchema, autopilotWorkerCounts } from './autopilot.ts'
+import { PactFlowAutopilotDriver } from './host/autopilot-driver.ts'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { SubagentResult, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -22,11 +34,16 @@ import {
   PACTFLOW_EVENT_TYPES_V0_2,
   PACTFLOW_EVENT_TYPES_V0_2_1,
   PACTFLOW_EVENT_TYPES_V0_3,
+  PACTFLOW_EVENT_TYPES_V0_4,
+  PACTFLOW_EVENT_TYPES_V0_5,
+  PACTFLOW_EVENT_TYPES_V0_6,
   PACTFLOW_PROJECTIONS,
   PACTFLOW_NEXT_PHASE as NEXT_PHASE,
   pactFlowDeliveryView,
 } from './domain.ts'
 import { PactFlowGitWorkspace, assertPactFlowValidationAuthorization, type PactFlowGitAuthSecret } from './git-workspace.ts'
+import type { RecoverySnapshot } from './local-workspace.ts'
+import type { PactFlowRecoveryCandidate } from './types.ts'
 import { PactFlowGiteaClient } from './gitea.ts'
 import {
   PACTFLOW_HARNESS_API_MODE,
@@ -156,6 +173,7 @@ import type {
   PactFlowRemoteReconciliation,
   PactFlowConfirmWorkspaceRemoteRequest,
   PactFlowWorkspaceProjectView,
+  PactFlowWorkspaceProjectSummary,
   PactFlowInitializeWorkspaceGitRequest,
   PactFlowSaveWorkspaceWorkerPolicyRequest,
   PactFlowCreateWorkspaceRemoteRequest,
@@ -204,7 +222,7 @@ interface PactFlowWorkspaceRegistry {
 }
 
 const VERSION = '0.2.1'
-const EVENT_PRODUCER_VERSION = '0.3.0'
+const EVENT_PRODUCER_VERSION = '0.6.0'
 const PRESET_ROOT = fileURLToPath(new URL('../presets', import.meta.url))
 // This fixed namespace is valid without a runtime helper export.
 const PACTFLOW_SETTINGS_NS = 'pactflow' as SettingsNamespace
@@ -239,6 +257,7 @@ export class PactFlowService extends TypertRemoteService {
       templates: z.array(z.object({
         id: z.string().required(),
         harness: z.union(['claude', 'codex', 'opencode', 'dsh'] as const).required(),
+        interactionProtocol: z.const('dsh-worker-interactions/v1'),
         apiMode: z.union([
           'anthropic-messages', 'openai-responses', 'openai-chat-completions',
         ] as const).required(),
@@ -272,6 +291,7 @@ export class PactFlowService extends TypertRemoteService {
       templates: z.array(z.union([z.object({
         id: z.string().required(),
         harness: z.union(['claude', 'codex', 'opencode', 'dsh'] as const).required(),
+        interactionProtocol: z.const('dsh-worker-interactions/v1'),
         apiMode: z.union([
           'anthropic-messages', 'openai-responses', 'openai-chat-completions',
         ] as const).required(),
@@ -281,6 +301,7 @@ export class PactFlowService extends TypertRemoteService {
       }), z.object({
         id: z.string().required(), displayName: z.string().required(),
         harness: z.union(['claude', 'codex', 'opencode', 'dsh'] as const).required(),
+        interactionProtocol: z.const('dsh-worker-interactions/v1'),
         registryId: z.string().required(), repository: z.string().required(), artifactDigest: z.string().required(),
         cpuRequest: z.string().required(), memoryRequest: z.string().required(),
         cpuLimit: z.string().required(), memoryLimit: z.string().required(),
@@ -305,6 +326,11 @@ export class PactFlowService extends TypertRemoteService {
   private readonly git = new PactFlowGitWorkspace()
   private readonly gitea = new PactFlowGiteaClient()
   private k3s: PactFlowK3sWorker | undefined
+  private readonly legacyK3sConfig: Config['k3s']
+  private readonly executionProviderIds = new WeakMap<object, string>()
+  private readonly interactionSigner: WorkerInteractionSigner
+  private readonly workerInteractions: PactFlowWorkerInteractions
+  private readonly autopilotDriver: PactFlowAutopilotDriver
   private infrastructure: PactFlowInfrastructure | undefined
   /** Live view of the persisted infrastructure document; probes read this, runtime stays restart-applied. */
   private savedInfrastructureAccessor: (() => false | PactFlowInfrastructureSettings | undefined) | undefined
@@ -329,6 +355,7 @@ export class PactFlowService extends TypertRemoteService {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'pactflow')
+    this.legacyK3sConfig = config.k3s
     if (typeof ctx.sessions.externalEventProducers?.register !== 'function') {
       throw new Error('PactFlow requires DSH external Session event producers; this DSH runtime is unsupported')
     }
@@ -418,12 +445,88 @@ export class PactFlowService extends TypertRemoteService {
       eventTypes: PACTFLOW_EVENT_TYPES_V0_2_1,
       mode: 'read-only',
     })
+    ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.3.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_3, mode: 'read-only' })
+    ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.4.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_4, mode: 'read-only' })
+    ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.5.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_5, mode: 'read-only' })
     this.events = ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
       version: EVENT_PRODUCER_VERSION,
-      eventTypes: PACTFLOW_EVENT_TYPES_V0_3,
+      eventTypes: PACTFLOW_EVENT_TYPES_V0_6,
     })
     for (const projection of PACTFLOW_PROJECTIONS) ctx.sessionProjections.register(projection as never)
+    this.interactionSigner = new WorkerInteractionSigner(() => ctx.get('credentials') as CredentialProvider | undefined)
+    this.workerInteractions = new PactFlowWorkerInteractions({
+      sessions: () => ctx.sessions.list().filter(session => this.currentPreset(session) === 'pactflow'),
+      snapshot: session => this.snapshotOfLive(session),
+      append: (session, record) => { this.events.append(session, 'pactflow/worker-interaction', { v: 1, record }) },
+      flush: async session => { if (!await ctx.sessions.flush(session)) throw new Error('远程交互需要持久化服务，答案尚未发送') },
+      connect: (run, receive, close) => this.workerForRun(run.k3s!).openInteractionChannel(run.k3s!, receive, close),
+      bounded: error => this.boundedOutcome(error),
+      sign: (run, answer) => this.interactionSigner.sign(answer, run.k3s!.interactionPublicKey!),
+      fail: async (session, run, reason) => {
+        const current = this.runState(session)[run.id]
+        if (!current || this.isTerminalRun(current)) return
+        const active = this.activeAutopilot(session, this.node(session, current.nodeId).needId)
+        if (active) this.blockAutopilotInSession(session, active, reason)
+        await this.workerForRun(current.k3s!).cancelRun(current.k3s!)
+        const remaining = this.runState(session)[run.id]
+        if (remaining && !this.isTerminalRun(remaining)) this.settleRunInSession(session, {
+          runId: remaining.id, claimId: remaining.claimId, expectedNodeRevision: this.node(session, remaining.nodeId).revision,
+          state: 'failed', outcome: reason,
+        })
+      },
+    })
+    ctx.effect(() => {
+      const timer = setInterval(() => { void this.workerInteractions.tick().catch(error => ctx.logger.warn('Worker interaction: %s', this.boundedOutcome(error))) }, 1000)
+      timer.unref()
+      return () => { clearInterval(timer); this.workerInteractions.dispose() }
+    }, 'pactflow: worker interactions')
+    this.autopilotDriver = new PactFlowAutopilotDriver({
+      sessions: () => ctx.sessions.list().filter(session => this.currentPreset(session) === 'pactflow'),
+      agent: session => (ctx.get('agents') as AgentRegistry | undefined)?.get(session.id),
+      snapshot: session => this.snapshotOfLive(session),
+      check: (session, record) => this.assertAutopilotScope(session, record),
+      flush: async session => { if (!await ctx.sessions.flush(session)) throw new Error('挂机需要可用的会话持久化服务') },
+      update: (session, record, changes) => this.updateAutopilot(session, record, changes),
+      block: (session, record, reason, cancel) => this.blockAutopilotInSession(session, record, reason, cancel),
+      boundedError: error => this.boundedOutcome(error),
+    })
+    ctx.effect(() => {
+      const timer = setInterval(() => { void this.autopilotDriver.tick().catch(error => ctx.logger.warn('Autopilot tick failed: %s', this.boundedOutcome(error))) }, 1000)
+      timer.unref()
+      return () => { clearInterval(timer); this.autopilotDriver.dispose() }
+    }, 'pactflow: autopilot driver')
+    ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+      const record = this.activeAutopilot(agent.session)
+      if (messages.some(message => message.source.kind === 'user')) {
+        if (record !== undefined) this.updateAutopilot(agent.session, record, { state: 'paused', reason: '用户发来新消息，已转为人工接管' })
+        return next()
+      }
+      const last = agent.session.events.findLast(event => event.type === 'user/message')
+      const incoming = messages.find(message => message.source.kind === 'plugin' && message.source.plugin === 'dsh-pactflow/autopilot')
+      const wake = incoming ?? (last?.type === 'user/message' && last.data.source.kind === 'plugin' && last.data.source.plugin === 'dsh-pactflow/autopilot' ? last.data : undefined)
+      if (wake !== undefined && (record === undefined || record.lastWakeId !== wake.id)) return { kind: 'reject' }
+      if (record === undefined) return next()
+      const decision = await next()
+      if (decision.kind !== 'enter') return decision
+      const current = this.activeAutopilot(agent.session)
+      if (current?.id !== record.id) return { kind: 'reject' }
+      if (Date.now() >= current.expiresAt || current.modelSteps >= current.limits.maxModelSteps) {
+        this.blockAutopilotInSession(agent.session, current, '挂机时长或模型调用预算已耗尽')
+        return { kind: 'reject' }
+      }
+      this.updateAutopilot(agent.session, current, { modelSteps: current.modelSteps + 1 })
+      return decision
+    })
+    ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+      const record = this.activeAutopilot(agent.session)
+      if (record !== undefined && message.source.kind === 'user') this.updateAutopilot(agent.session, record, { state: 'paused', reason: '用户发来新消息，已转为人工接管' })
+    })
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'turn/end' || event.data.reason.kind !== 'aborted' || event.data.reason.reason?.kind !== 'user') return
+      const record = this.activeAutopilot(session)
+      if (record !== undefined) this.updateAutopilot(session, record, { state: 'paused', reason: '用户停止了当前轮次，挂机已暂停' })
+    })
     ctx.provide('pactflowPresetRoot', PRESET_ROOT)
     ctx.inject(['sessionQuery', 'sessionController'], scope => {
       const controller = new AbortController()
@@ -473,7 +576,8 @@ export class PactFlowService extends TypertRemoteService {
         if (preset !== 'pactflow' || values.pactflowProject?.project == null) continue
         const activeRuns = Object.values(values.pactflowRuns?.byId ?? {}).some(run => !this.isTerminalRun(run))
         const pendingCleanup = Object.values(values.pactflowDelivery?.cleanups ?? {}).some(record => record.state !== 'succeeded')
-        if (activeRuns || pendingCleanup) candidates.push(record.header.id)
+        const activeAutopilot = Object.values(values.pactflowDelivery?.autopilots ?? {}).some(item => item.state === 'running')
+        if (activeRuns || pendingCleanup || activeAutopilot) candidates.push(record.header.id)
         else this.executionCapacity.setInventoryFailure(record.header.id, undefined)
       }
       for (const id of candidates) {
@@ -782,8 +886,16 @@ export class PactFlowService extends TypertRemoteService {
   async closeGitNeed(
     sessionId: string,
     request: ClosePactFlowNeedRequest,
+    signal?: AbortSignal,
   ): Promise<ClosePactFlowNeedResult> {
     const session = this.livePactFlowSession(sessionId)
+    const autopilot = this.activeAutopilot(session, request.needId)
+    const checkpoint = async (): Promise<void> => {
+      signal?.throwIfAborted()
+      if (autopilot !== undefined) await this.assertAutopilotScope(session, autopilot)
+      signal?.throwIfAborted()
+    }
+    await checkpoint()
     const project = this.requireProject(session)
     const binding = project.git ?? this.workspaceGitBinding(await this.workspaceProjectForSession(session))
     if (binding?.gitea === undefined) throw new Error('PactFlow project has no Gitea binding')
@@ -791,7 +903,8 @@ export class PactFlowService extends TypertRemoteService {
     const giteaBinding = this.effectiveGiteaBinding(binding.gitea)
     const need = this.need(session, request.needId)
     this.requireRevision('need', need.id, need.revision, request.expectedRevision)
-    if (need.phase !== 'closing' || !this.latestReviewApproved(session, need.id, 'verification', need.revision - 1)) {
+    const verificationRevision = this.latestReviewApproved(session, need.id, 'verification', need.revision) ? need.revision : need.revision - 1
+    if (need.phase !== 'closing' || !this.latestReviewApproved(session, need.id, 'verification', verificationRevision)) {
       throw new Error('PactFlow closing requires the closing phase and latest verification approval')
     }
     const nodes = Object.values(this.dagState(session)).filter(node => node.needId === need.id)
@@ -824,7 +937,7 @@ export class PactFlowService extends TypertRemoteService {
     // A change to the task set or a successful commit invalidates the prior approval.
     // F04: the verification approval must have bound this exact delivery subject.
     // A change to the task set or a successful commit invalidates the prior approval.
-    const verifiedSubject = this.latestVerificationSubject(session, need.id, need.revision - 1)
+    const verifiedSubject = this.latestVerificationSubject(session, need.id, verificationRevision)
     if (verifiedSubject === undefined) {
       throw new Error('PactFlow closing requires a verification approval bound to a delivery subject; re-confirm the reviewed tasks')
     }
@@ -844,7 +957,8 @@ export class PactFlowService extends TypertRemoteService {
     if (credentials === undefined) throw new Error('PactFlow Gitea requires the Credentials service')
     const giteaToken = await credentials.resolve(credentialRef(giteaBinding.tokenCredentialRef))
     if (giteaToken === undefined) throw new Error('PactFlow Gitea token credential reference is not configured')
-    const status = await this.gitea.verify(giteaBinding, giteaToken.value, binding.defaultBranch)
+    await checkpoint()
+    const status = await this.gitea.verify(giteaBinding, giteaToken.value, binding.defaultBranch, signal)
     if (!status.branchProtected || status.archived) {
       throw new Error('PactFlow closing requires an active protected Gitea default branch')
     }
@@ -872,6 +986,7 @@ export class PactFlowService extends TypertRemoteService {
       )
       await this.git.verifyClosingTaskRefs(session.header.cwd, binding, expectedTaskRefs, gitSecret)
     }
+    await checkpoint()
     const integration = priorPullRequest?.merged === true ? priorClosing!.closing! : await this.git.prepareClosing(
       session.header.cwd,
       session.id,
@@ -883,6 +998,17 @@ export class PactFlowService extends TypertRemoteService {
       await this.assertValidationProfilesCurrent(session, binding),
       priorClosing?.closing,
       workspaceConfig?.hostBaselineCommands ?? [],
+      async closing => {
+        const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${need.id}-closing`]
+        if (existing === undefined) this.appendCleanupRecord(session, {
+          id: `cleanup-${need.id}-closing`, needId: need.id, target: `closing:${closing.branch}`, closing,
+          closingInputDigest, requiresRelease: true, state: 'pending', attempt: 1,
+        })
+        else if (existing.closing?.commit !== closing.commit || existing.closingInputDigest !== closingInputDigest) throw new Error('Closing push identity changed')
+        await this.ctx.sessions.flush(session)
+        await checkpoint()
+      },
+      signal,
     )
     if (priorClosing?.closing !== undefined && (priorClosing.closing.commit !== integration.commit
       || priorClosing.closing.branch !== integration.branch || priorClosing.closing.worktreePath !== integration.worktreePath)) {
@@ -902,6 +1028,7 @@ export class PactFlowService extends TypertRemoteService {
     const existingPullRequest = priorPullRequest ?? await this.gitea.findPullRequest(
       giteaBinding, giteaToken.value, integration.branch, binding.defaultBranch, integration.commit,
     )
+    await checkpoint()
     const pullRequest = existingPullRequest ?? await this.gitea.createPullRequest(
       giteaBinding,
       giteaToken.value,
@@ -911,11 +1038,12 @@ export class PactFlowService extends TypertRemoteService {
         head: integration.branch,
         base: binding.defaultBranch,
       },
+      signal,
     )
     const merged = pullRequest.merged
       ? pullRequest
       : await this.gitea.mergePullRequest(
-        giteaBinding, giteaToken.value, pullRequest.number, integration.commit,
+        giteaBinding, giteaToken.value, pullRequest.number, integration.commit, signal, checkpoint,
       )
     if (!merged.merged || merged.mergeCommit === undefined) {
       throw new Error('PactFlow Gitea PR did not report a merged commit')
@@ -928,6 +1056,7 @@ export class PactFlowService extends TypertRemoteService {
     await this.git.revalidateMergeCommit(
       session.header.cwd, binding, mergeCommit, gitSecret,
       await this.assertValidationProfilesCurrent(session, binding),
+      signal,
     )
     // F06: if a release was already recorded (crash between the two events), reuse
     // it verbatim and only fill in the missing phase transition.
@@ -989,6 +1118,8 @@ export class PactFlowService extends TypertRemoteService {
   /** Build the dispatch seam host view. */
   private dispatchHost(): DispatchHost {
     return {
+      recoveryForDispatch: (session, nodeId, recovery) => this.recoveryForDispatch(session, nodeId, recovery),
+      interactionSigningPublicKey: () => this.interactionSigningPublicKey(),
       agents: () => this.ctx.get('agents') as AgentRegistry | undefined,
       subagents: () => this.ctx.get('subagents') as SubagentRuntime | undefined,
       events: this.events,
@@ -1004,6 +1135,7 @@ export class PactFlowService extends TypertRemoteService {
       workspaceProjectForSession: session => this.workspaceProjectForSession(session),
       workspaceGitBinding: config => this.workspaceGitBinding(config),
       assertValidationProfilesCurrent: (session, binding) => this.assertValidationProfilesCurrent(session, binding),
+      assertExecutionPlan: (session, nodeId, prompt, execution) => this.assertExecutionPlan(session, nodeId, prompt, execution),
       leaseDuration: value => this.leaseDuration(value),
       node: (session, rawId) => this.node(session, rawId),
       requireRevision: (kind, id, current, expected) => this.requireRevision(kind, id, current, expected),
@@ -1232,6 +1364,7 @@ export class PactFlowService extends TypertRemoteService {
   @Remote('createNeed')
   createNeed(sessionId: string, request: CreatePactFlowNeedRequest): PactFlowNeed {
     const session = this.livePactFlowSession(sessionId)
+    if (this.activeAutopilot(session) !== undefined) throw new Error('挂机期间不创建其它需求，请先暂停挂机')
     this.requireProject(session)
     const id = PactFlowNeedId(request.id)
     const needs = this.ctx.sessionProjections.stateOf(session, 'pactflowNeeds')?.byId ?? {}
@@ -1250,6 +1383,381 @@ export class PactFlowService extends TypertRemoteService {
     }
     this.events.append(session, 'pactflow/need-created', { v: 1, need })
     return need
+  }
+
+  private activeAutopilot(session: Session, needId?: string): PactFlowAutopilotRecord | undefined {
+    return Object.values(this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots ?? {})
+      .find(record => record.state === 'running' && (needId === undefined || record.needId === needId))
+  }
+
+  private updateAutopilot(session: Session, prior: PactFlowAutopilotRecord, changes: Partial<PactFlowAutopilotRecord>): PactFlowAutopilotRecord | undefined {
+    const current = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots?.[prior.needId]
+    if (current?.id !== prior.id || current.revision !== prior.revision) return undefined
+    // Clearing an optional control marker means omitting its JSON key. An
+    // explicit undefined is rejected by the Session event producer.
+    const record = autopilotRecordSchema.parse(Object.fromEntries(Object.entries({
+      ...current, ...changes, revision: current.revision + 1, updatedAt: Date.now(),
+    }).filter(([, value]) => value !== undefined)))
+    this.events.append(session, 'pactflow/autopilot-updated', { v: 1, record })
+    return record
+  }
+
+  private blockAutopilotInSession(session: Session, record: PactFlowAutopilotRecord, reason: string, cancel = false): void {
+    if (this.updateAutopilot(session, record, { state: 'blocked', reason: this.boundedOutcome(reason) }) === undefined) return
+    if (cancel) {
+      (this.ctx.get('agents') as AgentRegistry | undefined)?.get(session.id)?.cancel({ kind: 'hook', reason: '挂机预算或授权阻塞' })
+      void this.cancelRecoveredAutopilotRuns(session, record.needId).catch(error => {
+        const current = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots?.[record.needId]
+        if (current?.id === record.id) this.updateAutopilot(session, current, { reason: `${reason}；外部任务取消未完成：${this.boundedOutcome(error)}` })
+      })
+    }
+  }
+
+  private async cancelRecoveredAutopilotRuns(session: Session, needId: string): Promise<void> {
+    const failures: string[] = []
+    for (const initial of Object.values(this.runState(session))) {
+      if (this.dagState(session)[initial.nodeId]?.needId !== needId || this.isTerminalRun(initial)) continue
+      const controller = this.recoveryControllers.get(`${session.id}:${initial.id}`)
+      if (controller === undefined || initial.k3s === undefined) continue
+      // Stopping an observation alone does not stop a cluster Job. Use its
+      // existing UID-checked cancellation path before aborting the observer:
+      // the recovery loop interprets its abort as a confirmed cancellation.
+      try { await this.workerForRun(initial.k3s).cancelRun(initial.k3s) } catch (error) {
+        failures.push(`${initial.id}: ${this.boundedOutcome(error)}`)
+        continue
+      }
+      controller.abort('用户停止挂机，集群取消已确认')
+      const current = this.runState(session)[initial.id]
+      if (current !== undefined && !this.isTerminalRun(current)) this.settleRunInSession(session, {
+        runId: current.id, claimId: current.claimId, expectedNodeRevision: this.node(session, current.nodeId).revision,
+        state: 'cancelled', outcome: '挂机停止，已取消精确匹配的集群任务',
+      })
+    }
+    if (failures.length > 0) throw new Error(`集群任务取消未确认：${failures.join('；')}`)
+  }
+
+  private async assertAutopilotScope(session: Session, record: PactFlowAutopilotRecord): Promise<void> {
+    if (this.ctx.get('sessionPersistence') === undefined) throw new Error('挂机会话持久化服务不可用')
+    if (Date.now() >= record.expiresAt) throw new Error('挂机授权已过期，请重新授权')
+    const digest = await this.autopilotScope(session, record.needId)
+    const current = this.activeAutopilot(session, record.needId)
+    if (current?.id !== record.id || digest !== record.scopeDigest) throw new Error('挂机授权已暂停或需求、仓库、执行配置发生变化')
+  }
+
+  private async autopilotOptions(sessionId: string): Promise<readonly PactFlowExecutionPlan['nodes'][number]['execution'][]> {
+    const options = await this.executionOptions(sessionId)
+    const cluster = options.filter(route => route.kind === 'k3s')
+    return cluster.length > 0 ? cluster : options
+  }
+
+  private async autopilotScope(session: Session, needId: string): Promise<string> {
+    const options = await this.autopilotOptions(String(session.id))
+    return executionDigest({ scope: await this.executionPlanScope(session, needId), options,
+      localIdentities: options.filter(route => route.kind === 'git').map(route => this.executionProviderIdentity(route.provider)) })
+  }
+
+  private interactionSigningPublicKey(): Promise<string> { return this.interactionSigner.publicKey() }
+
+  @Remote('answerWorkerInteraction')
+  async answerWorkerInteraction(sessionId: string, request: AnswerWorkerInteractionRequest): Promise<WorkerInteractionRecord> {
+    return await this.workerInteractions.answer(this.livePactFlowSession(sessionId), request)
+  }
+
+  @Remote('autopilotPreview')
+  async autopilotPreview(sessionId: string, needId: string): Promise<PactFlowAutopilotPreview> {
+    if (this.ctx.get('sessionPersistence') === undefined) throw new Error('请先配置会话持久化，再开启挂机')
+    const session = this.livePactFlowSession(sessionId)
+    const need = this.need(session, needId)
+    const config = await this.workspaceProjectForSession(session)
+    const binding = this.requireProject(session).git ?? this.workspaceGitBinding(config)
+    if (binding?.gitea === undefined) throw new Error('挂机到代码交付需要先绑定可收口的 Git/Gitea 仓库')
+    const profiles = await this.assertValidationProfilesCurrent(session, binding)
+    if (profiles.length === 0) throw new Error('请先登记并选择至少一个宿主验证配置，再开启自动交付')
+    const executionOptions = await this.autopilotOptions(sessionId)
+    if (executionOptions.length === 0) throw new Error('请先配置可用执行规格')
+    return { needId, needRevision: need.revision, title: need.title, description: need.description,
+      repository: redactUrlCredentials(binding.remoteUrl), branch: binding.defaultBranch,
+      scopeDigest: await this.autopilotScope(session, needId), executionOptions,
+      validationProfiles: profiles.map(profile => profile.displayName ?? profile.id) }
+  }
+
+  @Remote('startAutopilot')
+  async startAutopilot(sessionId: string, request: PactFlowStartAutopilotRequest): Promise<PactFlowAutopilotRecord> {
+    if (request.confirm !== 'start-scoped-autopilot') throw new Error('必须由用户明确授权开启本需求挂机')
+    const limits = autopilotLimitsSchema.parse(request.limits)
+    const session = this.livePactFlowSession(sessionId)
+    if (this.need(session, request.needId).phase === 'deployed') throw new Error('需求已交付，无需再次挂机')
+    if (this.activeAutopilot(session) !== undefined) throw new Error('当前会话已有挂机需求，请先暂停或停止')
+    const agent = (this.ctx.get('agents') as AgentRegistry | undefined)?.get(session.id)
+    if (agent === undefined || typeof agent.followup !== 'function') throw new Error('挂机需要已连接的编排会话')
+    if (agent.status !== 'idle') throw new Error('请先结束当前轮次，再开启挂机')
+    const preview = await this.autopilotPreview(sessionId, request.needId)
+    if (preview.needRevision !== request.expectedNeedRevision || preview.scopeDigest !== request.expectedScopeDigest) throw new Error('启动预览已过期，请重新检查后授权')
+    if (this.activeAutopilot(session) !== undefined || agent.status !== 'idle') throw new Error('会话状态在授权期间变化')
+    const previous = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots?.[request.needId]
+    const now = Date.now()
+    const record: PactFlowAutopilotRecord = { id: `autopilot-${randomUUID()}`, needId: request.needId,
+      revision: (previous?.revision ?? 0) + 1, state: 'running', scopeDigest: preview.scopeDigest,
+      repository: preview.repository, branch: preview.branch, limits, startedAt: now, expiresAt: now + limits.maxDurationMs,
+      startSequence: session.events.length, initialRunIds: Object.keys(this.runState(session)), modelSteps: 0, wakeCount: 0,
+      stalledTurns: 0, updatedAt: now, reason: '用户已授权本需求挂机，等待宿主推进' }
+    this.events.append(session, 'pactflow/autopilot-updated', { v: 1, record })
+    return record
+  }
+
+  @Remote('controlAutopilot')
+  async controlAutopilot(sessionId: string, needId: string, expectedRevision: number, action: 'pause' | 'resume' | 'stop'): Promise<PactFlowAutopilotRecord> {
+    const session = this.livePactFlowSession(sessionId)
+    const record = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots?.[needId]
+    if (record === undefined || record.revision !== expectedRevision) throw new Error('挂机控制状态已变化，请刷新')
+    if (!['pause', 'resume', 'stop'].includes(action)) throw new Error('未知挂机控制操作')
+    if (['stopped', 'completed'].includes(record.state)) throw new Error('该次挂机已结束，请重新授权')
+    if (action === 'pause' && record.state !== 'running') throw new Error('只有运行中的挂机可以暂停')
+    if (action === 'resume') {
+      if (!['paused', 'blocked'].includes(record.state)) throw new Error('当前挂机状态不可恢复')
+      if (Date.now() >= record.expiresAt || record.modelSteps >= record.limits.maxModelSteps) throw new Error('预算或授权已耗尽，请重新授权')
+      if (record.scopeDigest !== await this.autopilotScope(session, needId)) throw new Error('需求或执行配置变化，请重新授权')
+      if (Object.values(this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots ?? {}).some(item => item.needId !== needId && item.state === 'running')) throw new Error('会话已有其它挂机需求')
+    }
+    const next = this.updateAutopilot(session, record, {
+      state: action === 'pause' ? 'paused' : action === 'resume' ? 'running' : 'stopped',
+      reason: action === 'pause' ? '用户暂停后续推进；当前任务可继续完成' : action === 'resume' ? '用户恢复挂机' : '用户停止挂机，保留执行现场',
+      ...(action === 'resume' ? { stalledTurns: 0, lastWakeId: undefined } : {}),
+    })
+    if (next === undefined) throw new Error('挂机控制状态已变化，请刷新')
+    if (action === 'stop') {
+      const message = session.events.findLast(event => event.type === 'user/message')
+      const ownsTurn = message?.type === 'user/message' && message.data.id === record.lastWakeId
+        && message.data.source.kind === 'plugin' && message.data.source.plugin === 'dsh-pactflow/autopilot'
+      if (ownsTurn) (this.ctx.get('agents') as AgentRegistry | undefined)?.get(session.id)?.cancel({ kind: 'user' })
+      try { await this.cancelRecoveredAutopilotRuns(session, needId) } catch (error) {
+        const current = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.autopilots?.[needId]
+        if (current?.id === record.id) this.updateAutopilot(session, current, { reason: `已停止后续推进；外部任务取消未完成，需对账：${this.boundedOutcome(error)}` })
+        throw error
+      }
+    }
+    return next
+  }
+
+  /** Models may report a blocker, but cannot grant or resume their own authority. */
+  blockAutopilot(sessionId: string, needId: string, reason: string): void {
+    const session = this.livePactFlowSession(sessionId)
+    const record = this.activeAutopilot(session, needId)
+    if (record === undefined) throw new Error('该需求没有运行中的挂机')
+    this.blockAutopilotInSession(session, record, pactFlowReviewNote(reason))
+  }
+
+  private async executionPlanScope(session: Session, needId: string): Promise<string> {
+    const workspace = await this.workspaceProjectForSession(session)
+    const project = this.requireProject(session)
+    const need = this.need(session, needId)
+    // Phase/retry/revision counters are progress, not changes to the approved work.
+    const { revision: _pr, createdAt: _pc, updatedAt: _pu, ...projectContent } = project
+    const { revision: _wr, createdAt: _wc, updatedAt: _wu, ...workspaceContent } = workspace ?? {}
+    return executionDigest({ sessionId: session.id, need: { id: need.id, title: need.title, description: need.description }, project: projectContent, workspace: workspaceContent,
+      infrastructure: this.infrastructure?.settings, legacyK3s: this.legacyK3sConfig,
+      executionOptions: await this.executionOptions(String(session.id)) })
+  }
+
+  private validateExecutionPlan(session: Session, needId: string, plan: PactFlowExecutionPlan): void {
+    executionPlanSchema.parse(plan)
+    const dag = this.dagState(session)
+    for (const node of Object.values(dag).filter(node => node.needId === needId)) {
+      const proposed = plan.nodes.find(item => item.id === node.id)
+      if (proposed === undefined || !planNodeMatches(node, proposed)) throw new Error(`Execution plan conflicts with existing node "${node.id}"; existing history cannot be replaced`)
+    }
+    for (const node of plan.nodes) {
+      if (dag[node.id] !== undefined && dag[node.id]!.needId !== needId) throw new Error(`Execution plan node "${node.id}" belongs to another Need`)
+    }
+  }
+
+  /** Safe registered routes for the planner; no endpoint or credential values. */
+  async executionOptions(sessionId: string): Promise<readonly PactFlowExecutionPlan['nodes'][number]['execution'][]> {
+    const session = this.livePactFlowSession(sessionId)
+    const workspace = await this.workspaceProjectForSession(session)
+    const configured = workspace?.worker?.agentProfiles.map(profile => ({
+      kind: 'k3s' as const, templateId: profile.templateId, agentProfileId: profile.id,
+      modelConnectionId: profile.modelConnectionId, workerPoolId: this.project(sessionId).project?.workerPoolId ?? workspace.worker!.workerPoolId,
+    }))
+    const subagents = this.ctx.get('subagents') as SubagentRuntime | undefined
+    return [
+      ...(configured ?? this.k3s?.listTemplates().map(template => ({ kind: 'k3s' as const, templateId: template.id })) ?? []),
+      ...(subagents?.list().filter(name => ['spawn', 'fork'].includes(name) && subagents.getProvider(name)?.capabilities?.cwd === true)
+        .map(provider => ({ kind: 'git' as const, provider })) ?? []),
+    ]
+  }
+
+  private async canonicalExecutionRoute(sessionId: string, requested: PactFlowExecutionPlan['nodes'][number]['execution']): Promise<PactFlowExecutionPlan['nodes'][number]['execution']> {
+    const choices = (await this.executionOptions(sessionId)).filter(route => {
+      if (requested.kind === 'git') return route.kind === 'git' && route.provider === requested.provider
+      return route.kind === 'k3s' && route.templateId === requested.templateId
+        && (requested.agentProfileId === undefined || route.agentProfileId === requested.agentProfileId)
+        && (requested.modelConnectionId === undefined || route.modelConnectionId === requested.modelConnectionId)
+        && (requested.workerPoolId === undefined || route.workerPoolId === requested.workerPoolId)
+    })
+    if (choices.length !== 1) throw new Error('执行规格未注册或存在多个匹配；请从 pactflow_view.executionOptions 选择明确规格')
+    return requested.kind === 'git' && requested.recovery ? { ...choices[0] as Extract<PactFlowExecutionPlan['nodes'][number]['execution'], { kind: 'git' }>, recovery: requested.recovery } : choices[0]!
+  }
+
+  private executionProviderIdentity(name: string): string {
+    const provider = (this.ctx.get('subagents') as SubagentRuntime | undefined)?.getProvider(name)
+    if (provider === undefined) throw new Error('执行器未注册，请重新确认执行方案')
+    let identity = this.executionProviderIds.get(provider)
+    if (identity === undefined) { identity = randomUUID(); this.executionProviderIds.set(provider, identity) }
+    return identity
+  }
+
+  /** Same-process Agent entry; never exposed as a Remote accepting claimed approval. */
+  async confirmExecutionPlan(agent: Agent, callId: ToolCallId, input: unknown, signal: AbortSignal): Promise<{ readonly approved: boolean; readonly review?: PactFlowReview; readonly feedback?: string }> {
+    const session = this.livePactFlowSession(String(agent.session.id))
+    if (session !== agent.session) throw new Error('Execution plan caller session mismatch')
+    const request = executionPlanRequestSchema.parse(input)
+    const needId = request.needId
+    const active = this.activeAutopilot(session)
+    if (active !== undefined && active.needId !== needId) throw new Error('执行方案不属于当前挂机授权需求')
+    this.need(session, needId)
+    for (const plan of request.plans) for (const node of plan.nodes) {
+      node.execution = await this.canonicalExecutionRoute(String(session.id), node.execution)
+      const route = node.execution
+      if (route.kind === 'git' && route.recovery) await this.recoveryForDispatch(session, node.id, route.recovery)
+      if (route.kind === 'git') node.providerIdentity = this.executionProviderIdentity(route.provider)
+      else delete node.providerIdentity
+      const template = route.kind === 'k3s' ? this.k3s?.listTemplates().find(item => item.id === route.templateId) : undefined
+      node.executionDescription = route.kind === 'git' ? `本地隔离执行器：${route.provider}`
+        : `资源池：${route.workerPoolId ?? '宿主已配置的默认集群'}；模型：${route.modelConnectionId ?? template?.model ?? '由所选模板指定'}；执行规格：${route.agentProfileId ?? route.templateId}`
+    }
+    const autopilot = this.activeAutopilot(session, needId)
+    if (autopilot !== undefined) {
+      await this.assertAutopilotScope(session, autopilot)
+      const plan = request.plans.find(item => item.id === request.recommendedId)!
+      const permitted = await this.autopilotOptions(String(session.id))
+      if (plan.nodes.some(node => !permitted.some(route => executionDigest(route) === executionDigest(node.execution)))) throw new Error('推荐方案使用了挂机授权之外的执行资源')
+      this.validateExecutionPlan(session, needId, plan)
+      const counts = autopilotWorkerCounts(this.snapshotOfLive(session), autopilot)
+      const newNodes = plan.nodes.filter(node => this.dagState(session)[node.id] === undefined).length
+      if (counts.starts + newNodes > autopilot.limits.maxWorkerStarts) throw new Error('推荐方案超过挂机执行次数预算')
+      signal.throwIfAborted()
+      const planScope = await this.executionPlanScope(session, needId)
+      await this.assertAutopilotScope(session, autopilot)
+      return { approved: true, review: this.materializePlanReview(session, needId, plan, planScope,
+        executionDigest({ request, autopilotId: autopilot.id }), { source: 'autopilot-policy', id: autopilot.id }) }
+    }
+    return await confirmExecutionPlanChoice({
+      approval: this.ctx.get('approval') as ApprovalService | undefined,
+      questions: this.ctx.get('userQuestions') as UserQuestionService | undefined,
+      scopeDigest: () => this.executionPlanScope(session, needId),
+      graphDigest: () => executionDigest(Object.values(this.dagState(session)).filter(node => node.needId === needId)),
+      validate: plan => this.validateExecutionPlan(session, needId, plan),
+      commit: (plan, scopeDigest, proposalDigest, approvalId) => {
+        this.validateExecutionPlan(session, needId, plan)
+        const decided = session.events.find(event => event.type === 'approval/decided' && String(event.data.id) === approvalId && event.data.outcome === 'allowed-once')
+        if (decided === undefined) throw new Error('Execution plan requires a granted native approval')
+        return this.materializePlanReview(session, needId, plan, scopeDigest, proposalDigest, { source: 'dsh-approval', id: approvalId })
+      },
+    }, agent, callId, request, signal)
+  }
+
+  private materializePlanReview(session: Session, needId: string, plan: PactFlowExecutionPlan, scopeDigest: string,
+    proposalDigest: string, authority: { readonly source: 'dsh-approval' | 'autopilot-policy'; readonly id: string }): PactFlowReview {
+    this.validateExecutionPlan(session, needId, plan)
+    if (authority.source === 'autopilot-policy' && this.activeAutopilot(session, needId)?.id !== authority.id) throw new Error('挂机授权已撤销')
+    const create = (id: string): void => {
+      if (this.dagState(session)[id] !== undefined) return
+      const node = plan.nodes.find(item => item.id === id)!
+      node.dependencies.forEach(create)
+      this.createNode(String(session.id), { id: node.id, needId, title: node.title, dependencies: node.dependencies, codeInputs: node.codeInputs })
+    }
+    plan.nodes.forEach(node => create(node.id))
+    const need = this.need(session, needId)
+    const review: PactFlowReview = {
+      id: `review-${randomUUID()}` as PactFlowReview['id'], needId: need.id, kind: 'plan', decision: 'approved',
+      note: `${authority.source === 'dsh-approval' ? '用户批准' : '按用户挂机预授权选择'}${plan.mode === 'single' ? '单节点' : '拆分'}方案：${plan.summary}`,
+      recordedAt: Date.now(), needRevision: need.revision, evidenceDigest: proposalDigest, source: authority.source,
+      ...(authority.source === 'dsh-approval' ? { approvalRequestId: authority.id } : { autopilotId: authority.id }),
+      subjectDigest: executionDigest({ id: need.id, title: need.title, description: need.description }),
+      executionPlan: { plan, scopeDigest, proposalDigest },
+    }
+    this.events.append(session, 'pactflow/review-recorded', { v: 1, review })
+    return review
+  }
+
+  private policyReviewValid(session: Session, review: PactFlowReview): boolean {
+    const record = this.activeAutopilot(session, String(review.needId))
+    return review.source === 'autopilot-policy' && record !== undefined && record.id === review.autopilotId && Date.now() < record.expiresAt
+  }
+
+  private checkAutopilotDispatchBudget(session: Session, needId: string): void {
+    const record = this.activeAutopilot(session, needId)
+    if (record === undefined) return
+    const counts = autopilotWorkerCounts(this.snapshotOfLive(session), record)
+    if (Date.now() >= record.expiresAt || counts.starts >= record.limits.maxWorkerStarts) {
+      this.blockAutopilotInSession(session, record, '挂机执行次数或时长预算耗尽')
+      throw new Error('挂机执行预算耗尽')
+    }
+    if (counts.active >= record.limits.maxConcurrency) throw new Error('挂机并发额度已满，请等待当前任务结束')
+  }
+
+  /** Returns null in manual mode; automatic decisions never create human audit pairs. */
+  async tryAutopilotReview(sessionId: string, request: { readonly needId: string; readonly expectedRevision: number;
+    readonly kind: PactFlowReview['kind']; readonly decision: PactFlowReview['decision']; readonly note: string }): Promise<PactFlowReview | null> {
+    const session = this.livePactFlowSession(sessionId)
+    const active = this.activeAutopilot(session)
+    if (active !== undefined && active.needId !== request.needId) throw new Error('评审不属于当前挂机授权需求')
+    const record = this.activeAutopilot(session, request.needId)
+    if (record === undefined) return null
+    await this.assertAutopilotScope(session, record)
+    const need = this.need(session, request.needId)
+    this.requireRevision('need', need.id, need.revision, request.expectedRevision)
+    const note = pactFlowReviewNote(request.note)
+    if (request.kind === 'plan' && request.decision === 'approved') throw new Error('请提交具体执行方案，由挂机策略选择')
+    if (request.kind === 'verification' && request.decision === 'approved') {
+      const nodes = Object.values(this.dagState(session)).filter(node => node.needId === need.id)
+      if (nodes.length === 0 || nodes.some(node => node.state !== 'succeeded')) throw new Error('自动验收需要所有节点实际成功')
+      const runs = nodes.map(node => Object.values(this.runState(session)).filter(run => run.nodeId === node.id && run.state === 'succeeded').at(-1))
+      if (runs.some(run => run?.gitResult?.commit === undefined)) throw new Error('自动验收缺少宿主验证的提交')
+      const config = await this.workspaceProjectForSession(session)
+      const binding = this.requireProject(session).git ?? this.workspaceGitBinding(config)
+      if (binding === undefined) throw new Error('自动验收缺少仓库绑定')
+      const profiles = await this.assertValidationProfilesCurrent(session, binding)
+      if (profiles.length === 0 || runs.some(run => profiles.some(profile => !run?.gitResult?.validations.some(value => value.exitCode === 0
+        && value.command === profile.command && JSON.stringify(value.args) === JSON.stringify(profile.args))))) throw new Error('自动验收缺少必需验证成功证据')
+      this.enforceValidationPolicy(binding, runs as PactFlowRun[], config)
+    }
+    await this.assertAutopilotScope(session, record)
+    this.requireRevision('need', need.id, this.need(session, need.id).revision, request.expectedRevision)
+    const review: PactFlowReview = { id: `review-${randomUUID()}` as PactFlowReview['id'], needId: need.id,
+      kind: request.kind, decision: request.decision, note, recordedAt: Date.now(), needRevision: need.revision,
+      source: 'autopilot-policy', autopilotId: record.id,
+      evidenceDigest: executionDigest({ sessionId, request, authorization: record.id, scope: record.scopeDigest }),
+      ...(request.kind === 'verification' ? { subjectDigest: this.deliverySubjectDigest(session, need.id) } : {}),
+    }
+    this.events.append(session, 'pactflow/review-recorded', { v: 1, review })
+    return review
+  }
+
+  /** Verify the exact approved work at both sides of the asynchronous admission queue. */
+  async assertExecutionPlan(session: Session, nodeId: string, prompt: string, execution: PactFlowExecutionPlan['nodes'][number]['execution']): Promise<PactFlowExecutionPlan['nodes'][number]['execution']> {
+    const node = this.node(session, nodeId)
+    const autopilot = this.activeAutopilot(session, String(node.needId))
+    if (autopilot !== undefined) await this.assertAutopilotScope(session, autopilot)
+    const canonicalRoute = await this.canonicalExecutionRoute(String(session.id), execution)
+    const scopeDigest = await this.executionPlanScope(session, String(node.needId))
+    const review = [...Object.values(this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {})]
+      .filter(item => item.needId === node.needId && item.kind === 'plan').at(-1)
+    const authorized = review?.executionPlan
+    if (review?.decision !== 'approved' || (review.source !== 'dsh-approval' && !this.policyReviewValid(session, review)) || authorized === undefined
+      || authorized.scopeDigest !== scopeDigest || review.evidenceDigest !== authorized.proposalDigest) throw new Error('请先通过 pactflow_confirm_execution_plan 确认当前执行方案；缺少批准或方案已变化')
+    const asked = session.events.findIndex(event => event.type === 'approval/asked' && String(event.data.id) === review.approvalRequestId
+      && event.data.toolName === 'pactflow_confirm_execution_plan' && event.data.reason?.includes(authorized.proposalDigest))
+    const decided = session.events.findIndex(event => event.type === 'approval/decided' && String(event.data.id) === review.approvalRequestId && event.data.outcome === 'allowed-once')
+    const nodes = Object.values(this.dagState(session)).filter(item => item.needId === node.needId)
+    const proposed = authorized.plan.nodes.find(item => item.id === nodeId)
+    const auditValid = review.source === 'autopilot-policy' ? this.policyReviewValid(session, review) : asked >= 0 && decided > asked
+    if (!auditValid || nodes.length !== authorized.plan.nodes.length || proposed === undefined
+      || nodes.some(item => !authorized.plan.nodes.some(candidate => planNodeMatches(item, candidate)))
+      || authorized.plan.nodes.some(item => item.execution.kind === 'git' && item.providerIdentity !== this.executionProviderIdentity(item.execution.provider))
+      || prompt.trim() !== proposed.prompt || executionDigest(canonicalRoute) !== executionDigest(proposed.execution)) throw new Error('执行节点、指令或执行规格不匹配已批准方案；请重新确认')
+    return canonicalRoute
   }
 
   /** Record one already-authorized human review decision used by a later phase gate. */
@@ -1339,6 +1847,8 @@ export class PactFlowService extends TypertRemoteService {
   @Remote('createNode')
   createNode(sessionId: string, request: CreatePactFlowNodeRequest): PactFlowNode {
     const session = this.livePactFlowSession(sessionId)
+    const active = this.activeAutopilot(session)
+    if (active !== undefined && active.needId !== request.needId) throw new Error('节点不属于当前挂机授权需求')
     const need = this.need(session, request.needId)
     const id = PactFlowNodeId(request.id)
     const title = request.title.trim()
@@ -1472,6 +1982,7 @@ export class PactFlowService extends TypertRemoteService {
     } = {},
   ): PactFlowClaimResult {
     const current = this.node(session, request.nodeId)
+    this.checkAutopilotDispatchBudget(session, String(current.needId))
     this.requireRevision('node', current.id, current.revision, request.expectedRevision)
     if (current.state === 'paused') {
       throw new Error(`PactFlow node "${current.id}" is paused (retry budget exhausted); waiting for human resume`)
@@ -1689,7 +2200,47 @@ export class PactFlowService extends TypertRemoteService {
     return discovered.filter((record): record is PactFlowProjectRecord => record !== undefined)
   }
 
-  /** List every DSH Workspace with plugin-owned project configuration and live Git facts. */
+  /** Navigation must not depend on repository inspection or session replay. */
+  @Remote('listWorkspaceProjectSummaries')
+  listWorkspaceProjectSummaries(): readonly PactFlowWorkspaceProjectSummary[] {
+    return this.requireWorkspaceRegistry().list().map(workspace => ({
+      workspaceId: String(workspace.id), path: workspace.path, title: workspace.title,
+    }))
+  }
+
+  @Remote('workspaceProjectDetails')
+  async workspaceProjectDetails(workspaceId: string): Promise<PactFlowWorkspaceProjectView> {
+    return await this.workspaceProjectView(this.requireWorkspace(workspaceId))
+  }
+
+  /** Migration is an explicit query, scoped to this workspace's registered sessions. */
+  @Remote('workspaceMigrationCandidates')
+  async workspaceMigrationCandidates(workspaceId: string): Promise<PactFlowWorkspaceProjectView['migrationCandidates']> {
+    const workspace = this.requireWorkspace(workspaceId)
+    const candidates: PactFlowWorkspaceProjectView['migrationCandidates'][number][] = []
+    for (const id of workspace.sessionIds) {
+      const sessionId = String(id)
+      const live = this.ctx.sessions.get(id as never)
+      let project: PactFlowProject | null | undefined
+      if (live !== undefined) {
+        if (this.currentPreset(live) !== 'pactflow') continue
+        project = this.ctx.sessionProjections.stateOf(live, 'pactflowProject')?.project
+      } else {
+        const query = this.ctx.get('sessionQuery') as SessionQueryEngine | undefined
+        if (query === undefined) throw new Error('PactFlow project discovery requires sessionQuery')
+        const stored = await query.readSession(id as never)
+        const values = this.ctx.sessionProjections.restore({}, stored.events, 0, stored.session).snapshot.values
+        if ((values.agentPreset ?? stored.session.agentPreset) !== 'pactflow') continue
+        project = values.pactflowProject?.project
+      }
+      if (project !== null && project !== undefined) candidates.push({
+        sessionId, projectName: project.name, revision: project.revision,
+      })
+    }
+    return candidates
+  }
+
+  /** Legacy aggregate interface retained for existing callers. */
   @Remote('listWorkspaceProjects')
   async listWorkspaceProjects(): Promise<readonly PactFlowWorkspaceProjectView[]> {
     const registry = this.requireWorkspaceRegistry()
@@ -2679,11 +3230,45 @@ export class PactFlowService extends TypertRemoteService {
   ): Promise<PactFlowClaimResult> {
     const session = this.livePactFlowSession(sessionId)
     const execution = this.localExecution(session, request, false)
+    await this.assertExecutionPlan(session, request.nodeId, request.prompt, { kind: 'git', provider: request.provider })
     const owned = this.claimNodeInSession(session, request)
     return await this.executeClaimed(session, request, execution, owned)
   }
 
-  /** Create a Host-owned task worktree, run a child there, and require a clean descendant commit. */
+  private async recoveryForDispatch(session: Session, nodeId: string, recovery: { readonly runId: string; readonly digest: string }): Promise<RecoverySnapshot> {
+    const node = this.node(session, nodeId)
+    const run = this.runState(session)[PactFlowRunId(recovery.runId)]
+    const retained = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${recovery.runId}-git-retained`]
+    if (!run || run.nodeId !== node.id || run.state !== 'failed' || !run.git || run.k3s
+      || retained?.retain !== true || retained.needId !== node.needId || retained.runId !== run.id) throw new Error('恢复仅允许当前需求节点已保留的本地失败运行')
+    if ((run.git.codeInputs?.length ?? 0) > 0 || (node.codeInputs?.length ?? 0) > 0) throw new Error('含前置代码合入的候选需要单独重定基线，不能自动恢复')
+    const candidate = await this.git.recoverySnapshot(session.header.cwd, recovery.runId, run.git)
+    if (recovery.digest !== candidate.digest) throw new Error('恢复候选内容已变化，请重新读取并确认方案')
+    return candidate
+  }
+
+  @Remote('localRecoveryCandidates')
+  async localRecoveryCandidates(sessionId: string, nodeId: string): Promise<readonly PactFlowRecoveryCandidate[]> {
+    const session = this.livePactFlowSession(sessionId)
+    const node = this.node(session, nodeId)
+    const candidates: PactFlowRecoveryCandidate[] = []
+    for (const run of Object.values(this.runState(session)).filter(run => run.nodeId === node.id && run.state === 'failed' && run.git && !run.k3s)) {
+      const retained = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${run.id}-git-retained`]
+      if (retained?.retain !== true || retained.runId !== run.id || retained.needId !== node.needId) continue
+      const identity = { runId: String(run.id), nodeId, needId: String(node.needId) }
+      try {
+        const snapshot = await this.git.recoverySnapshot(session.header.cwd, String(run.id), run.git!)
+        await this.recoveryForDispatch(session, nodeId, { runId: String(run.id), digest: snapshot.digest })
+        candidates.push({ ...identity, available: true, baseCommit: snapshot.baseCommit,
+          sourceHead: snapshot.sourceHead, digest: snapshot.digest, changedFiles: snapshot.changedFiles })
+      } catch (error) {
+        candidates.push({ ...identity, available: false, reason: this.boundedOutcome(error) })
+      }
+    }
+    return candidates
+  }
+
+  /** Create a Host-owned independent repository, run a child there, and require a clean descendant commit. */
   @Remote('dispatchGitNode')
   async dispatchGitNode(
     sessionId: string,
@@ -3200,12 +3785,12 @@ export class PactFlowService extends TypertRemoteService {
     const reviews = Object.values(
       this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {},
     ).filter(review => review.needId === needId && review.kind === kind
-      && review.source === 'dsh-approval'
-      && review.approvalRequestId !== undefined
+      && ((review.source === 'dsh-approval' && review.approvalRequestId !== undefined) || this.policyReviewValid(session, review))
       && review.evidenceDigest !== undefined
       && review.needRevision !== undefined
       && reviewRevision !== undefined
-      && review.needRevision === reviewRevision)
+      && (review.needRevision === reviewRevision || (kind === 'plan' && review.executionPlan !== undefined
+        && review.subjectDigest === executionDigest({ id: currentNeed?.id, title: currentNeed?.title, description: currentNeed?.description }))))
       .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
     return reviews[0]?.decision === 'approved'
   }
@@ -3230,8 +3815,7 @@ export class PactFlowService extends TypertRemoteService {
     const reviews = Object.values(
       this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.reviews ?? {},
     ).filter(review => review.needId === needId && review.kind === 'verification'
-      && review.source === 'dsh-approval'
-      && review.approvalRequestId !== undefined
+      && ((review.source === 'dsh-approval' && review.approvalRequestId !== undefined) || this.policyReviewValid(session, review))
       && review.needRevision === needRevision)
       .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
     const latest = reviews[0]

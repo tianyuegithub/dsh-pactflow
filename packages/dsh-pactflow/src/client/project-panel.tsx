@@ -1,3 +1,4 @@
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -17,6 +18,7 @@ import type {
   PactFlowWorkerPoolStatus,
   PactFlowWorkspaceProjectConfig,
   PactFlowWorkspaceProjectView,
+  PactFlowWorkspaceProjectSummary,
 } from '../types.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
 import { createRequestGate } from './request-gate.ts'
@@ -25,7 +27,9 @@ import { ValidationProfileEditor } from './validation-profile-editor.tsx'
 import type { PactFlowValidationProfileInput } from '../types.ts'
 
 export interface PactFlowProjectPanelFace {
-  list(): Promise<readonly PactFlowWorkspaceProjectView[]>
+  list(): Promise<readonly PactFlowWorkspaceProjectSummary[]>
+  details(workspaceId: string): Promise<PactFlowWorkspaceProjectView>
+  migrationCandidates(workspaceId: string): Promise<PactFlowWorkspaceProjectView['migrationCandidates']>
   catalogs(): Promise<{
     readonly clusters: readonly { readonly id: string; readonly displayName: string }[]
     readonly pools: readonly PactFlowWorkerPoolStatus[]
@@ -80,12 +84,40 @@ function friendlyProtocol(value: string): string {
   } as Readonly<Record<string, string>>)[value] ?? value
 }
 
-export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, savePolicy, saveHostBaseline, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
+interface ProjectPanelTarget { workspaceId?: string | undefined; cwd?: string | undefined }
+const projectPanelNavigation = createSnapshotStore<{ sequence: number; target: ProjectPanelTarget }>({ sequence: 0, target: {} })
+/** Transient UI navigation only; project configuration remains owned by its existing panel. */
+export function requestProjectPanel(target: ProjectPanelTarget): void {
+  projectPanelNavigation.set({ sequence: projectPanelNavigation.getSnapshot().sequence + 1, target })
+}
+
+export function PactFlowProjectPanel({ wide, list, details, migrationCandidates, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, savePolicy, saveHostBaseline, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
   const [open, setOpen] = useState(false)
-  const [rows, setRows] = useState<readonly PactFlowWorkspaceProjectView[]>([])
+  const navigationTarget = useRef<ProjectPanelTarget | null>(null)
+  useEffect(() => projectPanelNavigation.subscribe(() => {
+    const request = projectPanelNavigation.getSnapshot()
+    navigationTarget.current = request.target
+    setSelectedId(null)
+    setListVersion(value => value + 1)
+    setOpen(true)
+  }), [])
+  const [rows, setRows] = useState<readonly PactFlowWorkspaceProjectSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof catalogs>> | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [operationBusy, setBusy] = useState(false)
+  const busy = operationBusy || catalog === null
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const [listVersion, setListVersion] = useState(0)
+  const [catalogVersion, setCatalogVersion] = useState(0)
+  const [detailVersion, setDetailVersion] = useState(0)
+  const [listLoading, setListLoading] = useState(true)
+  const [listError, setListError] = useState<string | null>(null)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [detail, setDetail] = useState<PactFlowWorkspaceProjectView | null>(null)
+  const [candidates, setCandidates] = useState<PactFlowWorkspaceProjectView['migrationCandidates'] | null>(null)
+  const [migrationLoading, setMigrationLoading] = useState(false)
+  const [migrationError, setMigrationError] = useState<string | null>(null)
   const [savingAction, setSavingAction] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const { feedback, showFeedback, clearFeedback } = useActionFeedback()
@@ -110,29 +142,73 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   const [draftName, setDraftName] = useState('')
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [migrationPreview, setMigrationPreview] = useState<string | null>(null)
-  const selected = rows.find(row => row.workspaceId === selectedId) ?? rows[0]
+  const selectedRow = rows.find(row => row.workspaceId === selectedId)
+  const selected = detail?.workspaceId === selectedRow?.workspaceId ? detail ?? undefined : undefined
   // Rapid workspace/cluster switches must not let a slow earlier response land on
   // the newer selection.
   const refreshGate = useRef(createRequestGate())
+  const detailGate = useRef(createRequestGate())
+  const migrationGate = useRef(createRequestGate())
   const gitSecretsGate = useRef(createRequestGate())
 
-  const refresh = (): void => {
-    setBusy(true); setError(null)
-    refreshGate.current.invalidate()
+  const refresh = (): void => { setRefreshVersion(current => current + 1) }
+
+  useEffect(() => {
+    if (!open) return
+    setListLoading(true); setListError(null)
     const token = refreshGate.current.next()
-    void Promise.all([list(), catalogs()]).then(([nextRows, nextCatalog]) => {
+    void list().then(nextRows => {
       if (!refreshGate.current.isLatest(token)) return
-      setRows(nextRows); setCatalog(nextCatalog)
-      setSelectedId(current => current !== null && nextRows.some(row => row.workspaceId === current)
-        ? current : nextRows[0]?.workspaceId ?? null)
-      setBusy(false)
+      setRows(nextRows)
+      const target = navigationTarget.current
+      setSelectedId(current => target !== null
+        ? nextRows.find(row => target.workspaceId !== undefined ? row.workspaceId === target.workspaceId : target.cwd !== undefined && row.path === target.cwd)?.workspaceId ?? null
+        : current !== null && nextRows.some(row => row.workspaceId === current)
+          ? current : nextRows[0]?.workspaceId ?? null)
+      setListLoading(false)
     }, failure => {
       if (!refreshGate.current.isLatest(token)) return
-      setBusy(false); setError(message(failure))
+      setListLoading(false); setListError(message(failure))
+    })
+    return () => { refreshGate.current.invalidate() }
+  }, [open, refreshVersion, listVersion])
+
+  useEffect(() => {
+    if (!open) return
+    let current = true
+    setCatalog(null); setCatalogError(null)
+    void catalogs().then(value => { if (current) setCatalog(value) }, failure => {
+      if (current) setCatalogError(message(failure))
+    })
+    return () => { current = false }
+  }, [open, refreshVersion, catalogVersion])
+
+  useEffect(() => {
+    setDetail(null); setDetailError(null); setError(null)
+    setCandidates(null); setMigrationError(null); setMigrationLoading(false); setMigrationPreview(null)
+    migrationGate.current.invalidate()
+    if (!open || selectedRow === undefined) return
+    const token = detailGate.current.next()
+    void details(selectedRow.workspaceId).then(value => {
+      if (detailGate.current.isLatest(token)) setDetail(value)
+    }, failure => {
+      if (detailGate.current.isLatest(token)) setDetailError(message(failure))
+    })
+    return () => { detailGate.current.invalidate(); migrationGate.current.invalidate() }
+  }, [open, selectedRow?.workspaceId, refreshVersion, detailVersion])
+
+  const loadMigrationCandidates = (): void => {
+    if (selected === undefined) return
+    const token = migrationGate.current.next()
+    setMigrationLoading(true); setMigrationError(null); setCandidates(null)
+    void migrationCandidates(selected.workspaceId).then(value => {
+      if (!migrationGate.current.isLatest(token)) return
+      setCandidates(value); setMigrationLoading(false)
+    }, failure => {
+      if (!migrationGate.current.isLatest(token)) return
+      setMigrationError(message(failure)); setMigrationLoading(false)
     })
   }
-
-  useEffect(() => { if (open) refresh() }, [open])
   useEffect(() => {
     if (selected === undefined || catalog === null) return
     const config = selected.config
@@ -153,6 +229,8 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   }, [selected?.workspaceId, selected?.config?.revision, catalog])
 
   useEffect(() => {
+    setGitSecretOptions([])
+    gitSecretsGate.current.invalidate()
     if (!open || clusterId === '' || selected === undefined) return
     // A cluster switch supersedes any in-flight secret lookup.
     gitSecretsGate.current.invalidate()
@@ -169,6 +247,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
       if (!gitSecretsGate.current.isLatest(token)) return
       setError(message(failure))
     })
+    return () => { gitSecretsGate.current.invalidate() }
   }, [open, clusterId, selected?.workspaceId, gitSecrets])
 
   const clusterPools = catalog?.pools.filter(item => item.clusterId === clusterId) ?? []
@@ -179,6 +258,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
     setBusy(true); setError(null)
     if (save !== undefined) setSavingAction(save.id)
     void operation().then(() => {
+      setBusy(false)
       setSavingAction(null)
       if (save !== undefined) showFeedback('success', save.success)
       refresh()
@@ -209,7 +289,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
     if (draftTemplate === undefined) { setError('请选择 Harness'); return }
     if (draftModel === undefined) { setError('请选择兼容模型'); return }
     if (!Number.isSafeInteger(draftConcurrency) || draftConcurrency < 1 || draftConcurrency > 12) {
-      setError('Worker 数量必须是 1-12 的整数'); return
+      setError('最大并发必须是 1-12 的整数'); return
     }
     const duplicate = agentProfiles.some(profile => profile.id !== editingProfileId
       && profile.templateId === draftTemplate.id && profile.modelConnectionId === draftModel.id)
@@ -228,7 +308,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   }
 
   return <div style={wide ? footerRootStyle : footerRailRootStyle}>
-    <button type="button" aria-label="零脉项目" onClick={() => { setConfirmDiscard(false); setOpen(true) }} style={wide ? footerButtonStyle : footerRailButtonStyle}>
+    <button type="button" aria-label="零脉项目" onClick={() => { navigationTarget.current = null; setConfirmDiscard(false); setOpen(true) }} style={wide ? footerButtonStyle : footerRailButtonStyle}>
       <IconAgentPresetOutline16 size={wide ? 16 : 18} />{wide ? <span>零脉项目</span> : null}
     </button>
     {!open ? null : <div role="presentation" style={backdropStyle}>
@@ -249,13 +329,21 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
         </header>
         <div style={bodyStyle}>
           <nav aria-label="工作区项目" style={workspaceListStyle}>
+            {listLoading ? <p role="status">正在加载工作区…</p> : null}
+            {listError === null ? null : <div role="alert"><p style={errorStyle}>工作区加载失败：{listError}</p><button type="button" onClick={() => setListVersion(value => value + 1)} style={secondaryButtonStyle}>重试工作区列表</button></div>}
             {rows.map(row => <button key={row.workspaceId} type="button"
-              onClick={() => setSelectedId(row.workspaceId)}
-              style={row.workspaceId === selected?.workspaceId ? selectedWorkspaceStyle : workspaceStyle}
+              disabled={operationBusy}
+              onClick={() => { navigationTarget.current = null; setSelectedId(row.workspaceId) }}
+              style={row.workspaceId === selectedRow?.workspaceId ? selectedWorkspaceStyle : workspaceStyle}
             ><strong>{row.title}</strong><span style={mutedStyle}>{row.path}</span></button>)}
           </nav>
           <main style={contentStyle}>
-            {selected === undefined ? <p>尚无工作区。</p> : <>
+            {catalogError !== null ? <div role="alert"><p style={errorStyle}>资源目录加载失败：{catalogError}</p><button type="button" onClick={() => setCatalogVersion(value => value + 1)} style={secondaryButtonStyle}>重试资源目录</button></div>
+              : catalog === null ? <p role="status">正在加载资源目录…</p> : null}
+            {selectedRow === undefined ? (!listLoading && listError === null ? <p>{navigationTarget.current !== null ? '当前会话未匹配到已登记工作区，请从左侧明确选择要配置的工作区。' : rows.length === 0 ? '尚无工作区。' : '请从左侧选择工作区。'}</p> : null)
+              : selected === undefined ? detailError === null ? <p role="status">正在加载项目详情…</p>
+                : <div role="alert"><p style={errorStyle}>项目详情加载失败：{detailError}</p><button type="button" onClick={() => setDetailVersion(value => value + 1)} style={secondaryButtonStyle}>重试项目详情</button></div>
+              : <>
               <section style={cardStyle}>
                 <div style={cardHeaderStyle}><h3 style={cardTitleStyle}>Git 仓库</h3><span>修订 {String(selected.config?.revision ?? 0)}</span></div>
                 <dl style={factsStyle}>
@@ -313,7 +401,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                   { id: 'host-baseline', success: '宿主基线保存成功' })} />
               <section style={cardStyle}>
                 <div style={cardHeaderStyle}>
-                  <div><h3 style={cardTitleStyle}>Agent 组合</h3><p style={mutedStyle}>Agent Profile = Harness × Model × Worker 数量</p></div>
+                  <div><h3 style={cardTitleStyle}>Agent 组合</h3><p style={mutedStyle}>执行规格 = 执行器 × 模型；数量为最大并发</p></div>
                   <span style={mutedStyle}>只引用全局配置</span>
                 </div>
 
@@ -357,7 +445,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                     </div>
                     <div style={connectorStyle}><IconPlusOutline16 /></div>
                     <div style={quotaModuleStyle}>
-                      <div style={moduleLabelStyle}><IconQueueOutline14 /><span>Worker 数量</span></div>
+                      <div style={moduleLabelStyle}><IconQueueOutline14 /><span>最大并发</span></div>
                       <input type="number" min={1} max={12} value={draftConcurrency} onChange={event => { setDraftConcurrency(Number(event.currentTarget.value)); setError(null) }} style={moduleSelectStyle} />
                       <span style={moduleMetaStyle}>本项目的并发上限（非预留）· 池全局上限 {String(pool?.maxConcurrency ?? 0)}，超出部分自动排队</span>
                     </div>
@@ -368,30 +456,35 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                   </div>
                 </section>
 
-                <div style={savedHeadingStyle}><strong>已保存的 Agent</strong><span>{String(agentProfiles.length)} 个规格 · 合计 {String(totalWorkers)} 个 Worker</span></div>
+                <p style={mutedStyle}>按任务启动，空闲时不预留执行实例。</p>
+                <div style={savedHeadingStyle}><strong>已配置的执行规格</strong><span>{String(agentProfiles.length)} 个规格 · 最大并发 {String(totalWorkers)}</span></div>
                 {agentProfiles.length === 0 ? <button type="button" onClick={() => document.querySelector<HTMLElement>('[aria-label="Agent 组合器"] select')?.focus()} style={emptyProfileStyle}><IconPlusOutline16 /> 添加第一个 Agent 组合</button> : <div style={profileGridStyle}>{agentProfiles.map((profile, profileIndex) => {
                   const template = catalog?.templates.find(item => item.id === profile.templateId)
                   const model = catalog?.models.find(item => item.id === profile.modelConnectionId)
                   return <article key={profile.id} style={{ ...profileCardStyle, ...profileAccentStyles[profileIndex % profileAccentStyles.length] }}>
                     <div style={profileTopStyle}><div style={{ ...profileIconStyle, ...profileIconAccentStyles[profileIndex % profileIconAccentStyles.length] }}><IconAgentPresetOutline16 /></div><div><strong>{profile.displayName}</strong><p style={mutedStyle}>{friendlyProtocol(model?.apiMode ?? '')}</p></div></div>
-                    <dl style={profileFactsStyle}><div style={profileFactRowStyle}><dt style={profileFactLabelStyle}>Harness</dt><dd style={profileFactValueStyle}>{template?.displayName ?? profile.templateId}</dd></div><div style={profileFactRowStyle}><dt style={profileFactLabelStyle}>模型</dt><dd style={profileFactValueStyle}>{model?.displayName ?? profile.modelConnectionId}</dd></div><div style={profileFactRowStyle}><dt style={profileFactLabelStyle}>数量</dt><dd style={profileFactValueStyle}><span style={capacityDotsStyle}>{Array.from({ length: Math.min(profile.maxConcurrency, 6) }, (_, index) => <IconCheckOutline14 key={index} />)}</span> × {String(profile.maxConcurrency)}</dd></div></dl>
+                    <dl style={profileFactsStyle}><div style={profileFactRowStyle}><dt style={profileFactLabelStyle}>Harness</dt><dd style={profileFactValueStyle}>{template?.displayName ?? profile.templateId}</dd></div><div style={profileFactRowStyle}><dt style={profileFactLabelStyle}>模型</dt><dd style={profileFactValueStyle}>{model?.displayName ?? profile.modelConnectionId}</dd></div><div style={profileFactRowStyle}><dt style={profileFactLabelStyle}>最大并发</dt><dd style={profileFactValueStyle}>{String(profile.maxConcurrency)}</dd></div></dl>
                     <div style={profileFooterStyle}><span style={enabledStyle}><IconCheckOutline14 /> 已启用</span><div style={actionsStyle}><button type="button" aria-label={`编辑 ${profile.displayName}`} onClick={() => editProfile(profile)} style={iconButtonStyle}><IconEditOutline16 /></button><button type="button" aria-label={`删除 ${profile.displayName}`} onClick={() => setAgentProfiles(items => items.filter(item => item.id !== profile.id))} style={iconButtonStyle}><IconTrashOutline16 /></button></div></div>
                   </article>
                 })}</div>}
                 <div style={actionsStyle}><button type="button" disabled={busy || clusterId === '' || poolId === '' || gitSecretName === '' || agentProfiles.length === 0} onClick={() => act(() => saveWorker(selected.workspaceId, selected.config?.revision ?? 0, gitSecretName, { clusterId, workerPoolId: poolId, maxConcurrency: totalWorkers, agentProfiles }), { id: 'agent-strategy', success: 'Agent 策略保存成功' })} style={primaryButtonStyle}>{savingAction === 'agent-strategy' ? '保存中…' : '保存 Agent 策略'}</button></div>
               </section>
 
-              {selected.migrationCandidates.length === 0 ? null : <section style={cardStyle}><h3 style={cardTitleStyle}>会话配置迁移候选</h3>{selected.migrationCandidates.map(candidate => <div key={candidate.sessionId} style={actionsStyle}>
+              <section style={cardStyle}><h3 style={cardTitleStyle}>会话配置迁移候选</h3>
+                <button type="button" disabled={migrationLoading || operationBusy} onClick={loadMigrationCandidates} style={secondaryButtonStyle}>{migrationLoading ? '正在查询迁移候选…' : migrationError !== null ? '重试迁移候选' : '查询迁移候选'}</button>
+                {migrationError === null ? null : <p role="alert" style={errorStyle}>迁移候选加载失败：{migrationError}</p>}
+                {candidates?.length === 0 ? <p>当前工作区没有可迁移的会话配置。</p> : null}
+                {candidates?.map(candidate => <div key={candidate.sessionId} style={actionsStyle}>
                 <span>{candidate.projectName} · 会话 {candidate.sessionId} · r{String(candidate.revision)}</span>
                 {migrationPreview !== candidate.sessionId ? <button type="button" onClick={() => setMigrationPreview(candidate.sessionId)} style={secondaryButtonStyle}>迁移到工作区</button> : <>
                   <span style={warningStyle}>只复制 Git、验证命令和 Secret 引用；历史会话事件保持不变。</span>
                   <button type="button" disabled={busy} onClick={() => act(() => migrate(selected.workspaceId, candidate.sessionId, selected.config?.revision ?? 0))} style={primaryButtonStyle}>确认迁移</button>
                   <button type="button" onClick={() => setMigrationPreview(null)} style={secondaryButtonStyle}>取消</button>
                 </>}
-              </div>)}</section>}
+              </div>)}</section>
             </>}
             {error === null ? null : <p role="alert" style={errorStyle}>{error}</p>}
-            {busy ? <p role="status">处理中…</p> : null}
+            {operationBusy ? <p role="status">处理中…</p> : null}
           </main>
         </div>
       </section>
@@ -473,7 +566,6 @@ const profileFactValueStyle: CSSProperties = { margin: 0, minWidth: 0, overflowW
 const profileFooterStyle: CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingTop: 10, borderTop: '1px solid var(--dsw-alias-border-l2)' }
 const enabledStyle: CSSProperties = { color: 'rgb(35,143,75)', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }
 const iconButtonStyle: CSSProperties = { width: 30, height: 30, display: 'grid', placeItems: 'center', border: 0, background: 'none', color: 'inherit', cursor: 'pointer', borderRadius: 7 }
-const capacityDotsStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 1, color: 'var(--dsw-alias-label-primary)' }
 const mutedStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, overflowWrap: 'anywhere' }
 const warningStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-warning)', fontSize: 12 }
 const okStyle: CSSProperties = { color: 'var(--dsw-alias-label-success)' }

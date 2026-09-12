@@ -1,5 +1,8 @@
+import { applyWorkerInteraction, workerInteractionRecordSchema } from './worker-interactions.ts'
 import { isAbsolute } from 'node:path'
 import { z } from 'zod'
+import { executionPlanAuthorizationSchema } from './execution-plan.ts'
+import { autopilotRecordSchema } from './autopilot.ts'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
@@ -106,7 +109,10 @@ export const PACTFLOW_EVENT_TYPES_V0_3 = [
   'pactflow/run-settled',
 ] as const
 
-export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_3
+export const PACTFLOW_EVENT_TYPES_V0_4 = ['pactflow/autopilot-updated', ...PACTFLOW_EVENT_TYPES_V0_3] as const
+export const PACTFLOW_EVENT_TYPES_V0_5 = [...PACTFLOW_EVENT_TYPES_V0_4, 'pactflow/worker-interaction'] as const
+export const PACTFLOW_EVENT_TYPES_V0_6 = PACTFLOW_EVENT_TYPES_V0_5
+export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_6
 
 const gitAuthSchema = pactFlowSchema<PactFlowGitAuth>(z.object({
   kind: z.literal('https-token'), username: z.string().min(1), credentialRef: z.string().min(1),
@@ -140,6 +146,8 @@ const gitBindingSchema = pactFlowSchema<PactFlowGitBinding>(z.object({
 }))
 
 const gitRunSpecSchema = pactFlowSchema<PactFlowGitRunSpec>(z.object({
+  checkoutKind: z.literal('isolated-clone').optional(),
+  recoveryInput: z.object({ runId: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/), sourceHead: z.string().regex(/^[a-f0-9]{40,64}$/) }).strict().optional(),
   remote: z.string().min(1), remoteUrl: z.string().min(1), defaultBranch: z.string().min(1),
   baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/), branch: z.string().min(1),
   worktreePath: z.string().refine(isAbsolute), auth: gitAuthSchema.optional(),
@@ -168,6 +176,8 @@ const k3sRunSpecSchema = pactFlowSchema<PactFlowK3sRunSpec>(z.object({
   harness: z.enum(['claude', 'codex', 'opencode', 'dsh']),
   apiMode: z.enum(['anthropic-messages', 'openai-responses', 'openai-chat-completions']),
   model: z.string().min(1), baseUrl: z.string().min(1),
+  interactionPublicKey: z.string().max(1024).optional(), interactionRunId: z.string().max(160).optional(),
+  interactionProtocol: z.literal('dsh-worker-interactions/v1').optional(),
   modelSecretName: z.string().min(1), gitSecretName: z.string().min(1),
   runNonceHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   claimTokenHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
@@ -227,8 +237,10 @@ const reviewSchema = pactFlowSchema<PactFlowReview>(z.object({
   kind: z.enum(['requirement', 'design', 'plan', 'verification', 'code']),
   decision: z.enum(['approved', 'rejected', 'changes-requested']), note: z.string(), recordedAt: z.number().int().nonnegative(),
   approvalRequestId: z.string().min(1).optional(), needRevision: z.number().int().positive().optional(),
-  evidenceDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(), source: z.literal('dsh-approval').optional(),
+  evidenceDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(), source: z.enum(['dsh-approval', 'autopilot-policy']).optional(),
+  autopilotId: z.string().optional(),
   subjectDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  executionPlan: executionPlanAuthorizationSchema.optional(),
 }))
 
 const documentSchema = pactFlowSchema<PactFlowDocument>(z.object({
@@ -264,23 +276,31 @@ const dagStateSchema = pactFlowSchema<PactFlowDagState>(z.object({
 }))
 const runsProjectionSchema = pactFlowSchema<PactFlowRunsProjection>(z.object({ byId: z.record(z.string(), runSchema) }))
 const deliveryProjectionSchema = pactFlowSchema<PactFlowDeliveryProjection>(z.object({
+  workerInteractions: z.record(z.string(), workerInteractionRecordSchema).optional(),
+  autopilots: z.record(z.string(), autopilotRecordSchema).optional(),
   reviews: z.record(z.string(), reviewSchema),
   documents: z.record(z.string(), documentSchema),
   releases: z.record(z.string(), releaseSchema),
   cleanups: z.record(z.string(), cleanupSchema).default({}),
 }))
 const deliveryStateSchema = pactFlowSchema<PactFlowDeliveryState>(z.object({
+  workerInteractions: z.record(z.string(), workerInteractionRecordSchema).optional(),
+  autopilots: z.record(z.string(), autopilotRecordSchema).optional(),
   reviews: z.record(z.string(), reviewSchema), documents: z.record(z.string(), documentSchema),
   releases: z.record(z.string(), releaseSchema), cleanups: z.record(z.string(), cleanupSchema),
   needIds: z.array(pactFlowIdSchema<'need'>()), runNeeds: z.record(z.string(), pactFlowIdSchema<'need'>()),
 }))
 
 export function pactFlowDeliveryView(state: PactFlowDeliveryProjection): PactFlowDeliveryProjection {
-  return { reviews: state.reviews, documents: state.documents, releases: state.releases, cleanups: state.cleanups }
+  return { reviews: state.reviews, documents: state.documents, releases: state.releases, cleanups: state.cleanups,
+    ...(state.workerInteractions === undefined ? {} : { workerInteractions: state.workerInteractions }),
+    ...(state.autopilots === undefined ? {} : { autopilots: state.autopilots }) }
 }
 
 type PactFlowEventType = typeof PACTFLOW_EVENT_TYPES[number]
 const eventPayloadSchemas: { readonly [Type in PactFlowEventType]: z.ZodType<SessionEventMap[Type]> } = {
+  'pactflow/worker-interaction': z.object({ v: z.literal(1), record: workerInteractionRecordSchema }),
+  'pactflow/autopilot-updated': z.object({ v: z.literal(1), record: autopilotRecordSchema }),
   'pactflow/project-initialized': z.object({ v: z.literal(1), project: projectSchema }),
   'pactflow/project-configured': z.object({ v: z.literal(1), project: projectSchema }),
   'pactflow/need-created': z.object({ v: z.literal(1), need: needSchema }),
@@ -447,7 +467,7 @@ export const pactflowDagProjection: ProjectionDefinition<'pactflowDag'> = {
 }
 
 export const pactflowRunsProjection: ProjectionDefinition<'pactflowRuns'> = {
-  key: 'pactflowRuns', stateVersion: 4, stateSchema: runsProjectionSchema,
+  key: 'pactflowRuns', stateVersion: 5, stateSchema: runsProjectionSchema,
   init: () => ({ byId: {} }),
   apply: (state, event) => {
     event = parseEventPayload(event)
@@ -531,10 +551,30 @@ export const pactflowRunsProjection: ProjectionDefinition<'pactflowRuns'> = {
 }
 
 export const pactflowDeliveryProjection: ProjectionDefinition<'pactflowDelivery'> = {
-  key: 'pactflowDelivery', stateVersion: 5, stateSchema: deliveryStateSchema,
+  key: 'pactflowDelivery', stateVersion: 8, stateSchema: deliveryStateSchema,
   init: () => ({ reviews: {}, documents: {}, releases: {}, cleanups: {}, needIds: [], runNeeds: {} }),
   apply: (state, event) => {
     event = parseEventPayload(event)
+    if (event.type === 'pactflow/worker-interaction') {
+      const next = event.data.record
+      if (state.runNeeds[next.runId] !== next.needId) throw new Error('Interaction refers to another or missing Run')
+      const record = applyWorkerInteraction(state.workerInteractions?.[next.id], next)
+      return { ...state, workerInteractions: { ...state.workerInteractions, [record.id]: record } }
+    }
+    if (event.type === 'pactflow/autopilot-updated') {
+      const record = event.data.record
+      if (!state.needIds.includes(record.needId as never)) throw new Error('Autopilot refers to a missing Need')
+      const prior = state.autopilots?.[record.needId]
+      if (prior !== undefined && record.revision !== prior.revision + 1) throw new Error('Autopilot revision must advance by one')
+      if (prior === undefined && record.revision !== 1) throw new Error('Autopilot starts at revision one')
+      if (prior?.id === record.id && (prior.scopeDigest !== record.scopeDigest || prior.startedAt !== record.startedAt
+        || prior.repository !== record.repository || prior.branch !== record.branch || prior.startSequence !== record.startSequence
+        || JSON.stringify(prior.initialRunIds) !== JSON.stringify(record.initialRunIds)
+        || JSON.stringify(prior.limits) !== JSON.stringify(record.limits) || prior.expiresAt !== record.expiresAt
+        || record.modelSteps < prior.modelSteps || record.wakeCount < prior.wakeCount)) throw new Error('Autopilot authorization or budget cannot be rewritten')
+      if (prior?.id === record.id && ['stopped', 'completed'].includes(prior.state) && prior.state !== record.state) throw new Error('Ended autopilot cannot be revived without a new grant')
+      return { ...state, autopilots: { ...state.autopilots, [record.needId]: record } }
+    }
     if (event.type === 'pactflow/need-created') {
       return state.needIds.includes(event.data.need.id) ? state : { ...state, needIds: [...state.needIds, event.data.need.id] }
     }

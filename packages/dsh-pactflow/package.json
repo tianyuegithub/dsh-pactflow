@@ -46,7 +46,11 @@
       "types": "./lib/types/types.d.ts",
       "default": "./lib/types/types.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./worker-interaction-types": {
+      "types": "./lib/types/worker-interaction-types.d.ts",
+      "default": "./lib/types/worker-interaction-types.js"
+    }
   },
   "dsh": {
     "bundle": {
@@ -65,7 +69,8 @@
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-settings-plugins",
-        "@deepseek-ai/dsh-client-ui-workspace"
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
   },
@@ -84,7 +89,10 @@
     "presets/**/*",
     "README.md",
     "LICENSE",
-    "bin/generate-service.mjs"
+    "bin/generate-service.mjs",
+    "worker/dsh",
+    "lib/*.js",
+    "lib/worker/*.js"
   ],
   "dependencies": {
     "@kubernetes/client-node": "2.0.0",
@@ -102,7 +110,7 @@
     "@deepseek-ai/dsh-client-store": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.2-alpha.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "*",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-session": "0.1.2-alpha.1",
@@ -124,7 +132,8 @@
     "@deepseek-ai/dsh-tools": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-typert-protocol": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-user-approval": "0.1.2-alpha.1",
-    "react": "^18.3.1"
+    "react": "^18.3.1",
+    "@deepseek-ai/dsh-user-questions": "0.1.2-alpha.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -224,6 +233,9 @@
       "optional": true
     },
     "react": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-questions": {
       "optional": true
     }
   },

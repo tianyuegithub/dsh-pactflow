@@ -1,3 +1,4 @@
+import type { WorkerInteractionRecord } from './worker-interaction-types.ts'
 import type {} from '@deepseek-ai/dsh-session-projection/types'
 
 /** Client-visible proof that the PactFlow Host and external event vocabulary are active. */
@@ -80,6 +81,7 @@ export type PactFlowHarness = 'claude' | 'codex' | 'opencode' | 'dsh'
 export type PactFlowApiMode = 'anthropic-messages' | 'openai-responses' | 'openai-chat-completions'
 
 export interface PactFlowHarnessTemplateView {
+  readonly interactionProtocol?: 'dsh-worker-interactions/v1'
   readonly id: string
   readonly harness: PactFlowHarness
   readonly apiMode: PactFlowApiMode
@@ -104,6 +106,7 @@ export interface PactFlowHarnessCapabilityView {
 
 /** User-facing Harness image and resource profile, independent of any model. */
 export interface PactFlowHarnessProfileSettings {
+  readonly interactionProtocol?: 'dsh-worker-interactions/v1'
   readonly id: string
   readonly displayName: string
   readonly harness: PactFlowHarness
@@ -366,10 +369,13 @@ export interface PactFlowValidationProfileInput {
   readonly revision?: number
 }
 
-export interface PactFlowWorkspaceProjectView {
+export interface PactFlowWorkspaceProjectSummary {
   readonly workspaceId: string
   readonly path: string
   readonly title: string
+}
+
+export interface PactFlowWorkspaceProjectView extends PactFlowWorkspaceProjectSummary {
   readonly gitStatus: PactFlowWorkspaceGitStatus
   readonly config?: PactFlowWorkspaceProjectConfig
   readonly migrationCandidates: readonly {
@@ -542,6 +548,9 @@ export interface PactFlowGitAuth {
 
 /** Immutable Git workspace selected by the Host for one Run. */
 export interface PactFlowGitRunSpec {
+  /** Absent only on legacy shared worktrees and remote-worker checkouts. */
+  readonly checkoutKind?: 'isolated-clone'
+  readonly recoveryInput?: { readonly runId: string; readonly digest: string; readonly sourceHead: string }
   readonly remote: string
   readonly remoteUrl: string
   readonly defaultBranch: string
@@ -623,6 +632,9 @@ export interface PactFlowRun {
 }
 
 export interface PactFlowK3sRunSpec {
+  readonly interactionPublicKey?: string
+  readonly interactionRunId?: string
+  readonly interactionProtocol?: 'dsh-worker-interactions/v1'
   readonly workerPoolId?: string
   readonly projectConfigRevision?: number
   readonly agentProfileId?: string
@@ -669,6 +681,77 @@ export interface PactFlowK3sResult {
   readonly specDigest?: string
 }
 
+export interface PactFlowExecutionPlan {
+  readonly id: string
+  readonly mode: 'single' | 'split'
+  readonly summary: string
+  readonly rationale: string
+  readonly nodes: readonly {
+    readonly id: string; readonly title: string; readonly prompt: string
+    readonly acceptance: readonly string[]; readonly dependencies: readonly string[]; readonly codeInputs: readonly string[]
+    readonly executionDescription?: string | undefined
+    readonly providerIdentity?: string | undefined
+    readonly execution: { readonly kind: 'git'; readonly provider: string; readonly recovery?: { readonly runId: string; readonly digest: string } }
+      | { readonly kind: 'k3s'; readonly templateId: string; readonly agentProfileId?: string; readonly modelConnectionId?: string; readonly workerPoolId?: string }
+  }[]
+}
+
+export interface PactFlowExecutionPlanAuthorization {
+  readonly plan: PactFlowExecutionPlan
+  readonly scopeDigest: string
+  readonly proposalDigest: string
+}
+
+export interface PactFlowAutopilotLimits {
+  readonly maxDurationMs: number
+  readonly maxModelSteps: number
+  readonly maxWorkerStarts: number
+  readonly maxConcurrency: number
+  readonly maxStalledTurns: number
+}
+
+export interface PactFlowAutopilotRecord {
+  readonly id: string
+  readonly needId: string
+  readonly revision: number
+  readonly state: 'running' | 'paused' | 'blocked' | 'stopped' | 'completed'
+  readonly scopeDigest: string
+  readonly repository: string
+  readonly branch: string
+  readonly limits: PactFlowAutopilotLimits
+  readonly startedAt: number
+  readonly expiresAt: number
+  readonly startSequence: number
+  readonly initialRunIds: readonly string[]
+  readonly modelSteps: number
+  readonly wakeCount: number
+  readonly stalledTurns: number
+  readonly updatedAt: number
+  readonly reason: string
+  readonly lastProgressDigest?: string | undefined
+  readonly lastWakeId?: string | undefined
+}
+
+export interface PactFlowAutopilotPreview {
+  readonly needId: string
+  readonly needRevision: number
+  readonly title: string
+  readonly description: string
+  readonly repository: string
+  readonly branch: string
+  readonly scopeDigest: string
+  readonly executionOptions: readonly PactFlowExecutionPlan['nodes'][number]['execution'][]
+  readonly validationProfiles: readonly string[]
+}
+
+export interface PactFlowStartAutopilotRequest {
+  readonly needId: string
+  readonly expectedNeedRevision: number
+  readonly expectedScopeDigest: string
+  readonly limits: PactFlowAutopilotLimits
+  readonly confirm: 'start-scoped-autopilot'
+}
+
 export interface PactFlowReview {
   readonly id: PactFlowReviewId
   readonly needId: PactFlowNeedId
@@ -681,7 +764,9 @@ export interface PactFlowReview {
   readonly evidenceDigest?: string
   /** For verification reviews: digest of the exact delivery subject (task set + commits). */
   readonly subjectDigest?: string
-  readonly source?: 'dsh-approval'
+  readonly source?: 'dsh-approval' | 'autopilot-policy'
+  readonly autopilotId?: string
+  readonly executionPlan?: PactFlowExecutionPlanAuthorization
 }
 
 export interface PactFlowDocument {
@@ -826,9 +911,22 @@ export interface PactFlowClaimResult {
 
 export interface DispatchPactFlowLocalNodeRequest extends ClaimPactFlowNodeRequest {
   readonly prompt: string
+  readonly recovery?: { readonly runId: string; readonly digest: string }
 }
 
 export type DispatchPactFlowGitNodeRequest = DispatchPactFlowLocalNodeRequest
+
+export type PactFlowRecoveryCandidate = {
+  readonly runId: string
+  readonly nodeId: string
+  readonly needId: string
+} & ({
+  readonly available: true
+  readonly baseCommit: string
+  readonly sourceHead: string
+  readonly digest: string
+  readonly changedFiles: number
+} | { readonly available: false; readonly reason: string })
 
 export interface DispatchPactFlowK3sNodeRequest {
   readonly nodeId: string
@@ -951,6 +1049,8 @@ export interface PactFlowDagProjection { readonly byId: Readonly<Record<string, 
 export interface PactFlowDagState extends PactFlowDagProjection { readonly needIds: readonly PactFlowNeedId[] }
 export interface PactFlowRunsProjection { readonly byId: Readonly<Record<string, PactFlowRun>> }
 export interface PactFlowDeliveryProjection {
+  readonly workerInteractions?: Readonly<Record<string, WorkerInteractionRecord>> | undefined
+  readonly autopilots?: Readonly<Record<string, PactFlowAutopilotRecord>> | undefined
   readonly reviews: Readonly<Record<string, PactFlowReview>>
   readonly documents: Readonly<Record<string, PactFlowDocument>>
   readonly releases: Readonly<Record<string, PactFlowRelease>>
@@ -964,6 +1064,8 @@ export interface PactFlowDeliveryState extends PactFlowDeliveryProjection {
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    'pactflow/worker-interaction': { readonly v: 1; readonly record: WorkerInteractionRecord }
+    'pactflow/autopilot-updated': { readonly v: 1; readonly record: PactFlowAutopilotRecord }
     'pactflow/document-linked': { readonly v: 1; readonly document: PactFlowDocument }
     'pactflow/need-created': { readonly v: 1; readonly need: PactFlowNeed }
     'pactflow/need-updated': { readonly v: 1; readonly need: PactFlowNeed }
