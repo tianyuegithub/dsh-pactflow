@@ -62,7 +62,7 @@ export const modelColumns: readonly EditorColumn<PactFlowModelConnectionSettings
 export const workerPoolColumns: readonly EditorColumn<PactFlowWorkerPoolSettings>[] = [
   { key: 'displayName', label: '名称' }, { key: 'clusterId', label: 'K3s 集群' },
   { key: 'templateIds', label: '允许调度的 Harness', kind: 'list', hint: '只有选中的 Harness 才能由这个调度组启动。' },
-  { key: 'maxConcurrency', label: '同时运行的 Worker 上限', kind: 'number', hint: '每增加 1，最多可多启动 1 个 Worker Pod；超出的任务自动排队。' },
+  { key: 'maxConcurrency', label: '同时运行的 Worker 上限', kind: 'number', hint: '该池同时运行的 Worker Pod 总数上限：不分 Harness（各类共享同一总量），且被所有使用此池的项目共享；超出上限的任务自动排队。' },
   { key: 'imagePullSecret', label: 'Harbor 镜像拉取密钥', hint: 'K3s 使用该 dockerconfigjson Secret 从私有 Harbor 拉取 Worker 镜像。' },
   { key: 'registryId', label: 'Registry', hidden: true }, { key: 'queuePolicy', label: '队列', hidden: true },
 ]

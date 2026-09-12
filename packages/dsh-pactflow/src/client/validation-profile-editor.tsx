@@ -84,7 +84,7 @@ export function ValidationProfileEditor({ config, disabled, onSave }: {
       <h3 style={resourceTitleStyle}>宿主验证配置</h3>
       <button type="button" disabled={disabled || rows.length >= 32} onClick={add} style={secondaryButtonStyle}>新增验证配置</button>
     </div>
-    <p style={fieldHintStyle}>保存仅登记，不执行命令。登记后模型可按编号选择执行；不要登记不可信脚本或明文凭证。修改会使旧绑定需要重新核验。</p>
+    <p style={fieldHintStyle}>登记本项目的验证命令（构建、测试、部署检查等），作为收口证据的来源：任务运行时模型按编号执行，成功后留档为「验证证据」，供下方收口最小验证策略核对。保存仅登记、不执行命令；不要登记不可信脚本或明文凭证；修改会使旧绑定需要重新核验。</p>
     <div style={resourceListStyle}>{rows.map((row, index) => <fieldset key={row.key} aria-label={`验证配置 ${index + 1}`} disabled={disabled} style={resourceCardStyle}>
       <legend>{row.displayName || `验证配置 ${index + 1}`}</legend>
       <div style={resourceFieldsStyle}>

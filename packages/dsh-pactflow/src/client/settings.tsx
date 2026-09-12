@@ -580,7 +580,7 @@ export function PactFlowSettingsCard({
         showLogFor={row => expandedLogs.has(`model-connection:${row.id}`)}
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `model-connection:${row.id}`))}
         onViewProbe={row => probe('model-connection', row.id, true)} />
-      <EditableResourceCards title="Worker 并发与调度" description="选择运行集群、允许使用的 Harness 和最多同时启动的 Worker Pod 数；超出的任务自动排队。"
+      <EditableResourceCards title="Worker 并发与调度" description="选择运行集群和允许使用的 Harness；并发上限是池级总量（不分 Harness），由所有使用该池的项目共享，超出的任务自动排队。"
         rows={draft.workerPools} disabled={actionDisabled}
         columns={workerPoolColumns}
         create={() => newWorkerPool(

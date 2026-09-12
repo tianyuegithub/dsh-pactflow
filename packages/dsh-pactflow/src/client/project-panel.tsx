@@ -211,9 +211,6 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
     if (!Number.isSafeInteger(draftConcurrency) || draftConcurrency < 1) {
       setError('Worker 数量必须是大于 0 的整数'); return
     }
-    if (draftConcurrency > (pool?.maxConcurrency ?? 0)) {
-      setError(`单个 Agent 组合的 Worker 数量不能超过全局池容量 ${String(pool?.maxConcurrency ?? 0)}`); return
-    }
     const duplicate = agentProfiles.some(profile => profile.id !== editingProfileId
       && profile.templateId === draftTemplate.id && profile.modelConnectionId === draftModel.id)
     if (duplicate) { setError('相同 Harness 与模型组合已经存在'); return }
@@ -361,8 +358,8 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                     <div style={connectorStyle}><IconPlusOutline16 /></div>
                     <div style={quotaModuleStyle}>
                       <div style={moduleLabelStyle}><IconQueueOutline14 /><span>Worker 数量</span></div>
-                      <input type="number" min={1} max={pool?.maxConcurrency ?? 1} value={draftConcurrency} onChange={event => { setDraftConcurrency(Number(event.currentTarget.value)); setError(null) }} style={moduleSelectStyle} />
-                      <span style={moduleMetaStyle}>该组合的 Worker 数量 · 池容量 {String(pool?.maxConcurrency ?? 0)}</span>
+                      <input type="number" min={1} value={draftConcurrency} onChange={event => { setDraftConcurrency(Number(event.currentTarget.value)); setError(null) }} style={moduleSelectStyle} />
+                      <span style={moduleMetaStyle}>本项目的并发上限（非预留）· 池全局上限 {String(pool?.maxConcurrency ?? 0)}，超出部分自动排队</span>
                     </div>
                   </div>
                   <div style={composerActionsStyle}>
@@ -496,7 +493,7 @@ function ValidationPolicySection({ config, disabled, onSave }: {
   return (
     <section style={cardStyle} aria-label="收口最小验证策略">
       <div style={cardHeaderStyle}>
-        <div><h3 style={cardTitleStyle}>收口最小验证策略</h3><p style={mutedStyle}>勾选的验证配置在收口时必须成功执行，缺失将阻断收口（宿主强制，模型不可修改）。</p></div>
+        <div><h3 style={cardTitleStyle}>收口最小验证策略</h3><p style={mutedStyle}>收口＝把需求成果固化成提交并推送的时刻。这里勾选的验证是收口硬门槛：宿主逐个交付物核对「成功证据」，缺失即阻断收口；由宿主强制执行，模型不可修改或绕过。</p></div>
       </div>
       {profiles.length === 0 ? <p style={mutedStyle}>暂无验证配置；请先在上方添加验证配置。</p> : (
         <div style={targetBarStyle}>
@@ -550,7 +547,7 @@ function HostBaselineSection({ config, disabled, onSave }: {
   return (
     <section style={cardStyle} aria-label="宿主基线">
       <div style={cardHeaderStyle}>
-        <div><h3 style={cardTitleStyle}>宿主基线</h3><p style={mutedStyle}>宿主自有、存于任务仓之外的断言命令；收口时在候选提交上先于任务验证执行，失败阻断收口。owner-only 高级配置（JSON 数组：[{"{"}command, args, timeoutMs{"}"}]）。</p></div>
+        <div><h3 style={cardTitleStyle}>宿主基线</h3><p style={mutedStyle}>宿主自己的兜底检查（如禁止提交敏感或超大文件），存在任务仓库之外，Worker 和模型都改不了；收口时在候选提交上先于任务验证执行，失败即阻断收口。owner-only 高级配置（JSON 数组：[{"{"}command, args, timeoutMs{"}"}]）。</p></div>
       </div>
       <textarea aria-label="宿主基线命令 JSON" value={text} disabled={disabled}
         onChange={event => setDraft(event.currentTarget.value)}
