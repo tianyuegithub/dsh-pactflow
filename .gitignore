@@ -13,3 +13,4 @@ packages/dsh-pactflow/presets/pactflow/plugin/index.js
 .arts/
 .mimosa/
 .zcode/
+.playwright-mcp/

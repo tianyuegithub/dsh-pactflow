@@ -3,7 +3,7 @@
 - 中文交流；结论必须区分已验证事实、工作假设和未知项。
 - **OpenSpec 是本仓库开发管理的第一入口**：新增、修改或删除长期行为合同（含跨 Host、Agent、Client、Remote、Session Event 和 Worker Provider 的改动），一律走 `openspec/changes/<change>` 的 propose → apply → verify → archive 流程；`openspec/specs/` 与 change artifacts 是计划与行为合同的唯一正文 owner。
 - 本仓库是 DSH 零脉插件的唯一源码 owner；禁止导入、调用、共享或理解 Hermes 零脉的源码、数据库、协议和运行时。
-- 生产安装必须运行在未修改的官方 DSH 上。需要 DSH 新通用能力时，只能在独立上游 change 中实现并等待它进入支持的 DSH 发行版；禁止私有 patch 回落。
+- 用户宿主的生产安装必须运行在未修改的官方 DSH 上；宿主缺少通用能力时走独立上游 change 并等待支持发行版，禁止宿主私有 patch 回落。容器内 DSH 执行器允许由零脉维护适配插件及必要源码补丁，以固定基础版本、定制版本、协议版本和镜像摘要独立分发；不要求与宿主或上游主线同步升级。
 - `docs/implementation-status-实施状态.md` 只记录当前阶段、最后已验证提交、验证命令和 blocker。
 - 所有 Cordis 注册都归属 `ctx.effect()`、`ctx.on()` 或显式 disposer；禁止不可卸载的模块级副作用。
 - 原始凭证不得进入 Session Log、Remote payload、Tool result、Git、argv、截图或持久日志。

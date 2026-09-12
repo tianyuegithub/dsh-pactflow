@@ -150,7 +150,7 @@ sudo umount /mnt/pf-nfs-a /mnt/pf-nfs-b && sudo nfsd disable && sudo rm /etc/exp
 
 ## 7. 升级、卸载与恢复
 
-升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 当前写入 **17** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_3`），同时以 read-only registration 读取 0.1.0 的 12 类词汇与 0.2.0 的 13 类词汇；升级不重写历史日志。
+升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 远程交互增强版当前写入 **19** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_5`，生产者版本 0.5.0），同时以只读注册读取 0.1.0 的 12 类词汇、0.2.0 的 13 类词汇、0.3.0 的 17 类词汇和 0.4.0 的 18 类词汇；升级不重写历史日志。旧插件不支持新增挂机事件，使用新版写入会话后不能直接用旧包读取该会话。
 
 卸载——**先做 drain 检查**（`pactflow/drainStatus`）：
 
