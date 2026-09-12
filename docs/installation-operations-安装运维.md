@@ -45,6 +45,8 @@ dsh --profile web
 
 Web 的 Settings → Plugins → Plugin configuration 中会出现“PactFlow K3s templates”。该 namespace 的变更在 Profile 重启后生效。字段只保存集群路径、Secret 名称、镜像 digest、模型地址、协议与资源限制；API key、token、SSH 私钥和 Harbor auth 不得写入 JSON。
 
+生效时机（`infrastructure-probe-freshness` 合同）：**运行时资源**（Worker 池、K3s client、派发准入、定时器）重启后才生效；**探针类只读诊断**（可用性测试、镜像拉取凭证/Harbor 制品/Git Secret 发现、删除影响评估）始终读取**当前已保存**的配置文档——保存后无需重启即可测试，但派发行为在重启前保持不变。
+
 最小配置示例：
 
 ```json

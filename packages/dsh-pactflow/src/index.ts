@@ -306,6 +306,8 @@ export class PactFlowService extends TypertRemoteService {
   private readonly gitea = new PactFlowGiteaClient()
   private k3s: PactFlowK3sWorker | undefined
   private infrastructure: PactFlowInfrastructure | undefined
+  /** Live view of the persisted infrastructure document; probes read this, runtime stays restart-applied. */
+  private savedInfrastructureAccessor: (() => false | PactFlowInfrastructureSettings | undefined) | undefined
   private readonly k3sByPool = new Map<string, PactFlowK3sWorker>()
   private readonly reconcilingK3s = new Set<string>()
   private readonly deferredK3s = new Map<string, { timer: ReturnType<typeof setTimeout>; release: () => void; attempt: number }>()
@@ -353,6 +355,7 @@ export class PactFlowService extends TypertRemoteService {
       )
       this.k3s = this.k3sFrom(scope.get().k3s)
       this.infrastructure = this.infrastructureFrom(scope.get().infrastructure)
+      this.savedInfrastructureAccessor = () => scope.get().infrastructure
       this.rebuildPoolWorkers()
       scope.watch(() => {
         settingsCtx.logger.info('PactFlow settings changed; restart the Profile to apply infrastructure resources')
@@ -2237,7 +2240,7 @@ export class PactFlowService extends TypertRemoteService {
     clusterId: string,
     draft?: PactFlowInfrastructureSettings,
   ): Promise<readonly string[]> {
-    const infrastructure = draft === undefined ? this.requireInfrastructure() : new PactFlowInfrastructure(draft)
+    const infrastructure = draft === undefined ? this.infrastructureForSavedProbe() : new PactFlowInfrastructure(draft)
     const cluster = infrastructure.cluster(clusterId)
     const worker = new PactFlowK3sWorker({
       namespace: cluster.namespace, pollIntervalMs: cluster.pollIntervalMs,
@@ -2251,7 +2254,7 @@ export class PactFlowService extends TypertRemoteService {
   /** List project Git Secret names for one configured cluster without reading payloads. */
   @Remote('listK3sGitSecrets')
   async listK3sGitSecrets(clusterId: string): Promise<readonly string[]> {
-    const cluster = this.requireInfrastructure().cluster(clusterId)
+    const cluster = this.infrastructureForSavedProbe().cluster(clusterId)
     const worker = new PactFlowK3sWorker({
       namespace: cluster.namespace, pollIntervalMs: cluster.pollIntervalMs,
       imagePullSecret: 'pactflow-probe', templates: [],
@@ -2267,7 +2270,7 @@ export class PactFlowService extends TypertRemoteService {
     registryId: string,
     draft?: PactFlowInfrastructureSettings,
   ): Promise<readonly PactFlowHarborArtifactOption[]> {
-    const infrastructure = draft === undefined ? this.requireInfrastructure() : new PactFlowInfrastructure(draft)
+    const infrastructure = draft === undefined ? this.infrastructureForSavedProbe() : new PactFlowInfrastructure(draft)
     const registry = infrastructure.registry(registryId)
     if (registry.project === undefined || registry.project.trim() === '') {
       throw new Error('PactFlow Harbor project must be configured before browsing artifacts')
@@ -2370,10 +2373,10 @@ export class PactFlowService extends TypertRemoteService {
     try {
       stages.push({
         name: 'start', state: 'succeeded',
-        detail: request.draft === undefined ? 'testing restart-applied settings' : 'testing current unsaved form values',
+        detail: request.draft === undefined ? 'testing the currently saved settings' : 'testing current unsaved form values',
       })
       const infrastructure = request.draft === undefined
-        ? this.requireInfrastructure()
+        ? this.infrastructureForSavedProbe()
         : new PactFlowInfrastructure(request.draft)
       if (request.kind === 'cluster') {
         const cluster = infrastructure.cluster(request.id)
@@ -2559,7 +2562,7 @@ export class PactFlowService extends TypertRemoteService {
     id: string,
     draft?: PactFlowInfrastructureSettings,
   ): Promise<PactFlowInfrastructureDeletionImpact> {
-    const infrastructure = draft === undefined ? this.requireInfrastructure() : new PactFlowInfrastructure(draft)
+    const infrastructure = draft === undefined ? this.infrastructureForSavedProbe() : new PactFlowInfrastructure(draft)
     const settings = infrastructure.settings
     const blockers: string[] = []
     const credentialRefs: string[] = []
@@ -2730,6 +2733,21 @@ export class PactFlowService extends TypertRemoteService {
   private requireInfrastructure(): PactFlowInfrastructure {
     if (this.infrastructure === undefined) throw new Error('PactFlow infrastructure is not configured')
     return this.infrastructure
+  }
+
+  /**
+   * Saved-resource diagnostics (probes, read-only discovery, deletion impact)
+   * resolve against the currently persisted document so resources saved after
+   * startup are testable without a restart. This never rebinds runtime worker
+   * resources, which stay governed by the restart-applied contract.
+   */
+  private infrastructureForSavedProbe(): PactFlowInfrastructure {
+    const document = this.savedInfrastructureAccessor?.()
+    if (document !== undefined && document !== false) {
+      const parsed = this.infrastructureFrom(document)
+      if (parsed !== undefined) return parsed
+    }
+    return this.requireInfrastructure()
   }
 
   private rebuildPoolWorkers(): void {

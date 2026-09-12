@@ -2,6 +2,16 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 73 文件 / 565 测试、46 个 change 已归档、已推送）。
 
+## 2026-09-12 探针读当前已保存配置 + 测试日志收敛（change `harden-saved-probe-freshness`，已归档）
+
+真实部署中三类同因误报（K3s 集群、Harbor、Gitea 先后「卡片内测试通过、外层可用性测试失败」）定性为同一类缺陷：外层探针/只读发现读取**宿主启动时冻结的配置快照**，保存动作发生在启动之后即必然失败。本次按类修复并合同化（新 capability `infrastructure-probe-freshness`）：
+
+- **数据源分离**：`probeInfrastructure`（无 draft）、`listImagePullSecrets`、`listHarborArtifacts`、`listK3sGitSecrets`、`infrastructureDeletionImpact`（无 draft）改读**探针时刻已持久化的设置文档**（settings scope 访问器 + 一次性只读视图，快照仅作未挂载回退）；运行时 Worker/池/K3s client/定时器仍由 `applies: 'restart'` 合同管辖，保存后重启前派发行为不变（测试钉住 `listWorkerPools` 不变）。
+- **日志收敛**：已保存探针成功路径曾永久残留「进行中」标记（无后续异步步骤收敛它），已修复并写入同一合同（3 项回归，先红后绿）。
+- **文案如实**：start 阶段「测试重启后生效的配置」→「读取当前已保存的配置」；运维手册 §3 补生效时机说明。
+
+**验证**：`pnpm run check` 80 文件 / **589** 测试全绿；`openspec validate --all --strict` 41/41；实机验证：启动后保存的 Gitea 不重启外层测试即「联通」（`gitea.k3s.ty.com` 私有 CA 经 `NODE_EXTRA_CA_CERTS` 环境侧信任，Gitea 设置无 tlsVerify 字段属既有合同）。
+
 ## 2026-09-11 A03-d 评审可见验证清单 + A12-c 移交入口 + A05 保留现场 UI（change `surface-review-and-readonly-entries`，已归档）
 
 用户裁决「A03-d + A12-c + A05 UI」后实施；接线探查中**发现并修复一个真实缺陷**：

@@ -153,6 +153,12 @@ export function probeImpl(
       }))
       if (!result.success) return
       if (saved && kind !== 'registry') {
+        // Saved probes skip async discovery entirely, so nothing else will
+        // clear the running flag set above.
+        controller.setTestLogs(current => ({
+          ...current,
+          [key]: { ...current[key]!, running: false },
+        }))
         controller.setExpandedLogs(current => new Set(current).add(key))
         return
       }

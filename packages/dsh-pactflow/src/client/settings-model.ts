@@ -136,8 +136,8 @@ export function probeStageEntry(stage: PactFlowInfrastructureProbeResult['stages
     connection: '连接失败',
   }
   const details: Readonly<Record<string, string>> = {
-    start: stage.detail.includes('restart-applied')
-      ? '读取 Host 当前已生效的保存配置'
+    start: stage.detail.includes('currently saved')
+      ? '读取当前已保存的配置'
       : '读取当前卡片中未保存的表单值，本次测试不依赖重启后配置',
     'resolve-config': '字段格式和资源引用有效',
     'namespace-access': stage.detail.replace(/^namespace /, 'Namespace ').replace(/ is accessible$/, ' 可访问'),
