@@ -68,16 +68,15 @@
 
 E-19 主目录同步**已执行**（`/Users/ty/Codes/dsh-pactflow` 的 `main` 已 fast-forward 到本分支）。P2-6 的 A03-a 与 A12-a/b **已按授权实现并归档**（change `harden-drain-and-verification-visibility`）。
 
-**已立项待裁决（2026-09-12，四份 OpenSpec 提案已 validate，未实施）**：
+**已立项并全部交付（2026-09-12，用户裁决「1-4 都做」；四项各自归档）**：
 
-| 优先序 | change | 内容 | 决策点 |
+| 序 | change | 交付 | 关键测试 |
 | --- | --- | --- | --- |
-| 1 | `harden-minimum-validation-policy`（A03-b） | 人登记的最小验证策略由宿主在收口强制——要求组内 profile 必须在候选提交上有成功执行证据，缺失即失败关闭；模型不可触及 | 策略粒度（建议：每工作区默认+每需求覆盖）；仅阻断收口 |
-| 2 | `harden-host-owned-baseline`（A03-c） | 宿主自有、任务仓之外的基线资产，收口在候选提交上先于任务验证执行，证据独立标识，不可跳过；与 1 耦合（b 的策略槽接入 c 的来源） | 基线失败阻断收口（建议是） |
-| 3 | `harden-budget-pause-state`（A11） | 预算耗尽进入持久 paused 状态（落账、可见、派发失败关闭），显式恢复留痕；替代纯异常拒绝 | 粒度=节点（建议）；容量不足不暂停（建议） |
-| 4 | `harden-card-draft-isolation`（A8） | 资源卡未保存草稿按卡片身份隔离并存 + 离开提示 + 移动视口可用性（纯客户端；需新造资源卡夹具） | 草稿仅内存级（建议）；确认夹具投入 |
+| 1 ✅ | `harden-minimum-validation-policy`（A03-b） | 最小验证策略（人写、宿主收口强制、模型零接口）；被引用 profile 删除被拒；客户端「收口必跑」勾选 | `validation-policy.spec.ts`（6） |
+| 2 ✅ | `harden-host-owned-baseline`（A03-c） | 宿主自有基线在候选提交先于任务验证执行，失败阻断收口；证据带 host-baseline 来源持久于收口记录；交接附执行数；客户端 JSON 编辑区 | `host-baseline.spec.ts`（5） |
+| 3 ✅ | `harden-budget-pause-state`（A11） | 预算耗尽 → 节点持久 paused（落账/可见/派发指名拒绝）；显式 resumeNode 恢复留痕；DAG 与浮层呈现 | `node-pause.spec.ts`（4） |
+| 4 ✅ | `harden-card-draft-isolation`（A8） | 按键草稿 store；验证编辑器草稿跨卡片并存；面板关闭两步确认不静默丢弃；**真实缺陷修复**（编辑器挂载曾无条件标记 dirty 致关闭级联） | `card-drafts.spec.ts`（4）+ overlay e2e |
 
-裁决方式：对每项说「做 / 不做 / 改条件」；说「做 N 号」即按该 change 走 design → tasks → apply。
 
 **已裁决无需动作**：`deployed` 语义、强隔离承诺、F03 触发前置——均「保持现状」。
 **上游阻断（不需你现在动作）**：官方 DSH 发行版兼容复核（`externalEventProducers` 缺口，见第 18 行）——`check:release` 的最后一个真实步骤（`verify:profile`）依赖它，故 `check:release` 目前仅剩此上游阻断；本仓侧的门禁不可满足性已修复。

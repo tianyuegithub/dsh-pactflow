@@ -356,7 +356,24 @@ describe('PactFlow external Bundle Web UI', { timeout: 120_000 }, () => {
     const bounds = await editor.evaluate(element => ({ visible: element.clientHeight, content: element.scrollHeight }))
     expect(bounds.content).toBeLessThanOrEqual(bounds.visible)
     if (process.env.PACTFLOW_WEB_EVIDENCE_DIR !== undefined) await page.screenshot({ path: join(process.env.PACTFLOW_WEB_EVIDENCE_DIR, 'validation-profiles.png') })
-    await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+    // A8: an unsaved editor draft turns the panel close into a two-step
+    // discard confirmation; confirming drops the draft, so reopening shows
+    // the persisted value instead.
+    await editor.getByLabel('显示名称', { exact: true }).fill('未保存草稿名')
+    const panelClose = dialog.getByRole('button', { name: '关闭', exact: true })
+    await panelClose.click()
+    const discardConfirm = dialog.getByRole('button', { name: '未保存更改将丢失，确认关闭？' })
+    await discardConfirm.waitFor({ timeout: 5_000 })
+    await editor.getByLabel('显示名称', { exact: true }).fill('未保存草稿名二')
+    await discardConfirm.click()
+    await dialog.waitFor({ state: 'detached', timeout: 5_000 })
+    await page.getByRole('button', { name: '零脉项目', exact: true }).click()
+    const reopened = page.getByRole('dialog', { name: '零脉项目' })
+    await reopened.waitFor({ timeout: 10_000 })
+    const reopenedEditor = reopened.getByRole('region', { name: '宿主验证配置' })
+    await expect.poll(() => reopenedEditor.getByLabel('显示名称', { exact: true }).inputValue(), { timeout: 10_000 })
+      .toBe('检查差异')
+    await reopened.getByRole('button', { name: '关闭', exact: true }).click()
   })
 
   it('refreshes workspace configuration in the open overlay after projection movement', async () => {

@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { cardDrafts } from './card-drafts.ts'
 import { pactFlowValidationProfilesSchema } from '../schema.ts'
 import type { PactFlowValidationProfile, PactFlowValidationProfileInput, PactFlowWorkspaceProjectConfig } from '../types.ts'
 import {
@@ -34,8 +35,24 @@ export function ValidationProfileEditor({ config, disabled, onSave }: {
   readonly onSave: (profiles: readonly PactFlowValidationProfileInput[] | undefined, selectedIds: readonly string[]) => void
 }) {
   const original = config?.validationProfiles ?? []
-  const [rows, setRows] = useState<readonly Draft[]>(() => drafts(original))
-  const [selected, setSelected] = useState<readonly string[]>(config?.validationProfileIds ?? [])
+  // A8: the unsaved draft lives in the per-card store keyed by card identity, so
+  // switching between workspace cards preserves each card's draft independently.
+  const draftKey = `validation-profiles:${config?.workspaceId ?? 'none'}`
+  const stored = cardDrafts.get(draftKey)
+  const restore = (): { rows: readonly Draft[]; selected: readonly string[] } => {
+    if (stored !== undefined) {
+      try {
+        const parsedDraft = JSON.parse(stored) as { rows?: readonly Draft[]; selected?: readonly string[] }
+        if (Array.isArray(parsedDraft.rows) && Array.isArray(parsedDraft.selected)) {
+          return { rows: parsedDraft.rows, selected: parsedDraft.selected }
+        }
+      } catch { /* fall through to the persisted state */ }
+    }
+    return { rows: drafts(original), selected: config?.validationProfileIds ?? [] }
+  }
+  const restored = restore()
+  const [rows, setRows] = useState<readonly Draft[]>(restored.rows)
+  const [selected, setSelected] = useState<readonly string[]>(restored.selected)
   const parsed = (() => {
     try {
       return pactFlowValidationProfilesSchema.safeParse(rows.map(row => ({
@@ -47,6 +64,11 @@ export function ValidationProfileEditor({ config, disabled, onSave }: {
   const profiles = parsed?.success ? parsed.data : undefined
   const profilesChanged = profiles !== undefined && contents(profiles) !== contents(original)
   const dirty = profilesChanged || JSON.stringify(selected) !== JSON.stringify(config?.validationProfileIds ?? [])
+  // Persist the draft ONLY when the card is actually dirty: a freshly mounted
+  // editor must not mark the card as having unsaved changes.
+  useEffect(() => {
+    if (dirty) cardDrafts.set(draftKey, JSON.stringify({ rows, selected }))
+  }, [draftKey, dirty, rows, selected])
   const update = (row: Draft, patch: Partial<Draft>): void => {
     setRows(current => current.map(item => item.key === row.key ? { ...item, ...patch } : item))
     if (patch.id !== undefined) setSelected(current => current.map(id => id === row.id ? patch.id! : id))
@@ -86,9 +108,10 @@ export function ValidationProfileEditor({ config, disabled, onSave }: {
     {profiles === undefined ? <p role="alert" style={errorTextStyle}>请检查编号、命令、参数数组与超时；禁止命令解释器包装。</p> : null}
     <p style={fieldHintStyle}>默认执行顺序：{selected.join(' → ') || '未选择'}</p>
     <div style={resourceCardActionsStyle}><button type="button" disabled={disabled || profiles === undefined || !dirty} onClick={() => {
-      if (profiles !== undefined) onSave(profilesChanged ? profiles : undefined, selected)
+      if (profiles !== undefined) { cardDrafts.clear(draftKey); onSave(profilesChanged ? profiles : undefined, selected) }
     }} style={buttonStyle}>保存验证配置</button>
     <button type="button" disabled={disabled} onClick={() => {
+      cardDrafts.clear(draftKey)
       setRows(drafts(original)); setSelected(config?.validationProfileIds ?? [])
     }} style={secondaryButtonStyle}>撤销未保存更改</button></div>
   </section>

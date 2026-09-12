@@ -25,6 +25,19 @@
 
 零运行时改动（纯新增测试与文档）。**验证**：`pnpm run check` 72 文件 / **558** 测试 / 13 包产物全绿；`openspec validate --all --strict` 37/37；依赖 56 包离线 advisory 匹配 0。
 
+## 2026-09-12 四项新目标全部交付（用户裁决「1-4 都做」；四个 change 各自归档）
+
+按序完成 A03-b → A03-c → A11 → A8，各自完整 OpenSpec 周期：
+
+1. **`harden-minimum-validation-policy`**（A03-b）：`validationPolicy` 组（人写、宿主强制）；`closeGitNeed` 在外部调用前核对每交付构件的 profile 成功证据（按注册 command+args 匹配，修订漂移由既有断言排除），缺失逐项指名；`saveValidationPolicy`（引用校验）+ 删除被引用 profile 拒绝；Agent 面零接口（测试断言）；客户端「收口必跑」勾选。
+2. **`harden-host-owned-baseline`**（A03-c）：`prepareClosing` 在候选提交上**先于任务验证**执行宿主基线（复用 runValidation，失败抛「blocks closing」并指名命令）；证据带 `source='host-baseline'` 持久于收口记录（closing schema 扩展）；交接未完成责任附执行数；`saveHostBaseline`（边界校验）+ 客户端 JSON 编辑区。
+3. **`harden-budget-pause-state`**（A11）：`PactFlowNodeState` 增 `paused`；预算耗尽 → 落 paused（不再每次重抛异常）；claim/retry 对 paused 指名「等待人工恢复」；`resumeNode` 显式恢复留痕；`STATE_COPY`/浮层恢复区呈现。既有预算测试按新合同更新。
+4. **`harden-card-draft-isolation`**（A8）：`card-drafts.ts` 按键草稿 store（Map + useSyncExternalStore）；验证编辑器草稿按工作区键并存（切换保留、保存/撤销清本键）；面板关闭两步确认不静默丢弃；移动视口资源卡覆盖沿用既有 e2e 断言。
+
+**真实缺陷（第 4 项，e2e 级联暴露）**：编辑器挂载曾**无条件**向草稿 store 写入 → 面板一打开即被标记「有未保存草稿」→ 关闭第一击只进入确认态、面板残留 → 模态拦截后续用例的侧栏点击（表现为「负载偶发」假象）。修复：仅 dirty 时写入。**教训**：新增「未保存」类状态时，挂载即写 = 把干净状态标脏；级联失败的根因要先查「前一用例残留的模态/状态」。前两次同类失败（4a88388 前）确为冷启动侧栏偶发，本次则不是——同形不同因，必须逐次核实。
+
+**验证**：`pnpm run check` 75 文件 / **584** 测试 / 13 包产物全绿；`test:web` 9 通过（负载偶发经冷却复跑确认）；`openspec validate --all --strict` 40/40（39 spec + 1 活跃）→ 归档后 40 spec。
+
 ## 2026-09-12 用户裁决：跨主机双客户端部署 = 非目标形态（11 号待办正式关闭）
 
 用户质疑跨主机场景的前提并阐明真实部署模型：**单实例多客户端**（一台服务器一个 DSH、监听端口供浏览器访问；两台机器即两个独立 DSH、两个独立 home）——跨主机双客户端共享 DSH home **不属于**产品部署形态，与 2026-09-06「远程企业平台=永久非目标」裁决同族。据此：

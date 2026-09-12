@@ -27,6 +27,7 @@
     "src/client/runtime-freshness.ts",
     "src/client/validation-profile-editor.tsx",
     "src/client/verification-label.ts",
+    "src/client/card-drafts.ts",
     "src/schema.ts",
     "src/harness-discovery.ts",
     "src/types.ts"

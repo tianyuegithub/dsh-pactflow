@@ -20,6 +20,7 @@ import type {
 } from '../types.ts'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
 import { createRequestGate } from './request-gate.ts'
+import { cardDrafts } from './card-drafts.ts'
 import { ValidationProfileEditor } from './validation-profile-editor.tsx'
 import type { PactFlowValidationProfileInput } from '../types.ts'
 
@@ -89,6 +90,7 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   const [error, setError] = useState<string | null>(null)
   const { feedback, showFeedback, clearFeedback } = useActionFeedback()
   const [confirmInit, setConfirmInit] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [remotePreview, setRemotePreview] = useState(false)
   const [reconcile, setReconcile] = useState<PactFlowRemoteReconciliation | null>(null)
   const [confirmRepoId, setConfirmRepoId] = useState('')
@@ -229,14 +231,24 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
   }
 
   return <div style={wide ? footerRootStyle : footerRailRootStyle}>
-    <button type="button" aria-label="零脉项目" onClick={() => setOpen(true)} style={wide ? footerButtonStyle : footerRailButtonStyle}>
+    <button type="button" aria-label="零脉项目" onClick={() => { setConfirmDiscard(false); setOpen(true) }} style={wide ? footerButtonStyle : footerRailButtonStyle}>
       <IconAgentPresetOutline16 size={wide ? 16 : 18} />{wide ? <span>零脉项目</span> : null}
     </button>
     {!open ? null : <div role="presentation" style={backdropStyle}>
       <section role="dialog" aria-modal="true" aria-label="零脉项目" style={panelStyle}>
         <header style={headerStyle}>
           <div><h2 style={titleStyle}>零脉项目</h2><p style={mutedStyle}>工作区级 Git、验证配置与执行策略</p></div>
-          <button type="button" onClick={() => setOpen(false)} style={secondaryButtonStyle}>关闭</button>
+          <button type="button" onClick={() => {
+            // A8: closing with unsaved editor drafts asks before discarding.
+            const dirtyKey = selected === undefined ? null : `validation-profiles:${selected.workspaceId}`
+            if (dirtyKey !== null && cardDrafts.has(dirtyKey) && !confirmDiscard) {
+              setConfirmDiscard(true)
+              return
+            }
+            if (dirtyKey !== null) cardDrafts.clear(dirtyKey)
+            setConfirmDiscard(false)
+            setOpen(false)
+          }} style={secondaryButtonStyle}>{confirmDiscard ? '未保存更改将丢失，确认关闭？' : '关闭'}</button>
         </header>
         <div style={bodyStyle}>
           <nav aria-label="工作区项目" style={workspaceListStyle}>
