@@ -57,7 +57,7 @@
 | `run-real-k3s-batch` 的 TTL/ZeroProof 阶段 | **passed** | 2026-09-11 真实集群运行通过（含修复 namespace 缺失与假阳性风险后复跑） |
 | 真实待办网页 dogfood（`test:real-todo`，两节点依赖链） | **passed** | 2026-09-11 真实模型 + 真实 Job/Pod + 真实 Git：A 建 `todo.html`，B 以 A 为代码输入在其基线上文档化；宿主验证 `node test-todo-smoke.js` exit 0；真实浏览器驱动增/勾选/删除/刷新持久通过。**此运行发现并修复 K3s 代码输入断链**；见 `docs/b-class-k3s-acceptance-20260911.md` §7 |
 | 真实依赖链矩阵（真实集群） | **passed** | 2026-09-11 完整 `test:real-k3s-batch`：`suites` 阶段 3 套件 6/6（k3s-worker / harness-probes / harness-tasks×3）+ TTL 回收 + 零残留归零；两节点依赖链另见 `test:real-todo` |
-| 多宿主并发 | **partial** | 跨进程文件锁已用**真实 4 进程**验证互斥（`workspace-lock-multiprocess.spec.ts`）；跨主机（NFS/共享盘）语义未验证 |
+| 多宿主并发 | **closed（非目标形态）** | 同机跨进程锁互斥已用**真实 4 进程**验证（`workspace-lock-multiprocess.spec.ts`）；跨主机锁语义已防御性合同化（`harden-cross-host-lock-semantics`：异宿主遗留锁失败关闭且绝不夺取，真实子进程验证）。**跨主机双客户端部署 = 非目标形态**（2026-09-12 用户裁决，与「远程企业平台=永久非目标」同族）；真实 NFS 验证不排期，runbook 留存手册 §6.1 |
 
 ## 3. 上游与决策边界
 

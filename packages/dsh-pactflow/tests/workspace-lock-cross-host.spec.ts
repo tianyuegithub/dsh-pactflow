@@ -126,6 +126,8 @@ describe('PactFlow workspace file lock across hosts', () => {
     expect(opsDoc).toMatch(/跨主机\/共享盘上的工作区配置锁/)
     expect(opsDoc).toContain('绝不偷活主')
     expect(opsDoc).toContain('mount_nfs 127.0.0.1:/Users/ty/pf-nfs')
-    expect(opsDoc).toMatch(/真实 NFS 双客户端互斥验证：未运行/)
+    // The dual-client deployment is a ruled-out non-goal: the doc must keep
+    // saying the real-NFS verification is NOT scheduled (never "verified").
+    expect(opsDoc).toMatch(/真实 NFS 双客户端互斥验证：不排期/)
   })
 })
