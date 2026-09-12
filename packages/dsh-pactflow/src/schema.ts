@@ -53,6 +53,8 @@ export const pactFlowWorkspaceProjectSchema = pactFlowSchema<PactFlowWorkspacePr
   validationPolicy: z.array(z.object({
     id: nonEmpty, profileIds: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)).min(1),
   }).refine(group => new Set(group.profileIds).size === group.profileIds.length)).optional(),
+  // A03-c: host-owned closing baseline (owner-written, outside any task repo).
+  hostBaselineCommands: z.array(z.object({ command: z.string().min(1), args: z.array(z.string()), timeoutMs: z.number() })).optional(),
   // Legacy command data remains readable; this schema never grants execution authority.
   validationCommands: z.array(z.object({ command: z.string(), args: z.array(z.string()), timeoutMs: z.number() })).optional(),
 }).refine(config => config.validationProfileIds?.every(id => config.validationProfiles?.some(profile => profile.id === id) === true) ?? true))

@@ -326,6 +326,7 @@ export class PactFlowGitWorkspace {
     secret?: PactFlowGitAuthSecret,
     authorizedCommands: readonly PactFlowValidationCommand[] = [],
     priorIdentity?: PactFlowClosingGit,
+    baseline: readonly PactFlowValidationCommand[] = [],
   ): Promise<PactFlowClosingGit> {
     assertPactFlowValidationAuthorization(binding, authorizedCommands)
     const root = await this.requireWorkspaceRoot(workspace)
@@ -419,6 +420,19 @@ export class PactFlowGitWorkspace {
       }
       await this.git(worktreePath, ['merge', '--no-ff', '--no-edit', taskRef])
     }
+    // A03-c: the host-owned baseline runs on the candidate commit BEFORE task
+    // validations; any failure blocks closing (its authority is the owner's
+    // workspace config, not the task binding, so it bypasses the binding
+    // authorization assertion by construction).
+    const baselineValidations: PactFlowValidationEvidence[] = []
+    for (const command of baseline) {
+      try {
+        baselineValidations.push({ ...(await this.runValidation(worktreePath, command)), source: 'host-baseline' })
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        throw new Error(`PactFlow host baseline validation failed and blocks closing (${command.command} ${command.args.join(' ')}): ${detail}`)
+      }
+    }
     const result = await this.validateResult({
       remote: binding.remote,
       remoteUrl: binding.remoteUrl,
@@ -438,7 +452,10 @@ export class PactFlowGitWorkspace {
         'push', '--porcelain', binding.remote, `HEAD:refs/heads/${branch}`,
       ], environment)
     })
-    return { branch, commit: result.commit, worktreePath }
+    return {
+      branch, commit: result.commit, worktreePath,
+      ...(baselineValidations.length === 0 ? {} : { baselineValidations }),
+    }
   }
 
   private async verifyTaskTips(

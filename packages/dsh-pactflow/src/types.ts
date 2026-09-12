@@ -319,6 +319,12 @@ export interface PactFlowWorkspaceProjectConfig {
    * Owner-writable only (client config path); never readable or writable by the model.
    */
   readonly validationPolicy?: readonly PactFlowValidationPolicyGroup[]
+  /**
+   * A03-c: host-owned closing baseline commands, stored OUTSIDE any task repo.
+   * Executed on the candidate commit before task validations at every closing;
+   * a failure blocks closing. Owner-writable only (client config path).
+   */
+  readonly hostBaselineCommands?: readonly PactFlowValidationCommand[]
 }
 
 /** One closing-required set of validation profiles; every group must be satisfied. */
@@ -460,6 +466,14 @@ export interface PactFlowSaveValidationPolicyRequest {
   readonly groups?: readonly PactFlowValidationPolicyGroup[]
 }
 
+/** Owner request to replace the host-owned closing baseline (A03-c). */
+export interface PactFlowSaveHostBaselineRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  /** Empty/omitted clears the baseline. */
+  readonly commands?: readonly PactFlowValidationCommand[]
+}
+
 export interface PactFlowSettingsView {
   readonly k3s: false | PactFlowK3sSettings
   readonly infrastructure: false | PactFlowInfrastructureSettings
@@ -514,6 +528,8 @@ export interface PactFlowClosingGit {
   readonly branch: string
   readonly commit: string
   readonly worktreePath: string
+  /** A03-c: host-owned baseline evidence executed on the candidate commit (independent source). */
+  readonly baselineValidations?: readonly PactFlowValidationEvidence[] | undefined
 }
 
 /** Non-secret reference to one HTTPS username/token credential. */
@@ -549,6 +565,8 @@ export interface PactFlowValidationCommand {
 export interface PactFlowValidationEvidence extends PactFlowValidationCommand {
   readonly exitCode: 0
   readonly durationMs: number
+  /** A03-c: set when the evidence came from the host-owned closing baseline. */
+  readonly source?: 'host-baseline'
 }
 
 /** Commit evidence accepted from a successful Git-backed Worker. */
@@ -1014,6 +1032,7 @@ export interface PactFlowHandoverSummary {
     readonly target: string
     readonly state: string
     readonly retain?: boolean
+    readonly baselineValidationsExecuted?: number | undefined
   }[]
   /** The installed package build version, so an old log's reader build is traceable. */
   readonly packageVersion: string

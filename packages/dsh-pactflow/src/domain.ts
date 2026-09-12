@@ -124,6 +124,8 @@ const validationCommandSchema = pactFlowSchema<PactFlowValidationCommand>(z.obje
 const validationEvidenceSchema = pactFlowSchema<PactFlowValidationEvidence>(z.object({
   command: z.string().min(1), args: z.array(z.string()), timeoutMs: z.number().int().positive(),
   exitCode: z.literal(0), durationMs: z.number().int().nonnegative(),
+  // A03-c: host-owned closing baseline evidence is marked with its source.
+  source: z.literal('host-baseline').optional(),
 }))
 
 const gitBindingSchema = pactFlowSchema<PactFlowGitBinding>(z.object({
@@ -244,7 +246,8 @@ const cleanupSchema = pactFlowSchema<PactFlowCleanupRecord>(z.object({
   id: z.string().min(1), runId: pactFlowIdSchema<'run'>().optional(), needId: pactFlowIdSchema<'need'>().optional(),
   target: z.string().min(1), state: z.enum(['pending', 'failed', 'succeeded']),
   closing: z.object({ branch: z.string().min(1), commit: z.string().regex(/^[0-9a-f]{40,64}$/),
-    worktreePath: z.string().refine(isAbsolute) }).optional(),
+    worktreePath: z.string().refine(isAbsolute),
+    baselineValidations: z.array(validationEvidenceSchema).optional() }).optional(),
   requiresRelease: z.boolean().optional(),
   retain: z.boolean().optional(),
   retainUntil: z.number().int().nonnegative().optional(),

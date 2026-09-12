@@ -38,6 +38,7 @@ export interface PactFlowProjectPanelFace {
   saveWorker(workspaceId: string, expectedRevision: number, k3sGitSecretName: string, worker: PactFlowProjectWorkerPolicy): Promise<PactFlowWorkspaceProjectConfig>
   saveValidation(workspaceId: string, expectedRevision: number, profiles: readonly PactFlowValidationProfileInput[] | undefined, selectedIds: readonly string[]): Promise<PactFlowWorkspaceProjectConfig>
   savePolicy(workspaceId: string, expectedRevision: number, groups: readonly { readonly id: string; readonly profileIds: readonly string[] }[]): Promise<PactFlowWorkspaceProjectConfig>
+  saveHostBaseline(workspaceId: string, expectedRevision: number, commands: readonly { readonly command: string; readonly args: readonly string[]; readonly timeoutMs: number }[]): Promise<PactFlowWorkspaceProjectConfig>
   createRemote(request: {
     readonly workspaceId: string
     readonly expectedRevision: number
@@ -78,7 +79,7 @@ function friendlyProtocol(value: string): string {
   } as Readonly<Record<string, string>>)[value] ?? value
 }
 
-export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, savePolicy, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
+export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, savePolicy, saveHostBaseline, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<readonly PactFlowWorkspaceProjectView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -297,6 +298,10 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                 config={selected.config} disabled={busy}
                 onSave={groups => act(() => savePolicy(selected.workspaceId, selected.config?.revision ?? 0, groups),
                   { id: 'validation-policy', success: '收口策略保存成功' })} />
+              <HostBaselineSection key={`${selected.workspaceId}:baseline:${selected.config?.revision ?? 0}`}
+                config={selected.config} disabled={busy}
+                onSave={commands => act(() => saveHostBaseline(selected.workspaceId, selected.config?.revision ?? 0, commands),
+                  { id: 'host-baseline', success: '宿主基线保存成功' })} />
               <section style={cardStyle}>
                 <div style={cardHeaderStyle}>
                   <div><h3 style={cardTitleStyle}>Agent 组合</h3><p style={mutedStyle}>Agent Profile = Harness × Model × Worker 数量</p></div>
@@ -500,6 +505,51 @@ function ValidationPolicySection({ config, disabled, onSave }: {
             onSave(selected.length > 0 ? [{ id: 'closing', profileIds: [...selected] }] : [])
             setDraft(null)
           }}>保存收口策略</button>
+      </div>
+    </section>
+  )
+}
+
+
+/** A03-c: host-owned closing baseline commands (owner-only, JSON edited). */
+function HostBaselineSection({ config, disabled, onSave }: {
+  readonly config: PactFlowWorkspaceProjectConfig | null | undefined
+  readonly disabled: boolean
+  readonly onSave: (commands: readonly { readonly command: string; readonly args: readonly string[]; readonly timeoutMs: number }[]) => void
+}) {
+  const commands = config?.hostBaselineCommands ?? []
+  const [draft, setDraft] = useState<string | null>(null)
+  const text = draft ?? (commands.length === 0 ? '[]' : JSON.stringify(commands, null, 2))
+  const parsed = (() => {
+    if ((draft ?? '').trim() === '') return []
+    let value: unknown
+    try { value = JSON.parse(draft!) } catch { return null }
+    if (!Array.isArray(value)) return null
+    const parsedCommands: { command: string; args: string[]; timeoutMs: number }[] = []
+    for (const item of value) {
+      const entry = item as { command?: unknown; args?: unknown; timeoutMs?: unknown }
+      if (typeof entry?.command !== 'string' || entry.command.trim() === ''
+        || !Array.isArray(entry.args) || entry.args.some(arg => typeof arg !== 'string')
+        || !Number.isSafeInteger(entry?.timeoutMs)) return null
+      parsedCommands.push({ command: entry.command.trim(), args: entry.args as string[], timeoutMs: entry.timeoutMs as number })
+    }
+    return parsedCommands
+  })()
+  return (
+    <section style={cardStyle} aria-label="宿主基线">
+      <div style={cardHeaderStyle}>
+        <div><h3 style={cardTitleStyle}>宿主基线</h3><p style={mutedStyle}>宿主自有、存于任务仓之外的断言命令；收口时在候选提交上先于任务验证执行，失败阻断收口。owner-only 高级配置（JSON 数组：[{"{"}command, args, timeoutMs{"}"}]）。</p></div>
+      </div>
+      <textarea aria-label="宿主基线命令 JSON" value={text} disabled={disabled}
+        onChange={event => setDraft(event.currentTarget.value)}
+        style={{ ...inputStyle, minHeight: 96, fontFamily: 'monospace' }} />
+      <div style={actionsStyle}>
+        <button type="button" disabled={disabled || draft === null || parsed === null} style={primaryButtonStyle}
+          onClick={() => {
+            onSave(parsed!)
+            setDraft(null)
+          }}>保存宿主基线</button>
+        {draft !== null && parsed === null && <span style={warningStyle}>JSON 格式无效</span>}
       </div>
     </section>
   )

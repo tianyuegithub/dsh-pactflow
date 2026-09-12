@@ -47,6 +47,10 @@ export function projectHandoverSummary(snapshot: AnyRecord, versions: PactFlowHa
     .map(record => ({
       id: String(record.id), target: String(record.target), state: String(record.state),
       ...record.retain === true ? { retain: true } : {},
+      // A03-c: report how many host-baseline assertions ran for a pending closing.
+      ...Array.isArray(record?.closing?.baselineValidations)
+        ? { baselineValidationsExecuted: record.closing.baselineValidations.length }
+        : {},
     }))
     .sort((left, right) => left.id.localeCompare(right.id))
 

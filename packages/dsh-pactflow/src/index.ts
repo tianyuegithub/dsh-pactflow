@@ -161,6 +161,7 @@ import type {
   PactFlowCreateWorkspaceRemoteRequest,
   PactFlowSaveValidationProfilesRequest,
   PactFlowSaveValidationPolicyRequest,
+  PactFlowSaveHostBaselineRequest,
   PactFlowValidationProfile,
   PactFlowValidationProfileInput,
   PactFlowNeed,
@@ -806,14 +807,11 @@ export class PactFlowService extends TypertRemoteService {
     if (this.isLegacyValidationBinding(binding) || taskRuns.some(run => this.isLegacyValidationBinding(run.git!))) {
       throw new Error('PactFlow closing refuses legacy-untrusted validation commands; bind Workspace validation profiles first')
     }
-    // A03-b: the owner-written minimum validation policy is enforced here —
-    // every delivered artifact must carry successful evidence for each required
-    // profile, before any external (Gitea) call is made.
-    this.enforceValidationPolicy(
-      binding,
-      taskRuns,
-      await this.workspaceProjectForSession(session),
-    )
+    // A03-b/A03-c: the owner-written workspace configuration drives both the
+    // minimum validation policy (enforced before any external call) and the
+    // host-owned closing baseline (executed on the candidate commit).
+    const workspaceConfig = await this.workspaceProjectForSession(session)
+    this.enforceValidationPolicy(binding, taskRuns, workspaceConfig)
     const expectedTaskRefs = taskRuns.map(run => ({
       remoteRef: run.gitResult!.remoteRef,
       expectedCommit: run.gitResult!.commit,
@@ -880,6 +878,7 @@ export class PactFlowService extends TypertRemoteService {
       gitSecret,
       await this.assertValidationProfilesCurrent(session, binding),
       priorClosing?.closing,
+      workspaceConfig?.hostBaselineCommands ?? [],
     )
     if (priorClosing?.closing !== undefined && (priorClosing.closing.commit !== integration.commit
       || priorClosing.closing.branch !== integration.branch || priorClosing.closing.worktreePath !== integration.worktreePath)) {
@@ -1778,6 +1777,42 @@ export class PactFlowService extends TypertRemoteService {
     }
     const written = await this.workspaceProjects.putIfRevision(request.expectedRevision, config)
     if (!written) throw new Error('PactFlow Workspace project revision changed while saving validation policy')
+    return config
+  }
+
+  /** A03-c: replace the host-owned closing baseline commands (owner-only path). */
+  @Remote('saveHostBaseline')
+  async saveHostBaseline(
+    request: PactFlowSaveHostBaselineRequest,
+  ): Promise<PactFlowWorkspaceProjectConfig> {
+    const workspace = this.requireWorkspace(request.workspaceId)
+    const current = await this.workspaceProjects.get(request.workspaceId)
+    this.requireWorkspaceProjectRevision(current, request.expectedRevision)
+    const commands = (request.commands ?? []).map(command => ({
+      command: command.command.trim(),
+      args: [...command.args],
+      timeoutMs: command.timeoutMs,
+    }))
+    for (const command of commands) {
+      if (command.command === '') throw new Error('PactFlow host baseline command must be non-empty')
+      if (command.args.length > 64 || command.args.some(argument => argument.length > 4_096 || /[\0\r\n]/.test(argument))) {
+        throw new Error(`PactFlow host baseline command has invalid arguments (${command.command})`)
+      }
+      if (!Number.isSafeInteger(command.timeoutMs) || command.timeoutMs < 1_000 || command.timeoutMs > 3_600_000) {
+        throw new Error(`PactFlow host baseline command timeout must be 1000-3600000ms (${command.command})`)
+      }
+    }
+    const now = Date.now()
+    const { hostBaselineCommands: _previous, ...carried } = current ?? {} as PactFlowWorkspaceProjectConfig
+    const config: PactFlowWorkspaceProjectConfig = {
+      ...carried,
+      schema: 'dsh_pactflow_workspace_project/v1', workspaceId: request.workspaceId,
+      workspacePath: workspace.path, workspaceTitle: workspace.title,
+      revision: (current?.revision ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now,
+      ...(commands.length === 0 ? {} : { hostBaselineCommands: commands }),
+    }
+    const written = await this.workspaceProjects.putIfRevision(request.expectedRevision, config)
+    if (!written) throw new Error('PactFlow Workspace project revision changed while saving host baseline')
     return config
   }
 
