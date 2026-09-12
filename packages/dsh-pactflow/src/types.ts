@@ -313,6 +313,18 @@ export interface PactFlowWorkspaceProjectConfig {
   readonly validationProfileIds?: readonly string[]
   /** Historical raw commands; new configurations use validationProfiles instead. */
   readonly validationCommands?: readonly PactFlowValidationCommand[]
+  /**
+   * Minimum validation policy (A03-b): every group's profiles must have successful
+   * execution evidence on each delivered candidate before closing is allowed.
+   * Owner-writable only (client config path); never readable or writable by the model.
+   */
+  readonly validationPolicy?: readonly PactFlowValidationPolicyGroup[]
+}
+
+/** One closing-required set of validation profiles; every group must be satisfied. */
+export interface PactFlowValidationPolicyGroup {
+  readonly id: string
+  readonly profileIds: readonly string[]
 }
 
 export interface PactFlowRemoteCreation {
@@ -438,6 +450,14 @@ export interface PactFlowSaveValidationProfilesRequest {
   readonly validationProfiles?: readonly PactFlowValidationProfileInput[]
   readonly selectedProfileIds?: readonly string[]
   readonly validationProfileIds?: readonly string[]
+}
+
+/** Owner request to replace the workspace's minimum validation policy (A03-b). */
+export interface PactFlowSaveValidationPolicyRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  /** Empty/omitted clears the policy; every group must be satisfied at closing. */
+  readonly groups?: readonly PactFlowValidationPolicyGroup[]
 }
 
 export interface PactFlowSettingsView {

@@ -160,6 +160,7 @@ import type {
   PactFlowSaveWorkspaceWorkerPolicyRequest,
   PactFlowCreateWorkspaceRemoteRequest,
   PactFlowSaveValidationProfilesRequest,
+  PactFlowSaveValidationPolicyRequest,
   PactFlowValidationProfile,
   PactFlowValidationProfileInput,
   PactFlowNeed,
@@ -805,6 +806,14 @@ export class PactFlowService extends TypertRemoteService {
     if (this.isLegacyValidationBinding(binding) || taskRuns.some(run => this.isLegacyValidationBinding(run.git!))) {
       throw new Error('PactFlow closing refuses legacy-untrusted validation commands; bind Workspace validation profiles first')
     }
+    // A03-b: the owner-written minimum validation policy is enforced here —
+    // every delivered artifact must carry successful evidence for each required
+    // profile, before any external (Gitea) call is made.
+    this.enforceValidationPolicy(
+      binding,
+      taskRuns,
+      await this.workspaceProjectForSession(session),
+    )
     const expectedTaskRefs = taskRuns.map(run => ({
       remoteRef: run.gitResult!.remoteRef,
       expectedCommit: run.gitResult!.commit,
@@ -1706,6 +1715,14 @@ export class PactFlowService extends TypertRemoteService {
     if (selectedProfileIds !== undefined && selectedProfileIds.some(id => !profiles.some(profile => profile.id === id))) {
       throw new Error('PactFlow Workspace selected validation profile is not in the saved catalog')
     }
+    // A03-b: a profile referenced by the closing validation policy must not be
+    // deleted — the policy would silently dangle. Fail the save instead.
+    const policyReferenced = (current?.validationPolicy ?? [])
+      .flatMap(group => group.profileIds)
+      .filter(id => !profiles.some(profile => profile.id === id))
+    if (policyReferenced.length > 0) {
+      throw new Error(`PactFlow validation profile is referenced by the closing validation policy: ${[...new Set(policyReferenced)].join(', ')}`)
+    }
     const now = Date.now()
     const config: PactFlowWorkspaceProjectConfig = {
       schema: 'dsh_pactflow_workspace_project/v1', workspaceId: request.workspaceId,
@@ -1716,10 +1733,51 @@ export class PactFlowService extends TypertRemoteService {
       validationProfiles: profiles,
       ...(current?.remoteCreation === undefined ? {} : { remoteCreation: current.remoteCreation }),
       ...(selectedProfileIds === undefined ? {} : { validationProfileIds: selectedProfileIds }),
+      ...(current?.validationPolicy === undefined ? {} : { validationPolicy: current.validationPolicy }),
       validationCommands: current?.validationCommands ?? [],
     }
     const written = await this.workspaceProjects.putIfRevision(request.expectedRevision, config)
     if (!written) throw new Error('PactFlow Workspace project revision changed while saving validation profiles')
+    return config
+  }
+
+  /** A03-b: replace the owner-written minimum validation policy enforced at closing. */
+  @Remote('saveValidationPolicy')
+  async saveValidationPolicy(
+    request: PactFlowSaveValidationPolicyRequest,
+  ): Promise<PactFlowWorkspaceProjectConfig> {
+    const workspace = this.requireWorkspace(request.workspaceId)
+    const current = await this.workspaceProjects.get(request.workspaceId)
+    this.requireWorkspaceProjectRevision(current, request.expectedRevision)
+    const groups = (request.groups ?? []).map(group => ({
+      id: group.id.trim(),
+      profileIds: [...new Set(group.profileIds.map(value => value.trim()).filter(Boolean))],
+    }))
+    if (groups.some(group => group.id === '')) throw new Error('PactFlow validation policy group id must be non-empty')
+    if (new Set(groups.map(group => group.id)).size !== groups.length) {
+      throw new Error('PactFlow validation policy group ids must be unique')
+    }
+    const profiles = current?.validationProfiles ?? []
+    for (const group of groups) {
+      for (const profileId of group.profileIds) {
+        if (!profiles.some(profile => profile.id === profileId)) {
+          throw new Error(`PactFlow validation policy references unknown profile "${profileId}"`)
+        }
+      }
+    }
+    const now = Date.now()
+    // Destructure so an empty submission genuinely CLEARS the policy instead of
+    // carrying the previous one through the spread.
+    const { validationPolicy: _previous, ...carried } = current ?? {} as PactFlowWorkspaceProjectConfig
+    const config: PactFlowWorkspaceProjectConfig = {
+      ...carried,
+      schema: 'dsh_pactflow_workspace_project/v1', workspaceId: request.workspaceId,
+      workspacePath: workspace.path, workspaceTitle: workspace.title,
+      revision: (current?.revision ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now,
+      ...(groups.length === 0 ? {} : { validationPolicy: groups }),
+    }
+    const written = await this.workspaceProjects.putIfRevision(request.expectedRevision, config)
+    if (!written) throw new Error('PactFlow Workspace project revision changed while saving validation policy')
     return config
   }
 
@@ -2987,6 +3045,47 @@ export class PactFlowService extends TypertRemoteService {
     const need = this.ctx.sessionProjections.stateOf(session, 'pactflowNeeds')?.byId[id]
     if (need === undefined) throw new Error(`PactFlow need "${id}" does not exist`)
     return need
+  }
+
+  /** Read the latest matching review from the delivery projection. */
+  /**
+   * A03-b: enforce the owner-written minimum validation policy. Every delivered
+   * artifact (task run) must carry successful evidence for each required profile,
+   * matched by the profile's registered command+args (revisions are pinned by
+   * assertValidationProfilesCurrent). Missing anything fails closed, naming each
+   * miss; no policy configured means behavior identical to before.
+   */
+  private enforceValidationPolicy(
+    binding: PactFlowGitBinding | undefined,
+    taskRuns: readonly PactFlowRun[],
+    config: PactFlowWorkspaceProjectConfig | undefined,
+  ): void {
+    const policy = config?.validationPolicy
+    if (policy === undefined || policy.length === 0) return
+    const profiles = config?.validationProfiles ?? []
+    const missing: string[] = []
+    for (const group of policy) {
+      for (const profileId of group.profileIds) {
+        const profile = profiles.find(candidate => candidate.id === profileId)
+        if (profile === undefined) {
+          missing.push(`${profileId} (registered profile no longer exists)`)
+          continue
+        }
+        if (!binding?.validationProfileIds?.includes(profileId)) {
+          missing.push(`${profile.displayName} (not selected in the bound validation set)`)
+          continue
+        }
+        const satisfied = taskRuns.every(run => run.gitResult?.validations.some(evidence =>
+          evidence.exitCode === 0
+          && evidence.command === profile.command
+          && evidence.args.length === profile.args.length
+          && evidence.args.every((argument, index) => argument === profile.args[index])) === true)
+        if (!satisfied) missing.push(profile.displayName)
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(`PactFlow closing validation policy is not satisfied; missing: ${[...new Set(missing)].join(', ')}`)
+    }
   }
 
   /** Read the latest matching review from the delivery projection. */

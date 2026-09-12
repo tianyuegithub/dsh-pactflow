@@ -37,6 +37,7 @@ export interface PactFlowProjectPanelFace {
   gitSecrets(clusterId: string): Promise<readonly string[]>
   saveWorker(workspaceId: string, expectedRevision: number, k3sGitSecretName: string, worker: PactFlowProjectWorkerPolicy): Promise<PactFlowWorkspaceProjectConfig>
   saveValidation(workspaceId: string, expectedRevision: number, profiles: readonly PactFlowValidationProfileInput[] | undefined, selectedIds: readonly string[]): Promise<PactFlowWorkspaceProjectConfig>
+  savePolicy(workspaceId: string, expectedRevision: number, groups: readonly { readonly id: string; readonly profileIds: readonly string[] }[]): Promise<PactFlowWorkspaceProjectConfig>
   createRemote(request: {
     readonly workspaceId: string
     readonly expectedRevision: number
@@ -77,7 +78,7 @@ function friendlyProtocol(value: string): string {
   } as Readonly<Record<string, string>>)[value] ?? value
 }
 
-export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
+export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, savePolicy, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<readonly PactFlowWorkspaceProjectView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -292,6 +293,10 @@ export function PactFlowProjectPanel({ wide, list, catalogs, initializeGit, adop
                 config={selected.config} disabled={busy}
                 onSave={(profiles, ids) => act(() => saveValidation(selected.workspaceId, selected.config?.revision ?? 0, profiles, ids),
                   { id: 'validation-profiles', success: '验证配置保存成功' })} />
+              <ValidationPolicySection key={`${selected.workspaceId}:policy:${selected.config?.revision ?? 0}`}
+                config={selected.config} disabled={busy}
+                onSave={groups => act(() => savePolicy(selected.workspaceId, selected.config?.revision ?? 0, groups),
+                  { id: 'validation-policy', success: '收口策略保存成功' })} />
               <section style={cardStyle}>
                 <div style={cardHeaderStyle}>
                   <div><h3 style={cardTitleStyle}>Agent 组合</h3><p style={mutedStyle}>Agent Profile = Harness × Model × Worker 数量</p></div>
@@ -459,3 +464,43 @@ const mutedStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-ter
 const warningStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-warning)', fontSize: 12 }
 const okStyle: CSSProperties = { color: 'var(--dsw-alias-label-success)' }
 const errorStyle: CSSProperties = { color: 'var(--dsw-alias-label-error)', margin: 0 }
+
+
+/** A03-b: per-profile "closing-required" policy, written via the owner-only Remote. */
+function ValidationPolicySection({ config, disabled, onSave }: {
+  readonly config: PactFlowWorkspaceProjectConfig | null | undefined
+  readonly disabled: boolean
+  readonly onSave: (groups: readonly { readonly id: string; readonly profileIds: readonly string[] }[]) => void
+}) {
+  const profiles = config?.validationProfiles ?? []
+  const current = config?.validationPolicy?.find(group => group.id === 'closing')?.profileIds ?? []
+  const [draft, setDraft] = useState<readonly string[] | null>(null)
+  const selected = draft ?? current
+  return (
+    <section style={cardStyle} aria-label="收口最小验证策略">
+      <div style={cardHeaderStyle}>
+        <div><h3 style={cardTitleStyle}>收口最小验证策略</h3><p style={mutedStyle}>勾选的验证配置在收口时必须成功执行，缺失将阻断收口（宿主强制，模型不可修改）。</p></div>
+      </div>
+      {profiles.length === 0 ? <p style={mutedStyle}>暂无验证配置；请先在上方添加验证配置。</p> : (
+        <div style={targetBarStyle}>
+          {profiles.map(profile => (
+            <label key={profile.id} style={mutedStyle}>
+              <input type="checkbox" checked={selected.includes(profile.id)} disabled={disabled}
+                onChange={event => setDraft(event.currentTarget.checked
+                  ? [...selected, profile.id]
+                  : selected.filter(id => id !== profile.id))} />
+              {' '}<strong>{profile.displayName}</strong>
+            </label>
+          ))}
+        </div>
+      )}
+      <div style={actionsStyle}>
+        <button type="button" disabled={disabled || draft === null} style={primaryButtonStyle}
+          onClick={() => {
+            onSave(selected.length > 0 ? [{ id: 'closing', profileIds: [...selected] }] : [])
+            setDraft(null)
+          }}>保存收口策略</button>
+      </div>
+    </section>
+  )
+}

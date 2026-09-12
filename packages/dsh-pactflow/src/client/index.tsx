@@ -176,6 +176,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
+      savePolicy: async (workspaceId, expectedRevision, groups) => {
+        const result = await pactflow.saveValidationPolicy({ workspaceId, expectedRevision, groups })
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
       createRemote: async request => {
         const result = await pactflow.createWorkspaceRemote({
           ...request, confirm: 'create-gitea-repository',
