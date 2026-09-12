@@ -244,10 +244,12 @@ export function replaceResource(
   settings: PactFlowInfrastructureSettings,
   kind: PactFlowInfrastructureResourceKind,
   resource: InfrastructureResource,
+  prepend = false,
 ): PactFlowInfrastructureSettings {
-  const replace = <T extends InfrastructureResource>(rows: readonly T[]): readonly T[] => [
-    ...rows.filter(row => row.id !== resource.id), resource as T,
-  ]
+  const replace = <T extends InfrastructureResource>(rows: readonly T[]): readonly T[] => {
+    const kept = rows.filter(row => row.id !== resource.id)
+    return prepend ? [resource as T, ...kept] : [...kept, resource as T]
+  }
   if (kind === 'cluster') return { ...settings, clusters: replace(settings.clusters) }
   if (kind === 'registry') return { ...settings, registries: replace(settings.registries) }
   if (kind === 'git-provider') return { ...settings, gitProviders: replace(settings.gitProviders) }

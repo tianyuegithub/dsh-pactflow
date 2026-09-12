@@ -76,8 +76,9 @@ export function ValidationProfileEditor({ config, disabled, onSave }: {
   const add = (): void => {
     let next = 1
     while (rows.some(row => row.id === `validation-${next}`)) next++
-    setRows(current => [...current, { key: crypto.randomUUID(), id: `validation-${next}`, displayName: '验证命令',
-      command: 'git', argsText: '["diff","--check"]', timeoutMs: 30_000 }])
+    // New fill-in rows lead the list so the form is visible without scrolling.
+    setRows(current => [{ key: crypto.randomUUID(), id: `validation-${next}`, displayName: '验证命令',
+      command: 'git', argsText: '["diff","--check"]', timeoutMs: 30_000 }, ...current])
   }
   return <section aria-label="宿主验证配置" style={sectionStyle}>
     <div style={resourceHeaderStyle}>

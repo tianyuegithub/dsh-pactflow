@@ -168,7 +168,8 @@ export function PactFlowSettingsCard({
   }
   const beginAdd = (kind: PactFlowInfrastructureResourceKind, resource: InfrastructureResource): void => {
     if (activeEditor !== null) return
-    const value = replaceResource(persisted, kind, resource)
+    // New fill-in cards lead their section so the form is visible without scrolling.
+    const value = replaceResource(persisted, kind, resource, true)
     setDraft(value)
     setAdvanced(JSON.stringify(value, null, 2))
     setActiveEditor({ kind, id: resource.id, mode: 'new' })

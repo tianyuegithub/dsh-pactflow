@@ -75,7 +75,8 @@ export function EditableResourceCards<T extends { readonly id: string }>({
         </div>
         <button type="button" disabled={disabled || addDisabled === true} onClick={() => {
           const row = create()
-          if (onAdd === undefined) onChange([...rows, row])
+          // New fill-in cards lead the list so the form is visible without scrolling.
+          if (onAdd === undefined) onChange([row, ...rows])
           else onAdd(row)
         }} style={buttonStyle}>
           + 新增
