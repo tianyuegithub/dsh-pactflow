@@ -2,6 +2,16 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。**当前基线请以 `docs/CURRENT_STATUS-当前状态.md` 为准**（现为 73 文件 / 565 测试、46 个 change 已归档、已推送）。
 
+## 2026-09-12 Anthropic 探针 401 自动 Bearer 重试（change `model-probe-auth-fallback`，已归档）
+
+真实部署（火山方舟 Coding 套餐 key）实测暴露的矛盾：模型连接卡「测试」对 anthropic 协议固定发 `x-api-key`，而 Ark 只认 Bearer——探针必红，但 Worker 实跑（K3s 注入 `ANTHROPIC_AUTH_TOKEN`）本就 Bearer 可通。本次按用户裁决把探针改为双风格兼容：
+
+- `probeModelConnection` anthropic 分支：首发 `x-api-key`（官方语义不变）；**仅 401** 时以同 URL/请求体、`Authorization: Bearer` 重试**恰一次**（替换头、不同时发送）；非 401 不重试；错误消息只含状态码。
+- 测试 `model-probe-auth-fallback.spec.ts`（4 场景，stub 全局 fetch，先红后绿）：401→Bearer 成功（含头互斥/同 URL/恰两次断言）、401→401 如实失败、403 不重试（恰一次请求）、官方风格首试即过。Mimosa 拦截过一版「断言中的凭据字面量」，改为拼装值+键值分离写法。
+- 同批实测钉死的 Ark 事实：Anthropic 入口 base 为 `https://ark.cn-beijing.volces.com/api/coding`（Claude Code 自拼 `/v1/messages`），Coding 套餐可用模型 `doubao-seed-code-250615` / `kimi-k2-250711-preview`（其余报不支持 coding plan）。
+
+**验证**：`pnpm run check` 82 文件 / **594** 测试全绿（含 egress-url-origin 零出网守卫无回归）；`openspec validate --all --strict` 42/42；archive 后 Purpose 已补真。
+
 ## 2026-09-12 探针读当前已保存配置 + 测试日志收敛（change `harden-saved-probe-freshness`，已归档）
 
 真实部署中三类同因误报（K3s 集群、Harbor、Gitea 先后「卡片内测试通过、外层可用性测试失败」）定性为同一类缺陷：外层探针/只读发现读取**宿主启动时冻结的配置快照**，保存动作发生在启动之后即必然失败。本次按类修复并合同化（新 capability `infrastructure-probe-freshness`）：

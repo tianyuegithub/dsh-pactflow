@@ -2807,18 +2807,23 @@ export class PactFlowService extends TypertRemoteService {
       : model.apiMode === 'openai-responses'
         ? { model: model.model, input: 'say hi to me', max_output_tokens: 8 }
         : { model: model.model, messages: [{ role: 'user', content: 'say hi to me' }], max_tokens: 8 }
-    const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (model.apiMode === 'anthropic-messages') {
-      headers['x-api-key'] = apiKey
-      headers['anthropic-version'] = '2023-06-01'
-    } else {
-      headers.authorization = `Bearer ${apiKey}`
-    }
+    const send = (authHeaders: Record<string, string>): Promise<Response> => fetch(base, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
+    })
     let response: Response
     try {
-      response = await fetch(base, {
-        method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
-      })
+      if (model.apiMode === 'anthropic-messages') {
+        // Official Anthropic auth first; on a 401 retry exactly once with
+        // Bearer for gateways (e.g. Volcengine Ark) that reject x-api-key.
+        // The headers replace each other — never both on one request.
+        response = await send({ 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' })
+        if (response.status === 401) {
+          response = await send({ authorization: `Bearer ${apiKey}`, 'anthropic-version': '2023-06-01' })
+        }
+      } else {
+        response = await send({ authorization: `Bearer ${apiKey}` })
+      }
     } catch {
       throw new Error('PactFlow could not connect to the model endpoint')
     }
