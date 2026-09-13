@@ -2,6 +2,16 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-14 大内容外置与传址协议（change `artifact-ref-handoff`，实施主体完成、未全部完成、未提交）
+
+当前阶段：OpenSpec 规划四件套（DS 评审迭代版）+ 存储客户端/绑定/门禁/脱敏/保留账本/凭据注入/日志外置的宿主与 worker 侧实现完成并通过定向与全量测试；**真实 RustFS 连通验收通过**（宿主→NodePort 32571，SigV4 PUT/HEAD/LIST/GET/建桶/不可覆写全链实测，凭据仅经 env 注入未进日志）。**关键后端观测：该 RustFS 不返回 versionId**（合同按"有则必存、etag+hash 钉版"设计即为此情形，合同无需收窄）；ListObjectsV2 前缀列举可用。代码未提交、未推送，规格未归档；worker 镜像未推送 Harbor。
+
+- 已完成（tasks 1.1–1.4、2.1、2.3、3.1、3.2、4.1–4.5 已勾选）：`src/artifact-store.ts`（手写 SigV4 四操作 Put/Get/Head/List + createBucket 仅供开通/验收；path-style；零依赖；`putArtifact`/`resolveArtifact` 含 hash+bytes 校验与越界绑定拒绝）；`src/schema.ts` 绑定与 `src/infrastructure.ts` 第七类校验（私网/集群内明文 HTTP 例外）；`src/k3s-worker.ts`（per-run artifact Secret env 注入 + childNames 意图/对账/清理账本；结果文档 ≤3 KiB 门禁与 `logArtifact` 结构化校验；`workerLogTail` 降级取证取运行预算）；`src/worker/redact.ts` 内容级 fail-closed 脱敏门；`src/worker/log-upload.ts` + `worker/dsh/runner.mjs`（全量日志落盘上传，未绑定零行为变化）；`retention-policy.ts` 对象保留账本（超龄 14d/超量 512MiB 标记不删 + ListObjectsV2 孤儿对账）；事件/桥/交互三通道 oversize 门禁（`pactflow.artifact.oversize`），事件走非 strict payload 可选字段、不升生产者版本。
+- 验证：定向测试 7 个新 spec 全绿（artifact-store 11、binding 7、upload-gate 6、retention 5、channels 8、k3s-artifact 4、log-upload 6，共 47 项）；真实 RustFS 验收 `tests/artifact-store.real.spec.ts`（env 未设自动跳过）2 项通过；`pnpm run build` 通过、typecheck 干净；全量 `pnpm test` **733 通过 0 失败**（96→101 文件，含 real spec 2 项跳过计）。最终 `pnpm run check` 与 `openspec validate` 结果见下批注。
+- 未完成（如实保留未勾选）：2.2 的 release-manifest 摘要钉版需镜像推送 Harbor 后取远端摘要（本地 `pactflow-dsh-interactions:dev` 已重建并验证含 log-upload.js 与新 runner.mjs，未推送——推送属发布动作且需 registry 凭据）；5.1 的真实 K3s 端到端（上传→结果文档→宿主解析）依赖 base image 的 `worker.sh` 配合读取 `/tmp/pactflow-log-ref.json`，base image 不在本仓库；5.2 的降级标记端到端断言同理；6.1/6.2 的 Settings 第七类卡片与工作台引用呈现未实施（host 侧 kind/schema/校验/读取入口的数据面已就绪）。RustFS IAM 收敛与受限凭据跨 run 授权保持开放问题。
+- 文档同步：架构 §3.9 六类→七类（用户已裁决）、开发计划两处枚举与验收矩阵行 9、业务逻辑 §2.1 增第七类。
+- 安全边界：凭据全程 env/Secret，argv/日志/事件无凭据字面量；扫描门 fail-closed（扫描器故障拒上传）；`createBucket` 标注为开通/验收用、不属交接协议操作集；前缀隔离不声称安全边界。Mimosa 完整扫描未清账（不得宣称安全）。
+
 ## 2026-09-13 本地执行仓库隔离（change `isolate-local-worker-runtime`，已验证、未归档）
 
 当前阶段：独立任务仓库、派发前沙箱预检、任务内 Maven 缓存与候选恢复全部实施并通过真实端到端验收；最终包已安装到本地 `127.0.0.1:3080` 并经浏览器核验。最后已验证提交基线仍为 `71826df`；本轮与前序六个 change 的改动均未提交。会话中断（上一代理 token 耗尽）后的接续工作由本 change 收尾完成。

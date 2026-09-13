@@ -59,7 +59,7 @@
 - Harness 与模型协议是独立 Template 字段；保留 Claude Code、Codex、OpenCode、DSH 及 Anthropic/OpenAI 协议选择。
 - 每任务一分支一 worktree。Worker 只提交任务分支；Host 更新本地 worktree、执行验证，只在 closing 阶段合并受保护的默认分支。
 - DSH Settings 保存集群、仓库、Template 和策略的非密钥元数据；Credentials/Authorization/Kubernetes Secret 持有原始凭证。
-- 基础设施设置拆分为 K3s Cluster、Registry、Git Provider、Harness Template 和 Worker Pool 五类可引用资源；资源以稳定 ID 关联，删除被引用资源必须失败关闭。
+- 基础设施设置拆分为 K3s Cluster、Registry、Git Provider、Harness Template 和 Worker Pool 五类可引用资源；资源以稳定 ID 关联，删除被引用资源必须失败关闭。（artifact-ref-handoff change 起增补第七类：S3 兼容对象存储 Artifact Store，六类共用同一卡片生命周期后演进出七类）
 - Worker Pool 首版是逻辑容量池，不是常驻 Pod 池：每个 Run 仍创建全新 K3s Job，Pool 只拥有集群路由、允许的 Template、并发上限、FIFO 排队和容量释放。
 - 项目绑定优先从本地 `git remote` 读取无凭证 URL，按 host/path 与 Git Provider 匹配；只有唯一匹配时自动生效，零匹配或多匹配都返回可操作的明确错误。
 - Registry 首版支持 Harbor 元数据、TLS 校验策略、Project 和 Kubernetes imagePullSecret 引用；Host 和 Client 不读取、返回或记录 Secret 内容。
@@ -70,7 +70,7 @@
 - 未保存凭证的连通性测试只使用隔离的临时 Credential Ref；凭证测试、模型发现、清理与保存必须互斥，只有临时 Ref 清理成功后才可写入正式 Ref 并保存资源。清理失败必须保留可重试引用并向用户显示失败；K3s 探针的临时 Job、Pod 或模型 Secret 任一清理失败时，整体测试必须失败关闭，不得仅记录日志后显示成功。
 - Harbor 镜像从 Project/Repository/Artifact 列表选择；Kubernetes imagePullSecret 是 Cluster + Registry 绑定属性，从 Namespace 中已有 `kubernetes.io/dockerconfigjson` Secret 选择，不属于 Harbor 全局元数据。
 - Worker Pool 的用户名为「执行资源池」；普通流程自动创建默认池，只显示 Cluster、最大并发和允许的 Harness。内部 ID、Registry 引用和固定 FIFO 策略不向普通用户展示。
-- 六类资源共享同一卡片生命周期：新增或编辑时只有一张活动草稿；当前草稿测试成功后才能卡片级保存；保存后收缩为摘要；编辑回显已保存非密钥值，密码保持写后不可读；取消丢弃草稿。字段变更使旧测试结果失效。
+- 六类（扩展后七类，含对象存储 Artifact Store）资源共享同一卡片生命周期：新增或编辑时只有一张活动草稿；当前草稿测试成功后才能卡片级保存；保存后收缩为摘要；编辑回显已保存非密钥值，密码保持写后不可读；取消丢弃草稿。字段变更使旧测试结果失效。
 - 删除仅作用于已保存资源，必须先显示确认对话框并由 Host 返回引用影响。Cluster/Registry/Harness/Pool/Git Provider 被其它资源或项目引用时失败关闭并列出引用者；无引用时先提交 Settings 删除，再清理该资源专用 DSH Credential。凭证清理失败不回滚已提交的配置删除，但必须返回可治理的引用和错误。
 - 每张卡片就地显示测试与保存/删除阶段日志。测试对象是当前未保存草稿；保存对象是完整 infrastructure 文档中的该资源替换，不得捎带其它未保存草稿。Settings revision 冲突拒绝覆盖。
 
@@ -349,7 +349,7 @@ UI 包含：
 | 6 用户验证配置 | 面板入口、登记、共享模式、条目修订行为已验证（含浏览器）；跨条目修改经宿主保存入口到授权核对的传导已闭环 | 真实环境执行证据 | B |
 | 7 代码收口 | 收口链、任务集合第一父链核验、精确清理目标、合并后恢复已验证（真实临时 Git） | 真实 Gitea 收口复跑（含默认分支保护只读前置检查） | B |
 | 8 持久恢复 | 启动扫描、准入屏障、清理监督、探针清理账本、锁崩溃回收、释放路径中断恢复已验证（本机文件系统 + 替身） | 真实进程崩溃与存储落盘验收；锁跨操作系统；锁升级/回滚混写禁止的演练 | B |
-| 9 资源化基础设施 | 六类卡片生命周期、健康存储、探针语义/脱敏/取消/日志溯源、结果字段与脚本表面敏感数据审查已验证 | 真实 Harbor/Gitea 探针复验 | B |
+| 9 资源化基础设施 | 六类卡片生命周期、健康存储、探针语义/脱敏/取消/日志溯源、结果字段与脚本表面敏感数据审查已验证；第七类对象存储（artifact-ref-handoff）登记与门禁见该 change | 真实 Harbor/Gitea 探针复验 | B |
 | 10 原生 Web | 实时投影、会话隔离、取消接线、验证配置编辑、容量与工作区配置失效重查、移动视口已验证（隔离浏览器 8 通过 8 环境跳过）；宿主拆分至 2753 行、设置拆分至 646 行（行为基准对照通过） | 跨卡片未保存草稿并存验证（需资源卡夹具）；完整 `check:release` 真实运行（网页零跳过 + 官方安装验证） | B+C |
 
 ### 15.2 工作流组织
