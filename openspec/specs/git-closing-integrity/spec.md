@@ -29,6 +29,20 @@ Host 在受保护默认分支完成合并后 SHALL 对 Git 提供者报告的精
 - **WHEN** 被确认的精确 merge SHA 不包含已验证的集成提交
 - **THEN** Host 拒绝完成交付
 
+### Requirement: 收口必须以当前项目绑定解析 Git 认证
+
+Host SHALL 从**当前项目绑定**解析收口全程（集成分支构造、推送、合并核验、任务引用核验）使用的 Git 认证；交付运行的认证声明只作为该运行自身执行时的历史证据，MUST NOT 被用作收口凭据来源。收口凭据解析失败时 SHALL 指名拒绝，不得静默回落到运行声明或其它来源。
+
+#### Scenario: 运行产生于旧绑定后项目重绑仍可收口
+
+- **WHEN** 交付运行产生于旧项目绑定（如无认证的 SSH 远端），此后项目重绑为带 token 认证的 HTTPS 远端
+- **THEN** 收口以当前绑定的认证解析凭据并继续，不因运行时代认证缺失或不一致被拒绝
+
+#### Scenario: 绑定凭据引用不可解析时指名拒绝
+
+- **WHEN** 当前绑定声明的凭据引用无法解析
+- **THEN** 收口被拒绝且错误指名凭据引用，不回落到运行认证声明
+
 ### Requirement: 收口在记录与阶段推进之间中断后必须幂等恢复
 
 当某 Need 的交付记录已存在、而阶段推进尚未完成时，Host SHALL 在重试中**原样复用**既有 release 的 `commit`、`branch`、`serviceUrl` 与 `recordedAt`，MUST NOT 重建或修改已记录的 release。Host MUST 补齐缺失的阶段推进，MUST NOT 重复合并已合并的拉取请求。仅当不存在既有 release 时才构造并记录新的 release。
