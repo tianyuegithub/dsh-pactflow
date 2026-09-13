@@ -59,6 +59,7 @@ for (const [key, value] of Object.entries(process.env)) if (/TOKEN|SECRET|PASSWO
 // here must never affect the run result, which stays on the degraded path.
 try {
   await writeFile('/tmp/pactflow-full-log.txt', output)
+  await writeFile('/tmp/pactflow-log-tail.txt', output.slice(-1536))
   const { uploadWorkerLog } = await import('/opt/pactflow-worker/lib/worker/log-upload.js')
   const random = Math.random().toString(16).slice(2, 18)
   const key = `pactflow-logs/${process.env.PACTFLOW_RUN_ID || 'run-unbound'}/0-execution-log-runner-${random}.txt`

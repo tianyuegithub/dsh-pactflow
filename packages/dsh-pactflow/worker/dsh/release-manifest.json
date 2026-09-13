@@ -3,11 +3,11 @@
   "hostPluginVersion": "0.2.1",
   "hostEventProducerVersion": "0.5.0",
   "protocol": "dsh-worker-interactions/v1",
-  "adapterVersion": "1.0.0",
+  "adapterVersion": "1.1.0",
   "dshVersion": "0.1.1-rc.2",
   "questionApi": "provider-v1",
-  "image": "192.168.31.200:8080/datavdl/pactflow-worker@sha256:ac78fe1f549a0520816d79e3ef7e93451bc349df2dbf4a0e1a009b9ac9ce646c",
-  "acceptanceImage": "192.168.31.200:8080/datavdl/pactflow-worker@sha256:1d3ecffecad2de3923d7347febc08c0d90e17e4ddcfd882e972749757cf689e0",
+  "image": "192.168.31.200:8080/datavdl/pactflow-worker@sha256:1e426b2ede26115fa709c41819a15e8b8bfc754c770726762545df2ebcd87bc3",
+  "acceptanceImage": "192.168.31.200:8080/datavdl/pactflow-worker@sha256:9a45e270c195ba985516c0d8d7d02fc569c181ad19f29b246ae0f626eaa02cf2",
   "acceptanceCommit": "3ae6e2b40eb10c068eda8f7fb54050cfd045dce2",
-  "scope": "DSH structured approval and user questions; live-process reconnect; no destroyed-process continuation"
+  "scope": "DSH structured approval and user questions; live-process reconnect; no destroyed-process continuation; execution log externalization via artifact store"
 }

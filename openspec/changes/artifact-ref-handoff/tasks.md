@@ -10,7 +10,7 @@
 ## 2. 凭据注入、镜像与真实验证
 
 - [x] 2.1 `src/k3s-worker.ts`：Job 创建时渲染 bound Secret 并以 env `secretKeyRef` 注入（非 ConfigMap 明文、非 argv），Secret 名进入创建意图 `childNames`、启动对账与 children 清理账本；单测断言凭据不进 ConfigMap/事件/argv、崩溃对账可发现该 Secret、清理回收失败保留清理责任（先失败后通过）
-- [ ] 2.2 worker 镜像重建并按摘要重新钉版：上传助手与全量日志落盘进 `packages/dsh-pactflow/worker/dsh/`，更新 `release-manifest.json` 摘要；构建产物核验（镜像摘要与清单一致）
+- [x] 2.2 worker 镜像重建并按摘要重新钉版：上传助手与全量日志落盘进 `packages/dsh-pactflow/worker/dsh/`，更新 `release-manifest.json` 摘要；构建产物核验（镜像摘要与清单一致）
 - [x] 2.3 真实路径连通验收：worker pod→ClusterIP `10.43.146.89:9000` 真实 PUT/GET/HEAD/LIST；宿主→NodePort 32571 真实 GET；**一并记录后端行为观测**——是否返回版本标识、ListObjectsV2 前缀行为是否可用；结果记入验收记录并据此确认合同是否需要收窄
 
 ## 3. 脱敏门与保留账本
@@ -29,13 +29,13 @@
 ## 5. 执行日志外置
 
 - [ ] 5.1 worker 作业结束把全量日志落盘并 put 上传，结果文档回传尾部+ref（含大小）；真实 K3s 验收（长日志端到端：尾部+ref 可解析、hash 可校验、结果文档不超其通道阈值）
-- [ ] 5.2 降级取证：worker 未上传时宿主读取 **worker 容器**日志尾部（泛化现有探针读取路径的容器名与上限参数，或新增等价读取路径并复用其身份校验模式）并如实标记降级与非全量，上限取运行预算 `maxOutputBytes`、不引入第二套硬编码上限；单测断言标记存在且上限来自预算
+- [x] 5.2 降级取证：worker 未上传时宿主读取 **worker 容器**日志尾部（泛化现有探针读取路径的容器名与上限参数，或新增等价读取路径并复用其身份校验模式）并如实标记降级与非全量，上限取运行预算 `maxOutputBytes`、不引入第二套硬编码上限；单测断言标记存在且上限来自预算
 
 ## 6. 资源化登记、界面与文档
 
-- [ ] 6.1 第七类资源登记：`types.ts` 资源 kind 联合、`settings-model.ts`/`settings-probe.ts`/`resource-cards.tsx`/`locale.ts` 与 Settings 卡片生命周期（登记/编辑/删除）；删除被引用存储失败关闭并给出引用证据（复用现有删除卫队）；client 测试覆盖
-- [ ] 6.2 引用的人类可读路径：工作台呈现 ref、摘要与校验状态，宿主提供按 ref 取回内容的显式读取入口（同一解析与绑定约束，不生成签名地址、不新增 HTTP 端点）；client 测试覆盖
-- [ ] 6.3 文档同步：`docs/architecture-目标架构.md` §3.9 六类→七类（已裁决 2026-09-14）、`docs/development-plan-开发计划.md`（五类/六类两处与验收矩阵行 9）、`docs/business-logic-业务逻辑.md` §2.1；`docs/implementation-status-实施状态.md` 记录阶段与验证命令
+- [x] 6.1 第七类资源登记：`types.ts` 资源 kind 联合、`settings-model.ts`/`settings-probe.ts`/`resource-cards.tsx`/`locale.ts` 与 Settings 卡片生命周期（登记/编辑/删除）；删除被引用存储失败关闭并给出引用证据（复用现有删除卫队）；client 测试覆盖
+- [x] 6.2 引用的人类可读路径：工作台呈现 ref、摘要与校验状态，宿主提供按 ref 取回内容的显式读取入口（同一解析与绑定约束，不生成签名地址、不新增 HTTP 端点）；client 测试覆盖
+- [x] 6.3 文档同步：`docs/architecture-目标架构.md` §3.9 六类→七类（已裁决 2026-09-14）、`docs/development-plan-开发计划.md`（五类/六类两处与验收矩阵行 9）、`docs/business-logic-业务逻辑.md` §2.1；`docs/implementation-status-实施状态.md` 记录阶段与验证命令
 
 ## 7. 终验
 

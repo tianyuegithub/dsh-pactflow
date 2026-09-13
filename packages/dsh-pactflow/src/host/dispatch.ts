@@ -237,8 +237,21 @@ export async function dispatchK3sNodeWithSignalImpl(
   const runId = PactFlowRunId(`run-${randomUUID()}`)
   const git = await host.git.plan(session.header.cwd, session.id, runId, node, projectGit, host.codeInputCommits(session, node))
   worker.preflightRun(git, prompt)
+  // artifact-ref-handoff: a project-bound artifact store externalizes the
+  // execution log; unbound projects keep today's behavior byte for byte.
+  const artifactBinding = workspaceProject?.artifact === undefined
+    ? undefined
+    : host.infrastructure?.artifactStore(workspaceProject.artifact.artifactStoreId)
+  if (workspaceProject?.artifact !== undefined && artifactBinding === undefined) {
+    throw new Error(`PactFlow project references unknown artifact store "${workspaceProject.artifact.artifactStoreId}"`)
+  }
+  const artifactStoreSpec = artifactBinding === undefined ? undefined : {
+    secretName: `dsh-pf-${runId.slice('run-'.length, 'run-'.length + 20).toLowerCase()}-artifact`,
+    endpoint: artifactBinding.endpoint, bucket: artifactBinding.bucket,
+    ...(artifactBinding.region === undefined ? {} : { region: artifactBinding.region }),
+  }
   const planned = worker.plan(
-    runId, resolved.executionTemplateId, projectGit.k3sGitSecretName, leaseDurationMs, git, prompt,
+    runId, resolved.executionTemplateId, projectGit.k3sGitSecretName, leaseDurationMs, git, prompt, artifactStoreSpec,
   )
   const modelApiKey = resolved.modelConnection === undefined
     ? undefined
@@ -287,6 +300,16 @@ export async function dispatchK3sNodeWithSignalImpl(
     )
   } catch (error) {
     releaseCapacity?.()
+    discardPrepared()
+    throw error
+  }
+  let artifactCredentials: { readonly accessKeyId: string; readonly secretAccessKey: string } | undefined
+  try {
+    artifactCredentials = artifactBinding === undefined ? undefined : {
+      accessKeyId: await host.resolveCredential(artifactBinding.accessKeyCredentialRef, 'artifact store access key id'),
+      secretAccessKey: await host.resolveCredential(artifactBinding.secretKeyCredentialRef, 'artifact store secret access key'),
+    }
+  } catch (error) {
     discardPrepared()
     throw error
   }
@@ -373,6 +396,7 @@ export async function dispatchK3sNodeWithSignalImpl(
             owned = host.bindK3sRunInSession(session, owned, jobUid)
           },
           host.runCleanupRecorder(worker),
+          artifactCredentials,
         )
         if (remoteResult.branch !== git.branch) throw new Error('PactFlow K3s Worker returned another branch')
       } catch (error) {

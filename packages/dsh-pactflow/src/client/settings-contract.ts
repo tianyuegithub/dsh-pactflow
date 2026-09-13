@@ -1,7 +1,7 @@
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { NS } from './locale.ts'
-import type { PactFlowHarnessProfileSettings, PactFlowHarborArtifactOption, PactFlowSettingsView, PactFlowInfrastructureSettings, PactFlowInfrastructureProbeResult, PactFlowInfrastructureHealthRecord, PactFlowInfrastructureDeletionImpact, PactFlowInfrastructureResourceKind, PactFlowDiscoveredModel, PactFlowGitProviderSettings, PactFlowK3sClusterSettings, PactFlowKubeconfigView, PactFlowModelConnectionSettings, PactFlowRegistrySettings, PactFlowWorkerPoolSettings } from '../types.ts'
+import type { PactFlowArtifactStoreSettings, PactFlowHarnessProfileSettings, PactFlowHarborArtifactOption, PactFlowSettingsView, PactFlowInfrastructureSettings, PactFlowInfrastructureProbeResult, PactFlowInfrastructureHealthRecord, PactFlowInfrastructureDeletionImpact, PactFlowInfrastructureResourceKind, PactFlowDiscoveredModel, PactFlowGitProviderSettings, PactFlowK3sClusterSettings, PactFlowKubeconfigView, PactFlowModelConnectionSettings, PactFlowRegistrySettings, PactFlowWorkerPoolSettings } from '../types.ts'
 
 export type SettingsCardProps =
   PropsRuntime<'settings.plugin.item'>
@@ -41,6 +41,7 @@ export interface InfrastructureTestLog {
 export type InfrastructureResource =
   | PactFlowK3sClusterSettings | PactFlowRegistrySettings | PactFlowGitProviderSettings
   | PactFlowHarnessProfileSettings | PactFlowModelConnectionSettings | PactFlowWorkerPoolSettings
+  | PactFlowArtifactStoreSettings
 
 export interface ActiveResourceEditor {
   readonly kind: PactFlowInfrastructureResourceKind

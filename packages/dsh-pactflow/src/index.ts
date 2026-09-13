@@ -119,7 +119,7 @@ import { PactFlowProjectCapacity } from './project-capacity.ts'
 import { PactFlowExecutionCapacity } from './execution-capacity.ts'
 import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
 import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAttemptBudget } from './run-budget.ts'
-import { assertWithinChannelLimit } from './artifact-store.ts'
+import { assertWithinChannelLimit, PactFlowArtifactStoreClient } from './artifact-store.ts'
 import { harnessCapabilityProfile } from './harness-capabilities.ts'
 import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
 import { staleCodeInputs } from './input-staleness.ts'
@@ -2936,6 +2936,33 @@ export class PactFlowService extends TypertRemoteService {
     })) ?? []
   }
 
+  /**
+   * Human-readable read entry (artifact-ref-handoff): fetch an externalized
+   * execution log through the project's bound store. Resolution obeys the same
+   * binding constraint as every consumer — no signature URLs, no new endpoint.
+   */
+  @Remote('artifactLog')
+  async artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{
+    readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string
+  }> {
+    signal?.throwIfAborted()
+    const session = this.livePactFlowSession(sessionId)
+    const run = (await this.snapshot(String(session.id))).runs.byId[runId]
+    const ref = run?.k3sResult?.logArtifact
+    if (ref === undefined) throw new Error(`PactFlow Run "${runId}" has no externalized log artifact`)
+    const storeId = (await this.workspaceProjectForSession(session))?.artifact?.artifactStoreId
+    if (storeId === undefined) throw new Error('PactFlow project has no artifact store binding')
+    const store = this.infrastructure?.artifactStore(storeId)
+    if (store === undefined) throw new Error(`PactFlow artifact store "${storeId}" is not configured`)
+    const client = new PactFlowArtifactStoreClient({
+      endpoint: store.endpoint, bucket: store.bucket, region: store.region ?? 'us-east-1',
+      accessKeyId: await this.resolveCredential(store.accessKeyCredentialRef, 'artifact store access key id'),
+      secretAccessKey: await this.resolveCredential(store.secretKeyCredentialRef, 'artifact store secret access key'),
+    })
+    const content = await client.resolveArtifact(ref)
+    return { uri: ref.uri, summary: ref.summary, bytes: ref.bytes, content: new TextDecoder().decode(content) }
+  }
+
   /** Run one real, read-only infrastructure connection probe with bounded stage evidence. */
   @Remote('probeInfrastructure')
   async probeInfrastructure(request: PactFlowInfrastructureProbeRequest, signal?: AbortSignal): Promise<PactFlowInfrastructureProbeResult> {
@@ -3010,6 +3037,21 @@ export class PactFlowService extends TypertRemoteService {
           throw new Error('Gitea version API returned no semantic version')
         }
         stages.push({ name: 'gitea-api', state: 'succeeded', detail: `Gitea API returned HTTP ${String(response.status)}` })
+      } else if (request.kind === 'artifact-store') {
+        const store = infrastructure.artifactStore(request.id)
+        if (store === undefined) throw new Error(`PactFlow artifact store "${request.id}" is not configured`)
+        stages.push({ name: 'resolve-config', state: 'succeeded', detail: 'S3 endpoint, bucket, and credential refs accepted' })
+        const accessKey = await this.resolveCredential(store.accessKeyCredentialRef, 'artifact store access key id')
+        const secretKey = await this.resolveCredential(store.secretKeyCredentialRef, 'artifact store secret access key')
+        const client = new PactFlowArtifactStoreClient({
+          endpoint: store.endpoint, bucket: store.bucket, region: store.region ?? 'us-east-1',
+          accessKeyId: accessKey, secretAccessKey: secretKey,
+        })
+        const entries = await client.listObjects('', 100)
+        stages.push({
+          name: 'artifact-listing', state: 'succeeded',
+          detail: `artifact store bucket ${store.bucket} is accessible (${String(entries.length)} objects at root)`,
+        })
       } else if (request.kind === 'harness') {
         const template = infrastructure.listTemplates().find(candidate => candidate.id === request.id)
         if (template === undefined) throw new Error(`PactFlow Harness "${request.id}" is not configured`)

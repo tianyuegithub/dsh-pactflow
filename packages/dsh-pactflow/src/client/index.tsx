@@ -291,6 +291,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
+      artifactLog: async (sessionId, runId, signal) => {
+        const result = await pactflow.artifactLog({ sessionId, runId }, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
     }),
   }, PactFlowOverlay))
   return disposeRemote

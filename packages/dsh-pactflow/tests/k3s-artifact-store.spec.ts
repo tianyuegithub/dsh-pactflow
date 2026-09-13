@@ -142,4 +142,61 @@ describe('PactFlow K3s artifact store injection', () => {
     const container = fixture.jobs[0].spec?.template.spec?.containers[0]
     expect((container?.env ?? []).some(item => item.name?.startsWith('PACTFLOW_ARTIFACT_'))).toBe(false)
   })
+
+  function observeFixture(worker: PactFlowK3sWorker, runSpec: PactFlowK3sRunSpec, terminated: { exitCode: number; message: string }): void {
+    const labels = Reflect.get(worker, 'labels').call(worker, runSpec) as Record<string, string>
+    const annotations = Reflect.get(worker, 'annotations').call(worker, runSpec) as Record<string, string>
+    const withUid = { ...runSpec, jobUid: 'job-uid' }
+    Reflect.set(worker, 'batch', { readNamespacedJob: async () => ({ metadata: { uid: 'job-uid', labels, annotations }, status: { succeeded: 1 } }) })
+    Reflect.set(worker, 'core', { listNamespacedPod: async () => ({ items: [{
+      metadata: { name: 'worker-pod', labels, annotations, ownerReferences: [{ apiVersion: 'batch/v1', kind: 'Job',
+        name: runSpec.jobName, uid: 'job-uid', controller: true }] },
+      status: { containerStatuses: [{ name: 'worker', imageID: `${runSpec.image.split('@')[0]}@${runSpec.image.split('@')[1]}`,
+        state: { terminated: { exitCode: terminated.exitCode, finishedAt: new Date(), message: terminated.message } } }] },
+    }] }) })
+    void withUid
+  }
+
+  it('carries the externalized log fields from the result document into the result', async () => {
+    const worker = new PactFlowK3sWorker(config())
+    const gitSpec = git()
+    const runSpec: PactFlowK3sRunSpec = { ...worker.plan(RUN_ID, 'claude', 'git', 60_000, gitSpec, 'task'), jobUid: 'job-uid' }
+    const document = { schema: 'dsh_pactflow_k3s_result/v1', status: 'succeeded', commit: 'c'.repeat(40),
+      branch: runSpec.expectedBranch, harnessVersion: 'test', agentExitCode: 0, pushExitCode: 0,
+      runNonceHash: runSpec.runNonceHash, claimTokenHash: runSpec.claimTokenHash, specDigest: runSpec.specDigest,
+      logTail: 'last lines of the run', logDegraded: false,
+      logArtifact: { uri: `s3://pactflow-artifacts/need-1/${runSpec.jobName}/0-execution-log-runner-aa.txt`,
+        etag: '"0102030405060708090a0b0c0d0e0f10"', bytes: 12, hash: 'a'.repeat(64), kind: 'execution-log', summary: 'tail' } }
+    observeFixture(worker, runSpec, { exitCode: 0, message: JSON.stringify(document) })
+    const observation = await worker.observe(runSpec)
+    expect(observation.state).toBe('succeeded')
+    if (observation.state !== 'succeeded') return
+    expect(observation.result.logTail).toBe('last lines of the run')
+    expect(observation.result.logArtifact?.kind).toBe('execution-log')
+    expect(observation.result.logDegraded).toBe(false)
+  })
+
+  it('rejects a result document over the result-channel budget with the oversize marker', async () => {
+    const worker = new PactFlowK3sWorker(config())
+    const runSpec: PactFlowK3sRunSpec = { ...worker.plan(RUN_ID, 'claude', 'git', 60_000, git(), 'task'), jobUid: 'job-uid' }
+    const bloated = { schema: 'dsh_pactflow_k3s_result/v1', status: 'succeeded', commit: 'c'.repeat(40),
+      branch: runSpec.expectedBranch, harnessVersion: 'test', agentExitCode: 0, pushExitCode: 0,
+      runNonceHash: runSpec.runNonceHash, claimTokenHash: runSpec.claimTokenHash, specDigest: runSpec.specDigest,
+      logTail: 'x'.repeat(4 * 1024) }
+    observeFixture(worker, runSpec, { exitCode: 0, message: JSON.stringify(bloated) })
+    const observation = await worker.observe(runSpec)
+    expect(observation).toMatchObject({ state: 'failed', outcome: expect.stringContaining('pactflow.artifact.oversize') })
+  })
+
+  it('fails closed on a malformed log artifact ref', async () => {
+    const worker = new PactFlowK3sWorker(config())
+    const runSpec: PactFlowK3sRunSpec = { ...worker.plan(RUN_ID, 'claude', 'git', 60_000, git(), 'task'), jobUid: 'job-uid' }
+    const document = { schema: 'dsh_pactflow_k3s_result/v1', status: 'succeeded', commit: 'c'.repeat(40),
+      branch: runSpec.expectedBranch, harnessVersion: 'test', agentExitCode: 0, pushExitCode: 0,
+      runNonceHash: runSpec.runNonceHash, claimTokenHash: runSpec.claimTokenHash, specDigest: runSpec.specDigest,
+      logArtifact: { uri: 'https://evil.example/fetch-everything', etag: 'x', bytes: -1, hash: 'zz', kind: '', summary: '' } }
+    observeFixture(worker, runSpec, { exitCode: 0, message: JSON.stringify(document) })
+    const observation = await worker.observe(runSpec)
+    expect(observation).toMatchObject({ state: 'failed', outcome: expect.stringContaining('invalid artifact ref') })
+  })
 })

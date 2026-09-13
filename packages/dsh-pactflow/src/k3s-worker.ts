@@ -1747,7 +1747,7 @@ export class PactFlowK3sWorker {
       document = JSON.parse(raw) as WorkerResultDocument
     } catch (error) {
       const marker = error instanceof Error && error.message.includes(PACTFLOW_ARTIFACT_OVERSIZE_CODE)
-        ? ' (result document over its inline budget; externalize content via the artifact store)' : ''
+        ? ` (${PACTFLOW_ARTIFACT_OVERSIZE_CODE}: result document over its inline budget; externalize content via the artifact store)` : ''
       return {
         state: 'failed', finishedAt: terminated.finishedAt?.getTime() ?? Date.now(),
         outcome: `PactFlow K3s Job "${spec.jobName}" returned an invalid termination document${marker}`,
@@ -2143,6 +2143,17 @@ document = {
     'claimTokenHash': os.environ.get('CLAIM_TOKEN_HASH', ''),
     'specDigest': os.environ.get('SPEC_DIGEST', ''),
 }
+# artifact-ref-handoff: the runner externalized the full execution log and left
+# its ref (plus a bounded tail) in well-known files. Missing files mean the run
+# was unbound or the upload failed — the document simply carries no log fields,
+# and the Host may fall back to degraded container-log forensics.
+try:
+    with open('/tmp/pactflow-log-ref.json', encoding='utf-8') as handle:
+        document['logArtifact'] = json.load(handle)
+    with open('/tmp/pactflow-log-tail.txt', encoding='utf-8') as handle:
+        document['logTail'] = handle.read()
+except (OSError, ValueError):
+    pass
 with open('/dev/termination-log', 'w', encoding='utf-8') as output:
     json.dump(document, output, ensure_ascii=False, separators=(',', ':'))
 PY

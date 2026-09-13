@@ -3,6 +3,7 @@ import { isHarnessProfile } from './resource-model.ts'
 import type { InfrastructureResource, InfrastructureTestLog } from './settings-contract.ts'
 import type { EditorColumn } from './resource-cards.tsx'
 import type {
+  PactFlowArtifactStoreSettings,
   PactFlowGitProviderSettings,
   PactFlowHarnessProfileSettings,
   PactFlowHarnessTemplateView,
@@ -16,7 +17,7 @@ import type {
 } from '../types.ts'
 
 export const EMPTY_INFRASTRUCTURE: PactFlowInfrastructureSettings = {
-  clusters: [], registries: [], gitProviders: [], templates: [], modelConnections: [], workerPools: [],
+  clusters: [], registries: [], gitProviders: [], templates: [], modelConnections: [], workerPools: [], artifactStores: [],
 }
 
 export function compatibleHarnessTemplateIds(
@@ -66,6 +67,15 @@ export const workerPoolColumns: readonly EditorColumn<PactFlowWorkerPoolSettings
   { key: 'imagePullSecret', label: 'Harbor 镜像拉取密钥', hint: 'K3s 使用该 dockerconfigjson Secret 从私有 Harbor 拉取 Worker 镜像。' },
   { key: 'registryId', label: 'Registry', hidden: true }, { key: 'queuePolicy', label: '队列', hidden: true },
 ]
+export const artifactStoreColumns: readonly EditorColumn<PactFlowArtifactStoreSettings>[] = [
+  { key: 'displayName', label: '名称' },
+  { key: 'endpoint', label: 'S3 端点', hint: '集群内或私网地址可用 HTTP；公网地址必须 HTTPS。' },
+  { key: 'bucket', label: 'Bucket' },
+  { key: 'region', label: 'Region', hint: 'S3 兼容服务通常填 us-east-1。' },
+  { key: 'pathStyle', label: 'Path-style 寻址', kind: 'boolean', hint: '自建 S3 兼容存储（RustFS/MinIO）必须开启。' },
+  { key: 'accessKeyCredentialRef', label: 'Access Key Ref', hidden: true },
+  { key: 'secretKeyCredentialRef', label: 'Secret Key Ref', hidden: true },
+]
 
 export const newCluster = (rows: readonly PactFlowK3sClusterSettings[]): PactFlowK3sClusterSettings => ({
   id: nextId('cluster', rows), displayName: 'K3s 集群', namespace: 'pactflow', pollIntervalMs: 2_000,
@@ -97,6 +107,12 @@ export const newWorkerPool = (
   id: nextId('default', rows), displayName: '默认执行资源池', clusterId, registryId,
   templateIds, maxConcurrency: 1, queuePolicy: 'fifo',
 })
+export const newArtifactStore = (rows: readonly PactFlowArtifactStoreSettings[]): PactFlowArtifactStoreSettings => ({
+  id: nextId('rustfs', rows), displayName: '对象存储', kind: 's3',
+  endpoint: 'http://rustfs:9000', bucket: 'pactflow-artifacts', region: 'us-east-1', pathStyle: true,
+  accessKeyCredentialRef: credentialRefFor('ARTIFACT', nextId('rustfs', rows), 'ACCESS_KEY'),
+  secretKeyCredentialRef: credentialRefFor('ARTIFACT', nextId('rustfs', rows), 'SECRET_KEY'),
+})
 
 export function nextId<T extends { readonly id: string }>(base: string, rows: readonly T[]): string {
   if (!rows.some(row => row.id === base)) return base
@@ -126,6 +142,7 @@ export function probeStageEntry(stage: PactFlowInfrastructureProbeResult['stages
     'project-access': '访问 Harbor 项目',
     'harness-images': '读取 Harness 镜像',
     'gitea-api': '连接 Gitea API',
+    'artifact-listing': '连接对象存储',
     'harness-profile': '校验 Harness',
     'harness-validate': '校验 Harness 镜像',
     'harness-create-job': '启动临时 Pod',
@@ -223,6 +240,7 @@ export function resourceRows(
   if (kind === 'git-provider') return settings.gitProviders
   if (kind === 'harness') return settings.templates.filter(isHarnessProfile)
   if (kind === 'model-connection') return settings.modelConnections ?? []
+  if (kind === 'artifact-store') return settings.artifactStores ?? []
   return settings.workerPools
 }
 
@@ -237,6 +255,10 @@ export function resourceCredentialRefs(
   }
   if (kind === 'git-provider') return [(resource as PactFlowGitProviderSettings).tokenCredentialRef]
   if (kind === 'model-connection') return [(resource as PactFlowModelConnectionSettings).apiKeyCredentialRef]
+  if (kind === 'artifact-store') {
+    const store = resource as PactFlowArtifactStoreSettings
+    return [store.accessKeyCredentialRef, store.secretKeyCredentialRef]
+  }
   return []
 }
 
@@ -255,6 +277,7 @@ export function replaceResource(
   if (kind === 'git-provider') return { ...settings, gitProviders: replace(settings.gitProviders) }
   if (kind === 'harness') return { ...settings, templates: replace(settings.templates.filter(isHarnessProfile)) }
   if (kind === 'model-connection') return { ...settings, modelConnections: replace(settings.modelConnections ?? []) }
+  if (kind === 'artifact-store') return { ...settings, artifactStores: replace(settings.artifactStores ?? []) }
   return { ...settings, workerPools: replace(settings.workerPools) }
 }
 
@@ -269,6 +292,9 @@ export function removeResource(
   if (kind === 'harness') return { ...settings, templates: settings.templates.filter(row => row.id !== id) }
   if (kind === 'model-connection') {
     return { ...settings, modelConnections: (settings.modelConnections ?? []).filter(row => row.id !== id) }
+  }
+  if (kind === 'artifact-store') {
+    return { ...settings, artifactStores: (settings.artifactStores ?? []).filter(row => row.id !== id) }
   }
   return { ...settings, workerPools: settings.workerPools.filter(row => row.id !== id) }
 }

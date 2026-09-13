@@ -1,4 +1,5 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type {
   PactFlowDocument,
@@ -16,6 +17,10 @@ export interface WorkbenchEvidenceViewProps {
   readonly tab: 'progress' | 'runs' | 'delivery'
   readonly onResume: (nodeId: string, revision: number) => void
   readonly resumingNodeId: string | null
+  /** artifact-ref-handoff: fetch an externalized execution log through the Host. */
+  readonly onLoadArtifactLog?: (runId: string, signal?: AbortSignal) => Promise<{
+    readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string
+  }>
 }
 
 const PHASES = [
@@ -234,7 +239,41 @@ function ProgressView({
   </div>
 }
 
-function RunsView({ nodes, runs }: { readonly nodes: readonly PactFlowNode[]; readonly runs: readonly PactFlowRun[] }) {
+function ArtifactLogCell({ run, onLoadArtifactLog }: {
+  readonly run: PactFlowRun
+  readonly onLoadArtifactLog: ((runId: string, signal?: AbortSignal) => Promise<{
+    readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string
+  }>) | undefined
+}) {
+  const ref = run.k3sResult?.logArtifact
+  const [state, setState] = useState<{ busy: boolean; content?: string; error?: string }>({ busy: false })
+  if (ref === undefined) return null
+  return <details style={{ minWidth: 0 }} onKeyDown={undefined}>
+    <summary style={disclosureSummaryStyle}>执行日志已外置（{String(ref.bytes)} 字节）</summary>
+    <div style={longTextStyle}>
+      <span style={detailStyle}>{ref.uri}</span>
+      <span style={detailStyle}>摘要：{ref.summary}</span>
+      <span style={detailStyle}>sha256 已绑定，读取时宿主按绑定凭据校验</span>
+      {onLoadArtifactLog === undefined ? null : <Button variant="outline" size="sm" type="button"
+        disabled={state.busy}
+        onClick={() => {
+          setState({ busy: true })
+          onLoadArtifactLog(run.id)
+            .then(log => setState({ busy: false, content: log.content }))
+            .catch(error => setState({ busy: false, error: error instanceof Error ? error.message : String(error) }))
+        }}
+      >{state.busy ? '读取中…' : '读取完整日志'}</Button>}
+      {state.error !== undefined ? <span style={detailStyle}>读取失败：{state.error}</span> : null}
+      {state.content !== undefined ? <span style={copyStyle}>{state.content}</span> : null}
+    </div>
+  </details>
+}
+
+function RunsView({ nodes, runs, onLoadArtifactLog }: {
+  readonly nodes: readonly PactFlowNode[]
+  readonly runs: readonly PactFlowRun[]
+  readonly onLoadArtifactLog?: WorkbenchEvidenceViewProps['onLoadArtifactLog']
+}) {
   const byId = new Map(nodes.map(node => [node.id as string, node]))
   if (runs.length === 0) {
     return <Section title="执行记录"><p style={mutedStyle}>该需求的节点尚未产生运行记录。</p></Section>
@@ -258,6 +297,9 @@ function RunsView({ nodes, runs }: { readonly nodes: readonly PactFlowNode[]; re
             <td style={cellStyle}>{commitFor(run) ?? '未记录提交'}</td>
             <td style={cellStyle}>{validations.length > 0 ? `${validations.length} 项已通过` : '缺少真实验证记录'}</td>
           </tr>
+          {run.k3sResult?.logArtifact === undefined ? null : <tr key={`${run.id}-artifact`}>
+            <td colSpan={5} style={cellStyle}><ArtifactLogCell run={run} onLoadArtifactLog={onLoadArtifactLog} /></td>
+          </tr>}
         })}</tbody>
       </table>
     </div>
@@ -358,8 +400,7 @@ export function WorkbenchEvidenceView({
   needId,
   tab,
   onResume,
-  resumingNodeId,
-}: WorkbenchEvidenceViewProps) {
+  resumingNodeId, onLoadArtifactLog }: WorkbenchEvidenceViewProps) {
   const need = snapshot.needs.byId[needId]
   if (need === undefined) {
     return <div style={rootStyle}><Section title="需求内容"><p style={mutedStyle}>所选需求已不在当前会话快照中，请重新选择需求。</p></Section></div>
@@ -376,7 +417,7 @@ export function WorkbenchEvidenceView({
     {tab === 'progress'
       ? <ProgressView need={need} nodes={nodes} runs={runs} onResume={onResume} resumingNodeId={resumingNodeId} />
       : tab === 'runs'
-        ? <RunsView nodes={nodes} runs={runs} />
+        ? <RunsView nodes={nodes} runs={runs} onLoadArtifactLog={onLoadArtifactLog} />
         : <DeliveryView reviews={reviews} documents={documents} runs={runs} releases={releases} />}
   </div>
 }

@@ -9,8 +9,9 @@ import type { PactFlowHarnessProfileSettings, PactFlowHarborArtifactOption, Pact
 import { settingsCardStyle, hintStyle, settingsEditorStyle, summaryGridStyle, summaryItemStyle, summaryLabelStyle, summaryValueStyle, inputStyle, readOnlyInputStyle, secondaryButtonStyle, filePickerStyle, noticeStyle, sectionTitleStyle } from './styles.ts'
 import {
   EMPTY_INFRASTRUCTURE,
+  artifactStoreColumns,
   clusterColumns, compatibleHarnessTemplateIds, gitProviderColumns, modelColumns,
-  newCluster, newGitProvider, newModel, newRegistry, newTemplate, newWorkerPool,
+  newArtifactStore, newCluster, newGitProvider, newModel, newRegistry, newTemplate, newWorkerPool,
   normalizeInfrastructure, probeStageEntry, registryColumns, removeResource,
   replaceResource, resourceCredentialRefs, resourceRows, templateColumns, toggleSet, workerPoolColumns,
 } from './settings-model.ts'
@@ -632,6 +633,32 @@ export function PactFlowSettingsCard({
         showLogFor={row => expandedLogs.has(`worker-pool:${row.id}`)}
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `worker-pool:${row.id}`))}
         onViewProbe={row => probe('worker-pool', row.id, true)} />
+      <EditableResourceCards title="对象存储（大内容外置）" description="S3 兼容存储（如 RustFS）。绑定后 Worker 与宿主把超长内容外置为 artifactRef 地址，有界通道只传地址与摘要；删除被项目引用的存储会失败关闭。"
+        rows={draft.artifactStores ?? []} disabled={actionDisabled}
+        columns={artifactStoreColumns} create={() => newArtifactStore(draft.artifactStores ?? [])}
+        onChange={rows => changeRows('artifact-store', 'artifactStores', rows)}
+        onAdd={row => beginAdd('artifact-store', row)} addDisabled={activeEditor !== null}
+        modeFor={row => modeFor('artifact-store', row.id)} summaryFor={row => summaryFor('artifact-store', row)}
+        canSave={row => canSaveResource('artifact-store', row.id)} savingId={savingId}
+        onEdit={row => beginEdit('artifact-store', row)} onSave={row => saveResource('artifact-store', row)}
+        onCancel={cancelEdit} onRequestDelete={row => requestDelete('artifact-store', row)}
+        renderExtraFields={(row) => <>
+          <CredentialInput
+            label="Access Key ID" hint="原值只写入 DSH Credentials，不进入 Settings 或日志。"
+            value={credentialDrafts[row.accessKeyCredentialRef] ?? ''} disabled={actionDisabled}
+            onChange={value => updateSecret(row.accessKeyCredentialRef, value)}
+          />
+          <CredentialInput
+            label="Secret Access Key" hint="原值只写入 DSH Credentials，不进入 Settings 或日志。"
+            value={credentialDrafts[row.secretKeyCredentialRef] ?? ''} disabled={actionDisabled}
+            onChange={value => updateSecret(row.secretKeyCredentialRef, value)}
+          />
+        </>}
+        probeKind="artifact-store" probingId={probingId} onProbe={probe}
+        testLogFor={row => testLogs[`artifact-store:${row.id}`]}
+        showLogFor={row => expandedLogs.has(`artifact-store:${row.id}`)}
+        onToggleLog={row => setExpandedLogs(current => toggleSet(current, `artifact-store:${row.id}`))}
+        onViewProbe={row => probe('artifact-store', row.id, true)} />
       <details><summary>高级 JSON（只读排障）</summary><textarea
         aria-label="PactFlow infrastructure JSON"
         value={advanced}

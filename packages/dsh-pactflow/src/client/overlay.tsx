@@ -75,6 +75,7 @@ export interface OverlayInjected {
   exportHandover(sessionId: string, signal: AbortSignal): Promise<PactFlowHandoverSummary>
   /** A11: explicit human resume for a paused node. */
   resumeNode(sessionId: string, nodeId: string, expectedRevision: number, signal: AbortSignal): Promise<unknown>
+  artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{ readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string }>
 }
 
 type OverlayProps =
@@ -104,7 +105,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const sessionCwd = useSessions(sessions => state.sessionId === null ? undefined : sessions.byId[state.sessionId]?.cwd)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
@@ -378,6 +379,7 @@ export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover
           {tab === 'progress' && <div className="pf-workbench-actions"><Button variant="outline" size="sm" onClick={() => setAuxiliary('autopilot')}>挂机设置</Button>
             <span className="pf-workbench-muted">{snapshot.delivery.autopilots?.[selectedNeed.id] ? `挂机：${({ running: '运行中', paused: '已暂停', blocked: '已阻塞', stopped: '已停止', completed: '已完成' })[snapshot.delivery.autopilots[selectedNeed.id]!.state]}` : '尚未开启挂机'}</span></div>}
           <WorkbenchEvidenceView snapshot={snapshot} needId={selectedNeed.id} tab={tab}
+            onLoadArtifactLog={(runId, signal) => artifactLog(String(state.sessionId), runId, signal)}
             resumingNodeId={busy?.startsWith('resume:') ? busy.slice(7) : null}
             onResume={(nodeId, revision) => runAction(`resume:${nodeId}`, signal => resumeNode(String(state.sessionId), nodeId, revision, signal))} />
           {tab === 'progress' && currentPool && <p className="pf-workbench-muted">当前项目使用执行池 {currentPool.displayName}：运行 {currentPool.running} / 池并发上限 {currentPool.maxConcurrency}，排队 {currentPool.waiting}。项目限制仍独立生效。</p>}
