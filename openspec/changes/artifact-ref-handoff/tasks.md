@@ -40,4 +40,4 @@
 ## 7. 终验
 
 - [ ] 7.1 全链真实验收：worker put → ref 回传 → 另一 worker/宿主 resolve+校验；门禁拒绝路径（含结果文档与交互两个通道）；Secret 回收；孤儿对象对账与保留账本呈现——全部真实 RustFS + 真实 K3s，无 mock 冒充
-- [ ] 7.2 回归：`pnpm run check` 全绿、`openspec validate --all --strict` 全绿；验收证据（连通性、versionId/List 观测、截断消除、账本）记入实施状态
+- [x] 7.2 回归：`pnpm run check` 全绿、`openspec validate --all --strict` 全绿；验收证据（连通性、versionId/List 观测、截断消除、账本）记入实施状态
