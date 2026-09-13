@@ -15,7 +15,7 @@ import { createGitFixture } from './git-fixture.ts'
 import { recordAuthorizedReview } from './review-fixture.ts'
 
 describe('PactFlow Gitea closing', () => {
-  it.each(['empty', 'registered', 'workspace', 'session-override', 'changed', 'legacy', 'ledger-failure', 'release-failure', 'release-drift', 'main-advances', 'phase-interrupt-retry', 'subject-drift', 'code-input-chain'] as const)('checks %s validation authorization before protected PR closing', async mode => {
+  it.each(['empty', 'registered', 'workspace', 'session-override', 'changed', 'legacy', 'ledger-failure', 'release-failure', 'release-drift', 'main-advances', 'phase-interrupt-retry', 'subject-drift', 'code-input-chain', 'binding-auth-source'] as const)('checks %s validation authorization before protected PR closing', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-closing-'))
     const priorDshHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, '.dsh')
@@ -188,6 +188,17 @@ describe('PactFlow Gitea closing', () => {
         expect(chainTask.run.state).toBe('succeeded')
       }
       if (mode === 'workspace') expect(ctx.pactflow.project(session.id).project?.git).toBeUndefined()
+      if (mode === 'binding-auth-source') {
+        // The delivery ran under an auth-free (SSH-era) binding; the project then
+        // rebinds with HTTPS token auth on the same repository. The production
+        // rebind is expressed at the persisted-project level because the local
+        // fixture remote cannot carry an HTTPS identity. Closing must
+        // authenticate from the CURRENT binding, never from the first run's
+        // historical Git spec.
+        const project = ctx.pactflow.project(session.id).project!
+        session.append('pactflow/project-configured', { v: 1, project: { ...project, revision: project.revision + 1,
+          git: { ...project.git!, auth: { kind: 'https-token', username: 'alice', credentialRef: 'GITEA_TEST_TOKEN' } } } })
+      }
 
       let current = ctx.pactflow.transitionNeed(session.id, {
         needId: need.id, expectedRevision: need.revision, to: 'discussion',

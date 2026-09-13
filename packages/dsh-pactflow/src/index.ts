@@ -132,6 +132,7 @@ import type {
   ClosePactFlowNeedRequest,
   ClosePactFlowNeedResult,
   RetryPactFlowCleanupRequest,
+  PactFlowGitAuth,
   ClaimPactFlowNodeRequest,
   CreatePactFlowNeedRequest,
   CreatePactFlowNodeRequest,
@@ -965,7 +966,11 @@ export class PactFlowService extends TypertRemoteService {
     if (status.requiredApprovals > 0 || status.statusChecks.length > 0) {
       throw new Error('PactFlow closing cannot auto-merge while Gitea approvals or status checks are required')
     }
-    const gitSecret = await this.resolveGitAuth(taskRuns[0]!.git!)
+    // Closing authenticates with the CURRENT project binding: every closing Git
+    // operation (integration push, merge verification, task-ref verification)
+    // targets binding.remote, so a run's historical auth declaration must never
+    // become the credential source (close-with-binding-auth).
+    const gitSecret = await this.resolveGitAuth(binding)
     const closingInputDigest = createHash('sha256').update(JSON.stringify({
       needId: need.id, revision: need.revision, binding,
       tasks: [...expectedTaskRefs].sort((left, right) => left.remoteRef < right.remoteRef ? -1 : left.remoteRef > right.remoteRef ? 1 : 0),
@@ -1099,7 +1104,10 @@ export class PactFlowService extends TypertRemoteService {
         : this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[gitRecord.id] ?? gitRecord
       if (persistedGitRecord !== undefined && !await this.continueCleanupRecord(session, persistedGitRecord, async () => {
         await this.git.cleanupTaskRun(
-          session.header.cwd, binding, run.git!, await this.resolveGitAuth(run.git!),
+          // Same source as closing: cleanup operates on binding.remote and has
+          // already asserted the run's remote identity is unchanged, so the
+          // current binding owns the credential (close-with-binding-auth).
+          session.header.cwd, binding, run.git!, await this.resolveGitAuth(binding),
           run.gitResult!.commit,
         )
       })) cleanupFailures.push(`git:${run.git!.branch}`)
@@ -3451,7 +3459,7 @@ export class PactFlowService extends TypertRemoteService {
   }
 
   /** Resolve the current Git token per operation without persisting or returning it. */
-  private async resolveGitAuth(spec: PactFlowGitRunSpec): Promise<PactFlowGitAuthSecret | undefined> {
+  private async resolveGitAuth(spec: { auth?: PactFlowGitAuth }): Promise<PactFlowGitAuthSecret | undefined> {
     if (spec.auth === undefined) return undefined
     const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
     if (credentials === undefined) throw new Error('PactFlow Git authentication requires the Credentials service')
