@@ -1,5 +1,6 @@
 import { isAbsolute } from 'node:path'
 import type {
+  PactFlowArtifactStoreSettings,
   PactFlowGitProviderSettings,
   PactFlowHarnessProfileSettings,
   PactFlowHarnessTemplateView,
@@ -10,6 +11,7 @@ import type {
   PactFlowWorkerPoolSettings,
   PactFlowWorkerPoolStatus,
 } from './types.ts'
+import { validArtifactBucket } from './artifact-store.ts'
 import { PACTFLOW_HARNESS_API_MODE } from './k3s-worker.ts'
 
 const ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/
@@ -49,6 +51,7 @@ export class PactFlowInfrastructure {
   private readonly providers: readonly PactFlowGitProviderSettings[]
   private readonly executions = new Map<string, string>()
   private readonly models = new Map<string, PactFlowModelConnectionSettings>()
+  private readonly artifactStores = new Map<string, PactFlowArtifactStoreSettings>()
 
   constructor(readonly settings: PactFlowInfrastructureSettings) {
     const clusters = unique(settings.clusters, 'K3s cluster')
@@ -61,6 +64,11 @@ export class PactFlowInfrastructure {
     for (const model of models.values()) {
       this.validateModel(model)
       this.models.set(model.id, Object.freeze({ ...model }))
+    }
+    const artifactStores = unique(settings.artifactStores ?? [], 'artifact store')
+    for (const store of artifactStores.values()) {
+      this.validateArtifactStore(store)
+      this.artifactStores.set(store.id, Object.freeze({ ...store }))
     }
     for (const cluster of clusters.values()) {
       validId(cluster.id, 'K3s cluster')
@@ -404,6 +412,38 @@ export class PactFlowInfrastructure {
       throw new Error(`model connection "${model.id}" Credential ref is invalid`)
     }
   }
+
+  private validateArtifactStore(store: PactFlowArtifactStoreSettings): void {
+    validId(store.id, 'artifact store')
+    nonEmpty(store.displayName, `artifact store "${store.id}" displayName`)
+    if (store.kind !== 's3') throw new Error(`artifact store "${store.id}" kind is unsupported`)
+    const url = safeHttpUrl(store.endpoint, `artifact store "${store.id}" endpoint`)
+    // Plain HTTP is a recorded compromise limited to cluster-internal/private
+    // endpoints (see the change risks); a public endpoint must use HTTPS.
+    if (url.protocol === 'http:' && !isClusterInternalHost(url.hostname)) {
+      throw new Error(`artifact store "${store.id}" endpoint must use HTTPS unless it is a cluster-internal address`)
+    }
+    if (!validArtifactBucket(store.bucket)) {
+      throw new Error(`artifact store "${store.id}" bucket is invalid`)
+    }
+    if (store.region !== undefined && !/^[a-z0-9][a-z0-9-]{0,31}$/.test(store.region)) {
+      throw new Error(`artifact store "${store.id}" region is invalid`)
+    }
+    // The client only implements path-style addressing today.
+    if (store.pathStyle !== true) {
+      throw new Error(`artifact store "${store.id}" must use path-style addressing`)
+    }
+    for (const ref of [store.accessKeyCredentialRef, store.secretKeyCredentialRef]) {
+      if (!CREDENTIAL_REF.test(ref)) {
+        throw new Error(`artifact store "${store.id}" Credential ref is invalid`)
+      }
+    }
+  }
+
+  /** Registered artifact store by id; settings carry references only, never key material. */
+  artifactStore(id: string): PactFlowArtifactStoreSettings | undefined {
+    return this.artifactStores.get(id)
+  }
 }
 
 function isLegacyTemplate(
@@ -456,6 +496,26 @@ function safeHttpUrl(value: string, field: string): URL {
 function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
   return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)
+}
+
+/**
+ * Cluster-internal or private-network hosts: private IPv4 ranges, IPv6
+ * ULA/link-local, single-label service names, plus loopback. These are the
+ * only artifact-store endpoints permitted over plain HTTP.
+ */
+function isClusterInternalHost(hostname: string): boolean {
+  if (isLoopbackHost(hostname)) return true
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (ipv4 !== null) {
+    const [first, second] = [Number(ipv4[1]), Number(ipv4[2])]
+    return first === 10 || first === 192 && second === 168 || first === 172 && second >= 16 && second <= 31
+  }
+  if (host.includes(':')) {
+    return /^f[cd][0-9a-f:]+$/.test(host) || /^fe[89ab][0-9a-f:]+$/.test(host)
+  }
+  // Single-label names are in-cluster Service names (e.g. "rustfs").
+  return !host.includes('.')
 }
 
 function remoteIdentity(value: string): { readonly host: string; readonly path: readonly string[] } | undefined {

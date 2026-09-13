@@ -54,5 +54,18 @@ const deadline = setTimeout(stop, seconds * 1000)
 const code = await new Promise(resolve => { child.once('exit', code => resolve(code ?? 1)); child.once('error', () => resolve(1)) })
 clearTimeout(deadline); clearTimeout(hardKill)
 for (const [key, value] of Object.entries(process.env)) if (/TOKEN|SECRET|PASSWORD|API_KEY/.test(key) && value && value.length >= 8) output = output.split(value).join('[凭证已隐藏]')
+// Externalize the full log when this run is bound to an artifact store
+// (PACTFLOW_ARTIFACT_* env injected by the Host). Best-effort: any failure
+// here must never affect the run result, which stays on the degraded path.
+try {
+  await writeFile('/tmp/pactflow-full-log.txt', output)
+  const { uploadWorkerLog } = await import('/opt/pactflow-worker/lib/worker/log-upload.js')
+  const random = Math.random().toString(16).slice(2, 18)
+  const key = `pactflow-logs/${process.env.PACTFLOW_RUN_ID || 'run-unbound'}/0-execution-log-runner-${random}.txt`
+  const refJson = await uploadWorkerLog({ key, content: output })
+  if (refJson !== undefined) await writeFile('/tmp/pactflow-log-ref.json', refJson)
+} catch (error) {
+  process.stderr.write(`log externalization skipped: ${error && error.reason ? error.reason : 'upload failed'}\n`)
+}
 process.stdout.write(output.slice(-32768))
 process.exitCode = code

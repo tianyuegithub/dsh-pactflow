@@ -1,4 +1,5 @@
 import { redactWorkerText, redactWorkerArguments } from './redact.ts'
+import { assertWithinChannelLimit } from '../artifact-store.ts'
 import { readFile } from 'node:fs/promises'
 import z from '@deepseek-ai/schemastery'
 import type { AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
@@ -24,7 +25,9 @@ export async function apply(ctx: Context, config: { questionApi: 'provider-v1' |
     const call = request.agent.session.events.findLast(event => event.type === 'tool/call' && event.data.callId === request.callId)
     const args = call?.type === 'tool/call' ? call.data.arguments : ''
     const detail = `${clean(request.reason ?? '执行器请求操作审批')}\n${redactWorkerArguments(args, secrets)}`
-    if (detail.length > 16000) return 'unavailable'
+    // Interaction channel gate: reject oversized payloads locally BEFORE they
+    // enter the bridge, with an explicit code instead of a silent degrade.
+    assertWithinChannelLimit('interaction-request', Buffer.byteLength(detail, 'utf8'), 16000)
     const answer = await bridge.ask({ kind: 'approval', title: `操作审批：${request.toolName}`, toolName: request.toolName,
       ...(request.callId ? { callId: String(request.callId) } : {}), detail: clean(detail) }, request.signal)
     return 'decision' in answer && answer.decision === 'approve' ? 'allowed-once' : 'rejected'

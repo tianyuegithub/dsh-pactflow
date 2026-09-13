@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ZodType } from 'zod'
-import type { PactFlowId, PactFlowWorkspaceGitBinding, PactFlowProjectWorkerPolicy, PactFlowValidationProfile,
+import type { PactFlowId, PactFlowWorkspaceArtifactBinding, PactFlowWorkspaceGitBinding, PactFlowProjectWorkerPolicy, PactFlowValidationProfile,
   PactFlowRemoteCreation, PactFlowWorkspaceProjectConfig } from './types.ts'
 
 const nonEmpty = z.string().min(1)
@@ -22,6 +22,11 @@ export const pactFlowWorkspaceGitSchema = pactFlowSchema<PactFlowWorkspaceGitBin
   remote: nonEmpty, remoteUrl: nonEmpty, defaultBranch: nonEmpty,
   boundAt: z.number().int().nonnegative(), k3sGitSecretName: nonEmpty.optional(),
   giteaProviderId: nonEmpty.optional(), owner: nonEmpty.optional(), repo: nonEmpty.optional(),
+}))
+
+/** Durable project binding to one registered artifact store (seventh resource kind). */
+export const pactFlowWorkspaceArtifactSchema = pactFlowSchema<PactFlowWorkspaceArtifactBinding>(z.object({
+  artifactStoreId: nonEmpty, boundAt: z.number().int().nonnegative(),
 }))
 
 export const pactFlowProjectWorkerPolicySchema = pactFlowSchema<PactFlowProjectWorkerPolicy>(z.object({
@@ -47,6 +52,7 @@ export const pactFlowWorkspaceProjectSchema = pactFlowSchema<PactFlowWorkspacePr
   workspaceId: z.string(), workspacePath: z.string(), workspaceTitle: z.string(),
   revision: z.number().int().positive(), createdAt: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(),
   git: pactFlowWorkspaceGitSchema.optional(), worker: pactFlowProjectWorkerPolicySchema.optional(),
+  artifact: pactFlowWorkspaceArtifactSchema.optional(),
   remoteCreation: pactFlowRemoteCreationSchema.optional(), validationProfiles: pactFlowValidationProfilesSchema.optional(),
   validationProfileIds: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)).optional(),
   // Minimum validation policy (A03-b): owner-written, host-enforced at closing.

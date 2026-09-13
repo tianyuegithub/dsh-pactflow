@@ -1,4 +1,5 @@
 import type { WorkerInteractionRecord } from './worker-interaction-types.ts'
+import type { PactFlowArtifactRef } from './artifact-store.ts'
 import type {} from '@deepseek-ai/dsh-session-projection/types'
 
 /** Client-visible proof that the PactFlow Host and external event vocabulary are active. */
@@ -179,6 +180,19 @@ export interface PactFlowGitProviderSettings {
   readonly username?: string
 }
 
+/** Seventh referenceable resource: an S3-compatible object store for artifact handoff. */
+export interface PactFlowArtifactStoreSettings {
+  readonly id: string
+  readonly displayName: string
+  readonly kind: 's3'
+  readonly endpoint: string
+  readonly bucket: string
+  readonly region?: string
+  readonly pathStyle: boolean
+  readonly accessKeyCredentialRef: string
+  readonly secretKeyCredentialRef: string
+}
+
 export interface PactFlowWorkerPoolSettings {
   readonly id: string
   readonly displayName: string
@@ -197,6 +211,7 @@ export interface PactFlowInfrastructureSettings {
   readonly templates: readonly (PactFlowHarnessTemplateView | PactFlowHarnessProfileSettings)[]
   readonly modelConnections?: readonly PactFlowModelConnectionSettings[]
   readonly workerPools: readonly PactFlowWorkerPoolSettings[]
+  readonly artifactStores?: readonly PactFlowArtifactStoreSettings[]
 }
 
 export interface PactFlowWorkerPoolStatus extends PactFlowWorkerPoolSettings {
@@ -205,7 +220,7 @@ export interface PactFlowWorkerPoolStatus extends PactFlowWorkerPoolSettings {
 }
 
 export type PactFlowInfrastructureResourceKind =
-  | 'cluster' | 'registry' | 'git-provider' | 'harness' | 'model-connection' | 'worker-pool'
+  | 'cluster' | 'registry' | 'git-provider' | 'harness' | 'model-connection' | 'worker-pool' | 'artifact-store'
 
 export interface PactFlowInfrastructureProbeRequest {
   readonly kind: PactFlowInfrastructureResourceKind
@@ -302,6 +317,12 @@ export interface PactFlowWorkspaceGitBinding {
   readonly boundAt: number
 }
 
+/** Durable project binding to one registered artifact store resource. */
+export interface PactFlowWorkspaceArtifactBinding {
+  readonly artifactStoreId: string
+  readonly boundAt: number
+}
+
 export interface PactFlowWorkspaceProjectConfig {
   readonly schema: 'dsh_pactflow_workspace_project/v1'
   readonly workspaceId: string
@@ -312,6 +333,8 @@ export interface PactFlowWorkspaceProjectConfig {
   readonly updatedAt: number
   readonly remoteCreation?: PactFlowRemoteCreation
   readonly git?: PactFlowWorkspaceGitBinding
+  /** Project-level artifact store binding; references the infrastructure resource by id. */
+  readonly artifact?: PactFlowWorkspaceArtifactBinding
   readonly worker?: PactFlowProjectWorkerPolicy
   readonly validationProfiles?: readonly PactFlowValidationProfile[]
   readonly validationProfileIds?: readonly string[]
@@ -661,12 +684,26 @@ export interface PactFlowK3sRunSpec {
   readonly expectedBranch?: string
   readonly expectedBaseCommit?: string
   readonly gitSecretName: string
+  /**
+   * Present only when the project binds an artifact store (seventh resource):
+   * the per-run Secret carries the S3 keys; endpoint/bucket/region travel as
+   * plain env because they are configuration, not credentials.
+   */
+  readonly artifactStore?: PactFlowK3sArtifactStoreSpec
   readonly cpuRequest: string
   readonly memoryRequest: string
   readonly cpuLimit: string
   readonly memoryLimit: string
   readonly activeDeadlineSeconds: number
   readonly finishedJobTtlSeconds: number
+}
+
+/** Non-secret artifact store inputs for one run; keys live in the per-run Secret. */
+export interface PactFlowK3sArtifactStoreSpec {
+  readonly secretName: string
+  readonly endpoint: string
+  readonly bucket: string
+  readonly region?: string
 }
 
 export interface PactFlowK3sResult {
@@ -679,6 +716,11 @@ export interface PactFlowK3sResult {
   readonly runNonceHash?: string
   readonly claimTokenHash?: string
   readonly specDigest?: string
+  /** Externalized execution log: bounded tail inline, full content behind the ref. */
+  readonly logTail?: string
+  readonly logArtifact?: PactFlowArtifactRef
+  /** True only when the tail came from the degraded forensic path, never the full log. */
+  readonly logDegraded?: boolean
 }
 
 export interface PactFlowExecutionPlan {

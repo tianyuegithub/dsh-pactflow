@@ -30,11 +30,13 @@ import type {
   PactFlowHarnessProbeResult,
   PactFlowHarnessProbeStage,
   PactFlowHarnessTemplateView,
+  PactFlowK3sArtifactStoreSpec,
   PactFlowK3sResult,
   PactFlowK3sRunSpec,
   PactFlowK3sSettings,
   PactFlowRunId,
 } from './types.ts'
+import { validArtifactBucket, assertWithinChannelLimit, parsePactFlowArtifactRef, PACTFLOW_ARTIFACT_OVERSIZE_CODE, type PactFlowArtifactRef } from './artifact-store.ts'
 
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const IMAGE_DIGEST = /^.+@sha256:[0-9a-f]{64}$/
@@ -147,6 +149,7 @@ export function pactFlowK3sSpecDigest(
     image: spec.image, imagePullSecret: spec.imagePullSecret, harness: spec.harness,
     apiMode: spec.apiMode, model: spec.model, baseUrl: spec.baseUrl,
     modelSecretName: spec.modelSecretName, gitSecretName: spec.gitSecretName,
+    ...(spec.artifactStore === undefined ? {} : { artifactStore: spec.artifactStore }),
     cpuRequest: spec.cpuRequest, memoryRequest: spec.memoryRequest,
     cpuLimit: spec.cpuLimit, memoryLimit: spec.memoryLimit,
     ...(spec.interactionProtocol ? { interactionProtocol: spec.interactionProtocol, interactionPublicKey: spec.interactionPublicKey, interactionRunId: spec.interactionRunId } : {}),
@@ -187,6 +190,10 @@ interface WorkerResultDocument {
   readonly runNonceHash?: string
   readonly claimTokenHash?: string
   readonly specDigest?: string
+  /** Externalized execution log: bounded tail inline, full content behind the ref. */
+  readonly logTail?: string
+  readonly logArtifact?: unknown
+  readonly logDegraded?: boolean
 }
 
 export type PactFlowK3sObservation =
@@ -346,11 +353,20 @@ export class PactFlowK3sWorker {
     leaseDurationMs: number,
     git?: PactFlowGitRunSpec,
     prompt = '',
+    artifactStore?: PactFlowK3sArtifactStoreSpec,
   ): PactFlowK3sRunSpec {
     void leaseDurationMs
     const template = this.templates.get(templateId)
     if (template === undefined) throw new Error(`PactFlow K3s template "${templateId}" is not configured`)
     this.requireDnsName('gitSecretName', gitSecretName)
+    if (artifactStore !== undefined) {
+      this.requireDnsName('artifactStore.secretName', artifactStore.secretName)
+      if (!validArtifactBucket(artifactStore.bucket)) throw new Error('PactFlow artifact store bucket is invalid')
+      const endpoint = new URL(artifactStore.endpoint)
+      if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:') {
+        throw new Error('PactFlow artifact store endpoint must be http(s)')
+      }
+    }
     const suffix = runId.slice('run-'.length, 'run-'.length + 20).toLowerCase()
     // The Job wall-clock budget is a separate contract from the ownership lease:
     // renewal extends ownership, never this deadline. Lease/1000 would kill a
@@ -376,6 +392,7 @@ export class PactFlowK3sWorker {
       ...(template.interactionProtocol ? { interactionProtocol: template.interactionProtocol } : {}),
       gitSecretName,
       inputSecretName: `dsh-pf-${suffix}-input`,
+      ...(artifactStore === undefined ? {} : { artifactStore }),
       ...(git === undefined ? {} : { expectedBranch: git.branch, expectedBaseCommit: git.baseCommit }),
       runNonceHash: pactFlowSecretHash(runNonce),
       claimTokenHash: pactFlowSecretHash(claimToken),
@@ -416,6 +433,7 @@ export class PactFlowK3sWorker {
     runtimeSecrets?: PactFlowK3sRuntimeSecrets,
     onBound?: (jobUid: string) => void | Promise<void>,
     record?: PactFlowRunCleanupRecorder,
+    artifactCredentials?: { readonly accessKeyId: string; readonly secretAccessKey: string },
   ): Promise<PactFlowK3sResult> {
     const secrets = runtimeSecrets ?? this.pendingRuntimeSecrets.get(spec.jobName)
     if (spec.specDigest !== undefined && spec.expectedBranch !== undefined
@@ -434,6 +452,7 @@ export class PactFlowK3sWorker {
         spec.configMapName,
         ...(spec.inputSecretName === undefined ? [] : [spec.inputSecretName]),
         ...(spec.ephemeralModelSecret === true ? [spec.modelSecretName] : []),
+        ...(spec.artifactStore === undefined ? [] : [spec.artifactStore.secretName]),
       ],
     })
     // Only resources this call created and confirmed with a server UID may ever be
@@ -446,6 +465,26 @@ export class PactFlowK3sWorker {
     }
     let createdModelSecret: V1Secret | undefined
     let createdInputSecret: V1Secret | undefined
+    let createdArtifactSecret: V1Secret | undefined
+    if (spec.artifactStore !== undefined) {
+      if (artifactCredentials === undefined || artifactCredentials.accessKeyId === '' || artifactCredentials.secretAccessKey === '') {
+        this.pendingRuntimeSecrets.delete(spec.jobName)
+        throw new Error(`PactFlow artifact store credentials are required for run "${spec.jobName}" but are not configured`)
+      }
+      try {
+        const artifactSecret = this.artifactStoreSecret(spec.artifactStore, spec.namespace, artifactCredentials, spec)
+        createdArtifactSecret = await this.withRequestDeadline(options => this.core.createNamespacedSecret({
+          namespace: spec.namespace, body: artifactSecret,
+        }, options))
+        own('secret', spec.artifactStore.secretName, createdArtifactSecret.metadata?.uid)
+      } catch (error) {
+        if (this.isTimeout(error)) unknown.push(`artifact store Secret "${spec.artifactStore.secretName}"`)
+        this.pendingRuntimeSecrets.delete(spec.jobName)
+        const note = this.isTimeout(error) ? `; request timed out after ${error.timeoutMs}ms` : ''
+        const compensation = await this.compensateOwned(spec.namespace, owned)
+        throw new Error(`PactFlow failed to create artifact store Secret "${spec.artifactStore.secretName}"${note}${compensation}${this.unknownNote(unknown)}`)
+      }
+    }
     if (spec.ephemeralModelSecret === true) {
       if (modelApiKey === undefined || modelApiKey === '') throw new Error('PactFlow model API key is not configured')
       try {
@@ -1280,7 +1319,7 @@ export class PactFlowK3sWorker {
               image: spec.image,
               imagePullPolicy: 'IfNotPresent',
               command: ['/bin/bash', '/opt/dsh-pactflow/worker.sh'],
-              env: this.modelEnvironment(spec),
+              env: [...this.modelEnvironment(spec), ...this.artifactEnvironment(spec)],
               resources: {
                 requests: { cpu: spec.cpuRequest, memory: spec.memoryRequest },
                 limits: { cpu: spec.cpuLimit, memory: spec.memoryLimit },
@@ -1500,9 +1539,84 @@ export class PactFlowK3sWorker {
     return { name: key, valueFrom: { secretKeyRef: { name: secretName, key } } }
   }
 
+  /**
+   * Artifact store inputs: endpoint/bucket/region are plain configuration env;
+   * the S3 keys come exclusively from the per-run Secret via secretKeyRef.
+   */
+  private artifactEnvironment(spec: Pick<PactFlowK3sRunSpec, 'artifactStore'>): V1EnvVar[] {
+    if (spec.artifactStore === undefined) return []
+    return [
+      { name: 'PACTFLOW_ARTIFACT_ENDPOINT', value: spec.artifactStore.endpoint },
+      { name: 'PACTFLOW_ARTIFACT_BUCKET', value: spec.artifactStore.bucket },
+      ...(spec.artifactStore.region === undefined ? [] : [{ name: 'PACTFLOW_ARTIFACT_REGION', value: spec.artifactStore.region }]),
+      { name: 'PACTFLOW_ARTIFACT_ACCESS_KEY_ID', valueFrom: { secretKeyRef: { name: spec.artifactStore.secretName, key: 'access-key-id' } } },
+      { name: 'PACTFLOW_ARTIFACT_SECRET_ACCESS_KEY', valueFrom: { secretKeyRef: { name: spec.artifactStore.secretName, key: 'secret-access-key' } } },
+    ]
+  }
+
+  /** Per-run immutable Secret holding the artifact store S3 keys; never a ConfigMap, never argv. */
+  private artifactStoreSecret(
+    store: PactFlowK3sArtifactStoreSpec,
+    namespace: string,
+    credentials: { readonly accessKeyId: string; readonly secretAccessKey: string },
+    spec: PactFlowK3sRunSpec,
+  ): V1Secret {
+    return {
+      apiVersion: 'v1', kind: 'Secret', immutable: true,
+      metadata: {
+        name: store.secretName, namespace,
+        labels: this.labels(spec), annotations: this.annotations(spec),
+      },
+      type: 'Opaque',
+      stringData: {
+        'access-key-id': credentials.accessKeyId,
+        'secret-access-key': credentials.secretAccessKey,
+      },
+    }
+  }
+
   private ownsProbePod(pod: V1Pod, jobName: string, jobUid: string): boolean {
     return pod.metadata?.ownerReferences?.some(owner => owner.kind === 'Job'
       && owner.controller === true && owner.name === jobName && owner.uid === jobUid) === true
+  }
+
+  /**
+   * Degraded forensics (artifact-ref-handoff): read the tail of the WORKER
+   * container log when the run could not externalize its full log. The byte
+   * limit comes from the run budget's single authority (maxOutputBytes), never
+   * a second hardcoded cap; the caller MUST mark the result as degraded, since
+   * a tail is by definition not the full log.
+   */
+  async workerLogTail(spec: PactFlowK3sRunSpec, limitBytes: number, signal?: AbortSignal): Promise<string> {
+    if (!Number.isSafeInteger(limitBytes) || limitBytes < 1) throw new Error('PactFlow worker log tail budget must be a positive integer')
+    const send = <T>(operation: (options: ConfigurationOptions) => Promise<T>): Promise<T> =>
+      signal === undefined
+        ? this.withRequestDeadline(operation)
+        : operation(this.probeReadOptions(signal, Date.now() + PACTFLOW_K3S_REQUEST_TIMEOUT_MS))
+    const list = await send(o => this.core.listNamespacedPod({
+      namespace: this.config.namespace, labelSelector: `job-name=${spec.jobName}`,
+    }, o))
+    const podLabels = this.labels(spec)
+    const candidates = list.items.filter(pod => {
+      const current = pod.metadata?.labels ?? {}
+      const annotations = pod.metadata?.annotations ?? {}
+      return Object.entries(podLabels).every(([key, value]) => current[key] === value)
+        && Object.entries(this.annotations(spec)).every(([key, value]) => annotations[key] === value)
+    })
+    const pod = candidates.toSorted((left, right) =>
+      (right.metadata?.creationTimestamp?.valueOf() ?? 0) - (left.metadata?.creationTimestamp?.valueOf() ?? 0))[0]
+    const podName = pod?.metadata?.name
+    const podUid = pod?.metadata?.uid
+    if (podName === undefined || !podUid) throw new Error(`PactFlow worker Pod for Job "${spec.jobName}" was not found`)
+    const output = await send(o => this.core.readNamespacedPodLog({
+      name: podName, namespace: this.config.namespace, container: 'worker',
+      limitBytes, tailLines: 200,
+    }, o))
+    const current = await send(o => this.core.readNamespacedPod({ name: podName, namespace: this.config.namespace }, o))
+    if (current.metadata?.uid !== podUid) {
+      throw new Error(`PactFlow worker Pod "${podName}" identity changed before its log tail was read`)
+    }
+    return output
   }
 
   private async probeLog(jobName: string, jobUid: string, options: ConfigurationOptions): Promise<string> {
@@ -1626,11 +1740,26 @@ export class PactFlowK3sWorker {
     }
     let document: WorkerResultDocument
     try {
-      document = JSON.parse(terminated.message ?? '') as WorkerResultDocument
-    } catch {
+      const raw = terminated.message ?? ''
+      // Result-document channel gate: the termination message shares the kubelet
+      // 4 KiB cap, so an oversized inline document is refused, never parsed.
+      assertWithinChannelLimit('result-document', Buffer.byteLength(raw, 'utf8'))
+      document = JSON.parse(raw) as WorkerResultDocument
+    } catch (error) {
+      const marker = error instanceof Error && error.message.includes(PACTFLOW_ARTIFACT_OVERSIZE_CODE)
+        ? ' (result document over its inline budget; externalize content via the artifact store)' : ''
       return {
         state: 'failed', finishedAt: terminated.finishedAt?.getTime() ?? Date.now(),
-        outcome: `PactFlow K3s Job "${spec.jobName}" returned an invalid termination document`,
+        outcome: `PactFlow K3s Job "${spec.jobName}" returned an invalid termination document${marker}`,
+      }
+    }
+    let logArtifact: PactFlowArtifactRef | undefined
+    if (document !== null && typeof document === 'object' && document.logArtifact !== undefined) {
+      try { logArtifact = parsePactFlowArtifactRef(document.logArtifact) } catch {
+        return {
+          state: 'failed', finishedAt: terminated.finishedAt?.getTime() ?? Date.now(),
+          outcome: `PactFlow K3s Job "${spec.jobName}" returned an invalid artifact ref in its termination document`,
+        }
       }
     }
     const observedDigest = workerStatus?.imageID?.match(/(?:^|@|:\/\/)(sha256:[0-9a-f]{64})$/)?.[1]
@@ -1670,6 +1799,9 @@ export class PactFlowK3sWorker {
         ...(document.runNonceHash === undefined ? {} : { runNonceHash: document.runNonceHash }),
         ...(document.claimTokenHash === undefined ? {} : { claimTokenHash: document.claimTokenHash }),
         ...(document.specDigest === undefined ? {} : { specDigest: document.specDigest }),
+        ...(document.logTail === undefined ? {} : { logTail: document.logTail }),
+        ...(logArtifact === undefined ? {} : { logArtifact }),
+        ...(document.logDegraded === undefined ? {} : { logDegraded: document.logDegraded === true }),
       },
     }
   }

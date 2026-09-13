@@ -2,6 +2,7 @@ import { createServer, type Socket, type Server } from 'node:net'
 import { randomUUID, verify, createPublicKey } from 'node:crypto'
 import { chmod } from 'node:fs/promises'
 import { executionDigest } from '../execution-plan.ts'
+import { assertWithinChannelLimit } from '../artifact-store.ts'
 import { WORKER_INTERACTION_PROTOCOL, type WorkerInteractionRequest, type WorkerInteractionAnswer, type WorkerBridgeMessage, type WorkerBridgeAnswer } from '../worker-interaction-types.ts'
 import { validateWorkerAnswer, workerInteractionRequestSchema } from '../worker-interactions.ts'
 export const WORKER_SOCKET_PATH = '/tmp/pactflow-dsh-interactions.sock'
@@ -83,7 +84,13 @@ export class DshWorkerInteractionBridge {
     pending.resolve(structuredClone(answer))
     this.send(socket, { type: 'settled', bootId: this.bootId, requestId: message.requestId, digest: pending.digest })
   }
-  private send(socket: Socket, message: WorkerBridgeMessage): void { if (!socket.destroyed) socket.write(JSON.stringify(message) + '\n') }
+  private send(socket: Socket, message: WorkerBridgeMessage): void {
+    const line = JSON.stringify(message) + '\n'
+    // Explicit gate before the wire: an oversized frame is refused with the
+    // oversize code instead of relying on the receive-side destroy backstop.
+    assertWithinChannelLimit('bridge-frame', Buffer.byteLength(line, 'utf8'))
+    if (!socket.destroyed) socket.write(line)
+  }
   private broadcast(message: WorkerBridgeMessage): void { for (const socket of this.peers) this.send(socket, message) }
   async close(): Promise<void> {
     if (this.pending) { this.pending.dispose(); this.pending.reject(new Error('执行器已停止')); this.pending = undefined }

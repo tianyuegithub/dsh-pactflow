@@ -122,3 +122,88 @@ export function summarizeRetentionCapacity(
     maxBytes,
   }
 }
+
+/**
+ * Retention ledger for artifact-store objects (artifact-ref-handoff).
+ *
+ * Stored objects are deliberately never auto-deleted — deletion only happens
+ * on an explicit user ruling. But uploads can fail after the put (a lost
+ * result document leaves an orphan), so the ledger combines the host's own
+ * object records with a live list reconciliation: every stored object is
+ * visible, aged, sized, and flagged — never silently resident.
+ */
+
+import type { PactFlowArtifactRef } from './artifact-store.ts'
+
+/** One known stored object, from a host record or a list reconciliation. */
+export interface PactFlowArtifactObjectRecord {
+  readonly uri: string
+  readonly bytes: number
+  /** Epoch ms the host recorded the upload, or the reconciliation observed it. */
+  readonly recordedAt: number
+  /** True when a list reconciliation found no host record for this object. */
+  readonly orphan?: boolean
+}
+
+export interface PactFlowArtifactLedgerOptions {
+  readonly maxBytes?: number
+  readonly windowMs?: number
+}
+
+export interface PactFlowArtifactLedger {
+  readonly total: number
+  readonly totalBytes: number
+  readonly overBudget: boolean
+  readonly maxBytes: number
+  readonly windowMs: number
+  readonly overdue: readonly PactFlowArtifactObjectRecord[]
+  readonly orphans: readonly PactFlowArtifactObjectRecord[]
+}
+
+/** Host record derived from a settled artifactRef event entry. */
+export function artifactObjectRecord(ref: PactFlowArtifactRef, recordedAt: number): PactFlowArtifactObjectRecord {
+  return { uri: ref.uri, bytes: ref.bytes, recordedAt }
+}
+
+/**
+ * Merge live store listings into host records: a listed key without a record
+ * becomes an orphan entry; records keep their recordedAt while refreshing
+ * nothing else (the store copy wins on occupancy).
+ */
+export function reconcileArtifactObjects(
+  recorded: readonly PactFlowArtifactObjectRecord[],
+  listed: readonly { readonly key: string; readonly bytes: number; readonly lastModifiedMs: number }[],
+  bucket: string,
+  now: number,
+): readonly PactFlowArtifactObjectRecord[] {
+  const merged = new Map(recorded.map(record => [record.uri, record]))
+  for (const entry of listed) {
+    const uri = `s3://${bucket}/${entry.key}`
+    if (merged.has(uri)) continue
+    merged.set(uri, { uri, bytes: entry.bytes, recordedAt: Number.isFinite(entry.lastModifiedMs) ? entry.lastModifiedMs : now, orphan: true })
+  }
+  return [...merged.values()].sort((left, right) => left.uri.localeCompare(right.uri))
+}
+
+/** Summarize the object ledger: aging window, byte budget, and orphan flags. */
+export function summarizeArtifactLedger(
+  records: readonly PactFlowArtifactObjectRecord[],
+  now: number,
+  options: PactFlowArtifactLedgerOptions = {},
+): PactFlowArtifactLedger {
+  const maxBytes = options.maxBytes ?? PACTFLOW_DEFAULT_RETENTION_BYTES
+  const windowMs = options.windowMs ?? PACTFLOW_DEFAULT_RETENTION_MS
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('PactFlow artifact retention byte budget must be a positive integer')
+  if (!Number.isSafeInteger(windowMs) || windowMs < 1) throw new Error('PactFlow artifact retention window must be a positive integer')
+  const sorted = [...records].sort((left, right) => left.uri.localeCompare(right.uri))
+  const overdue = sorted.filter(record => now - record.recordedAt > windowMs)
+  const orphans = sorted.filter(record => record.orphan === true)
+  const totalBytes = sorted.reduce((sum, record) => sum + (record.bytes > 0 ? record.bytes : 0), 0)
+  return {
+    total: sorted.length,
+    totalBytes,
+    overBudget: totalBytes >= maxBytes,
+    maxBytes, windowMs,
+    overdue, orphans,
+  }
+}

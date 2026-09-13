@@ -7,6 +7,7 @@
     "jsx": "react-jsx"
   },
   "files": [
+    "src/artifact-store.ts",
     "src/client/index.tsx",
     "src/client/locale.ts",
     "src/client/overlay.tsx",

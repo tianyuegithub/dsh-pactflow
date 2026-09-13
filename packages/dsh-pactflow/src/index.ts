@@ -119,6 +119,7 @@ import { PactFlowProjectCapacity } from './project-capacity.ts'
 import { PactFlowExecutionCapacity } from './execution-capacity.ts'
 import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
 import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAttemptBudget } from './run-budget.ts'
+import { assertWithinChannelLimit } from './artifact-store.ts'
 import { harnessCapabilityProfile } from './harness-capabilities.ts'
 import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
 import { staleCodeInputs } from './input-staleness.ts'
@@ -319,6 +320,12 @@ export class PactFlowService extends TypertRemoteService {
         registryId: z.string().required(), templateIds: z.array(z.string()).default([]),
         maxConcurrency: z.number().default(1), queuePolicy: z.const('fifo').default('fifo'),
         imagePullSecret: z.string(),
+      })).default([]),
+      artifactStores: z.array(z.object({
+        id: z.string().required(), displayName: z.string().required(), kind: z.const('s3').required(),
+        endpoint: z.string().required(), bucket: z.string().required(), region: z.string(),
+        pathStyle: z.boolean().default(true),
+        accessKeyCredentialRef: z.string().required(), secretKeyCredentialRef: z.string().required(),
       })).default([]),
     })]).default(false),
   })
@@ -2128,6 +2135,9 @@ export class PactFlowService extends TypertRemoteService {
       ...gitResult === undefined ? {} : { gitResult },
       ...k3sResult === undefined ? {} : { k3sResult },
     }
+    // Event-payload channel gate: outcome text obeys the run budget's single
+    // authority; oversized content must be externalized before settlement.
+    assertWithinChannelLimit('event-payload', Buffer.byteLength(request.outcome ?? '', 'utf8'), this.runBudget.maxOutputBytes)
     this.events.append(session, 'pactflow/run-settled', { v: 1, run, node })
     if (request.state === 'succeeded') this.readyDependents(session, node.needId)
     return { node, run }

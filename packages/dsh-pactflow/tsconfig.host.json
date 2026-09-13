@@ -7,6 +7,7 @@
   },
   "files": [
     "src/index.ts",
+    "src/artifact-store.ts",
     "src/agent/index.ts",
     "src/domain.ts",
     "src/execution-capacity.ts",
@@ -47,6 +48,7 @@
     "src/worker-interactions.ts",
     "src/host/worker-interactions.ts",
     "src/worker/bridge.ts",
+    "src/worker/log-upload.ts",
     "src/worker/plugin.ts",
     "src/worker/connect.ts",
     "src/host/interaction-signing.ts",

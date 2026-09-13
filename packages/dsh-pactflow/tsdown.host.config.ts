@@ -2,7 +2,7 @@ import { isBuiltin } from 'node:module'
 import { defineConfig } from 'tsdown'
 
 export default defineConfig({
-  entry: { index: 'lib/types/index.js', 'worker/plugin': 'lib/types/worker/plugin.js', 'worker/connect': 'lib/types/worker/connect.js' },
+  entry: { index: 'lib/types/index.js', 'worker/plugin': 'lib/types/worker/plugin.js', 'worker/connect': 'lib/types/worker/connect.js', 'worker/log-upload': 'lib/types/worker/log-upload.js' },
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',
