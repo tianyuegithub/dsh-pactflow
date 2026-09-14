@@ -1684,17 +1684,20 @@ export class PactFlowService extends TypertRemoteService {
         : `资源池：${route.workerPoolId ?? '宿主已配置的默认集群'}；模型：${route.modelConnectionId ?? template?.model ?? '由所选模板指定'}；执行规格：${route.agentProfileId ?? route.templateId}`
     }
     const autopilot = this.activeAutopilot(session, needId)
-    if (autopilot !== undefined && this.planRerunsSucceededNode(session, request)) {
-      // node-rerun-authorization: re-running work that already succeeded is not
-      // "advance toward delivery", which is what the grant authorizes. Left in,
-      // the model could recommend a plan containing a rerun, autopilot would
-      // select it, and the node would be re-run with no person anywhere in the
-      // loop — which is exactly the constraint reruns exist to keep. It would
-      // also open a budget hole: rerun -> downstream stale -> rerun downstream.
-      this.updateAutopilot(session, autopilot, {
-        reason: '推荐方案包含已成功节点的重跑，需人显式选择；挂机不代为授权',
-      })
-    } else if (autopilot !== undefined) {
+    if (autopilot !== undefined) {
+      // node-rerun-authorization: autopilot cannot authorize a rerun, and that
+      // holds structurally rather than by a check here. `validateExecutionPlan`
+      // REQUIRES a plan to carry every existing node of the Need, and
+      // `materializePlanReview`'s `create` returns early for any node that
+      // already exists — so plan confirmation can create nodes but can never
+      // re-run one. The only rerun entry point is the `rerunNode` Remote, which
+      // is not on the Agent tool surface at all.
+      //
+      // An earlier version checked "does this plan mention a succeeded node" and
+      // refused. That check fired on EVERY plan once any node had succeeded,
+      // because the plan is required to include them — it would have stalled all
+      // multi-round autopilot planning to defend against something this path
+      // cannot do.
       await this.assertAutopilotScope(session, autopilot)
       const plan = request.plans.find(item => item.id === request.recommendedId)!
       const permitted = await this.autopilotOptions(String(session.id))
@@ -2198,6 +2201,17 @@ export class PactFlowService extends TypertRemoteService {
       // upstream matters is a judgement only a person can make.
       if (gitResult !== undefined) {
         this.markStaleSuccessors(session, node.id, gitResult.commit, gitResult.remoteRef)
+      }
+      // A node that was running while one of ITS inputs moved consumed the old
+      // commit. It is safe to mark now — its Run is terminal, so nothing is
+      // pinned to the revision any more.
+      const own = this.rerunStaleInputs(session, this.node(session, node.id)).stale
+      if (own.length > 0) {
+        const settled = this.node(session, node.id)
+        this.events.append(session, 'pactflow/node-updated', {
+          v: 1,
+          node: { ...settled, staleCodeInputs: own, revision: settled.revision + 1, updatedAt: Date.now() },
+        })
       }
     }
     return { node, run }
@@ -4116,12 +4130,6 @@ export class PactFlowService extends TypertRemoteService {
     return { state: 'merged', closing: closed }
   }
 
-  /** Whether a proposed plan would re-run a node that already succeeded. */
-  private planRerunsSucceededNode(session: Session, request: { readonly plans: readonly { readonly nodes: readonly { readonly id: string }[] }[] }): boolean {
-    const dag = this.dagState(session)
-    return request.plans.some(plan => plan.nodes.some(node => dag[node.id]?.state === 'succeeded'))
-  }
-
   /**
    * Preview what re-running an already-succeeded node would be deciding on.
    *
@@ -4183,14 +4191,12 @@ export class PactFlowService extends TypertRemoteService {
       .reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1
     const verdict = evaluateAttemptBudget(this.runBudget.maxAttempts, nextAttempt)
     if (verdict.exhausted) {
-      const paused: PactFlowNode = { ...current, state: 'paused', revision: current.revision + 1, updatedAt: Date.now() }
-      this.events.append(session, 'pactflow/node-updated', {
-        v: 1, node: paused,
-        rerunAuthorization: {
-          authorizedAt: Date.now(), fromRevision: current.revision, priorState: current.state, staleInputs: [],
-        },
-      })
-      return paused
+      // Refuse, and change nothing. `retryNode` pauses on exhaustion because its
+      // node is already `failed` — pausing costs nothing there. Here the node is
+      // `succeeded`: writing `paused` would destroy a delivery terminal state in
+      // order to decline an operation, and nothing can put `succeeded` back, so
+      // one refused click would make the Need permanently uncloseable.
+      throw new Error(`PactFlow node "${current.id}" cannot be re-run: ${verdict.detail}`)
     }
 
     const { stale } = this.rerunStaleInputs(session, current)
@@ -4225,6 +4231,14 @@ export class PactFlowService extends TypertRemoteService {
     if (need.phase === 'closing' || need.phase === 'deployed') {
       return `PactFlow need "${need.id}" is in ${need.phase}; re-running would change an object already under closing`
     }
+    if (node.state !== 'succeeded') {
+      return `PactFlow node "${node.id}" is not succeeded; use retryNode for a failed or cancelled node`
+    }
+    const attempts = Object.values(this.runState(session))
+      .filter(run => run.nodeId === node.id)
+      .reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1
+    const budget = evaluateAttemptBudget(this.runBudget.maxAttempts, attempts)
+    if (budget.exhausted) return `PactFlow node "${node.id}" cannot be re-run: ${budget.detail}`
     const release = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases[node.needId]
     if (release !== undefined) {
       // Re-running something already on the protected default branch would mean
@@ -4274,10 +4288,17 @@ export class PactFlowService extends TypertRemoteService {
    */
   private markStaleSuccessors(session: Session, nodeId: PactFlowNode['id'], commit: string, branch: string): void {
     const dag = this.dagState(session)
+    const runs = Object.values(this.runState(session))
     for (const successor of Object.values(dag)) {
       if (!(successor.codeInputs ?? []).includes(nodeId)) continue
-      if (successor.state !== 'succeeded' && successor.state !== 'running' && successor.state !== 'claimed') continue
-      const runs = Object.values(this.runState(session))
+      // ONLY succeeded successors are marked here. A successor still running or
+      // claimed has a Run pinned to its node revision (`settleRunInSession`
+      // refuses a result whose `nodeRevision` no longer matches), so bumping its
+      // revision now would make its own result impossible to record — the node
+      // would be stranded mid-flight by a marker that is only informational.
+      // Those are marked when their result lands instead; see the self-check at
+      // the end of settleRunInSession.
+      if (successor.state !== 'succeeded') continue
       const lastRun = runs.filter(run => run.nodeId === successor.id && run.git !== undefined)
         .sort((left, right) => right.attempt - left.attempt)[0]
       const consumed = (lastRun?.git?.codeInputs ?? []).find(input => input.dependency === nodeId)

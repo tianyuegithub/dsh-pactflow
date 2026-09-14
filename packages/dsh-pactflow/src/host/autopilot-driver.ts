@@ -81,11 +81,15 @@ export class PactFlowAutopilotDriver {
       // case the next tick completes through the ordinary deployed path.
       const settled = this.host.reviewGate(session, record.needId)
       if (settled !== undefined) {
-        this.host.update(session, record, {
-          reason: exhausted
-            ? `等待外部评审（PR #${String(gate.pullRequestNumber)}）：自动复查已耗尽，可手动复查`
-            : `等待外部评审（PR #${String(gate.pullRequestNumber)}）：${describeReviewGateGap(settled.lastGap ?? { missingApprovals: settled.requiredApprovals, checks: [] })}`,
-        })
+        const reason = exhausted
+          ? `等待外部评审（PR #${String(gate.pullRequestNumber)}）：自动复查已耗尽，可手动复查`
+          : `等待外部评审（PR #${String(gate.pullRequestNumber)}）：${describeReviewGateGap(settled.lastGap ?? { missingApprovals: settled.requiredApprovals, checks: [] })}`
+        // Write only when the wording actually changed. The driver ticks once a
+        // second and a reviewer takes hours: an unconditional update would append
+        // ~3600 autopilot events per hour into the one durable source of truth,
+        // and bump the autopilot revision every second so any concurrent call
+        // carrying an expectedRevision would lose its CAS.
+        if (record.reason !== reason) this.host.update(session, record, { reason })
         return
       }
     }
