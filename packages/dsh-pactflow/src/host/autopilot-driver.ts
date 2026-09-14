@@ -20,7 +20,13 @@ export interface AutopilotDriverHost {
    */
   reviewGate(session: Session, needId: string): PactFlowReviewGateRecord | undefined
   /** Observe that gate once. Never merges by itself; closing does that. */
-  recheckReviewGate(session: Session, needId: string): Promise<void>
+  /**
+   * Re-observe the review gate. Returns the refusal when the recheck concluded
+   * one — head drift, a changed base, a revised subject, a check that regressed
+   * from success to failure. Discarding it left the driver repeating the stale
+   * gap ("还缺 1 个批准") every 30 seconds while the real reason never surfaced.
+   */
+  recheckReviewGate(session: Session, needId: string): Promise<{ readonly reason: string; readonly detail: string } | undefined>
 }
 
 /** One host-owned driver; browser lifetime never owns continuation. */
@@ -75,8 +81,19 @@ export class PactFlowAutopilotDriver {
       const exhausted = gate.recheckCount >= gate.maxRechecks
       // The driver ticks every second; CI does not. Honour the recheck interval
       // so an unattended wait does not hammer the Gitea API.
-      if (reviewGateRecheckDue(gate, Date.now())) await this.host.recheckReviewGate(session, record.needId)
+      const refusal = reviewGateRecheckDue(gate, Date.now())
+        ? await this.host.recheckReviewGate(session, record.needId)
+        : undefined
       if (this.stopped) return
+      if (refusal !== undefined) {
+        // The gate did not merely fail to advance: it concluded the wait cannot
+        // be satisfied as recorded. Nobody but a person can resolve that, so say
+        // which of them it was rather than repeating the last gap until the
+        // recheck ceiling runs out and the wait ends with "自动复查已耗尽".
+        this.host.block(session, record,
+          `PR #${String(gate.pullRequestNumber)} 的外部评审复查被拒绝（${refusal.reason}）：${refusal.detail}`)
+        return
+      }
       // Re-read: the recheck may have satisfied the gate and merged, in which
       // case the next tick completes through the ordinary deployed path.
       const settled = this.host.reviewGate(session, record.needId)

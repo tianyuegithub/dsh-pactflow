@@ -527,7 +527,10 @@ export class PactFlowService extends TypertRemoteService {
         // The driver only observes. Merging stays inside closing, so the
         // waiting path and the unprotected path share one implementation.
         const need = this.need(session, needId)
-        await this.recheckReviewGate(session.id, { needId, expectedRevision: need.revision })
+        const result = await this.recheckReviewGate(session.id, { needId, expectedRevision: need.revision })
+        // A refusal is a conclusion, not an absence of progress: hand it back so
+        // the driver reports which one it was instead of the stale gap.
+        return result.state === 'refused' ? { reason: result.reason, detail: result.detail } : undefined
       },
     })
     ctx.effect(() => {

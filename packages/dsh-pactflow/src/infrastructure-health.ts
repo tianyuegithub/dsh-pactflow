@@ -82,7 +82,13 @@ export class PactFlowInfrastructureHealthStore {
     this.loaded ??= (async () => {
       try {
         const parsed = JSON.parse(await readFile(this.path, 'utf8')) as unknown
-        if (!Array.isArray(parsed)) return
+        // A parse error is already fail-closed below; valid JSON of the wrong
+        // shape used to be treated as an empty ledger and overwritten by the next
+        // write. Same outcome, silently: the recorded health of every resource
+        // gone with nothing said.
+        if (!Array.isArray(parsed)) {
+          throw new Error('PactFlow infrastructure health ledger is corrupted; recorded results are not discarded')
+        }
         for (const item of parsed) {
           if (typeof item !== 'object' || item === null) continue
           const record = item as Partial<PactFlowInfrastructureHealthRecord>

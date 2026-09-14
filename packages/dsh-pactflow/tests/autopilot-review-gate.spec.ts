@@ -58,12 +58,13 @@ function harness(input: {
   readonly gate?: PactFlowReviewGateRecord | undefined
   readonly record?: PactFlowAutopilotRecord
   readonly phase?: string
+  readonly refusal?: { readonly reason: string; readonly detail: string }
 }) {
   let record = input.record ?? autopilot()
   let currentGate = input.gate
   const agent = { status: 'idle' as const, followup: vi.fn() }
   const blocked: { reason: string; cancel?: boolean }[] = []
-  const recheck = vi.fn(async () => {})
+  const recheck = vi.fn(async () => input.refusal)
 
   const snapshot = (): PactFlowSnapshot => ({
     project: { project: null },
@@ -98,6 +99,36 @@ function harness(input: {
     settleGate: (next: PactFlowReviewGateRecord | undefined) => { currentGate = next },
   }
 }
+
+describe('PactFlow autopilot when the review gate refuses', () => {
+  it.each([
+    ['head-drift', 'PR 头提交已改变，不再是宿主核验过的那次交付'],
+    ['base-changed', '目标分支已变更'],
+    ['check-regressed', '必需检查由成功转为失败'],
+  ] as const)('reports %s instead of repeating the last known gap', async (reason, detail) => {
+    // The refusal used to be discarded: the driver re-read the record, found the
+    // previous gap still there, and went on saying "还缺 N 个批准" every 30 seconds
+    // until the recheck ceiling ran out — so the real reason, which only a person
+    // can resolve, never reached anyone.
+    const waiting = gate({ lastCheckedAt: 0, lastGap: { missingApprovals: 1, checks: [] } })
+    const h = harness({ gate: waiting, refusal: { reason, detail } })
+    await h.driver.tick()
+    expect(h.recheck).toHaveBeenCalledTimes(1)
+    expect(h.blocked).toHaveLength(1)
+    expect(h.blocked[0]?.reason).toContain(reason)
+    expect(h.blocked[0]?.reason).toContain(detail)
+    expect(h.blocked[0]?.reason).not.toContain('还缺')
+    h.driver.dispose()
+  })
+
+  it('keeps waiting quietly when the recheck concluded nothing', async () => {
+    const h = harness({ gate: gate({ lastCheckedAt: 0 }) })
+    await h.driver.tick()
+    expect(h.recheck).toHaveBeenCalledTimes(1)
+    expect(h.blocked).toHaveLength(0)
+    h.driver.dispose()
+  })
+})
 
 describe('PactFlow autopilot at a waiting review gate', () => {
   it('does not wake the model while a reviewer has not acted', async () => {

@@ -134,6 +134,20 @@ export interface PactFlowProbeCleanupIdentity {
   readonly secretUid?: string
 }
 
+/**
+ * Seconds to give the Harness CLI inside a Job with this wall-clock budget.
+ *
+ * A flat 30-second reservation only makes sense against the 3600s Run default:
+ * a probe with a 15-second budget got `max(1, -15)` = one second, so the CLI
+ * necessarily timed out and the operator was told "模型连接不可用" when the real
+ * cause was the Host's own arithmetic. Reserve proportionally instead, capped at
+ * the same 30 seconds so long budgets behave exactly as before.
+ */
+export function harnessTimeoutSeconds(activeDeadlineSeconds: number): number {
+  const reserve = Math.min(30, Math.max(1, Math.floor(activeDeadlineSeconds * 0.2)))
+  return Math.max(1, activeDeadlineSeconds - reserve)
+}
+
 export function pactFlowSecretHash(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -237,7 +251,16 @@ export class PactFlowK3sWorker {
     const cluster = kubeconfig.getCurrentCluster()
     let caMaterial = cluster?.caData ?? ''
     if (caMaterial === '' && cluster?.caFile !== undefined) {
-      try { caMaterial = createHash('sha256').update(readFileSync(cluster.caFile)).digest('hex') } catch { caMaterial = cluster.caFile }
+      // Falling back to the PATH would make the identity exactly the thing the
+      // comment above says it must not be, and it would do so silently: after one
+      // transient EACCES/ENOENT the fingerprint no longer detects a kubeconfig
+      // swapped to another cluster, which is what the cleanup reconciliation
+      // matches providers on.
+      try {
+        caMaterial = createHash('sha256').update(readFileSync(cluster.caFile)).digest('hex')
+      } catch (error) {
+        throw new Error(`PactFlow K3s cluster certificate authority file cannot be read; the cluster identity cannot be established (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`)
+      }
     }
     this.clusterIdentity = createHash('sha256').update(JSON.stringify({
       server: cluster?.server ?? '(unknown)',
@@ -442,10 +465,16 @@ export class PactFlowK3sWorker {
     // Job's labels and annotations unreconciled — and that digest is a first-class
     // term of the terminal identity comparison.
     if (spec.specDigest !== undefined && pactFlowK3sSpecDigest(spec, git, prompt) !== spec.specDigest) {
+      // The caller sets `runStarted` BEFORE calling run() on the premise that from
+      // here run() owns the prepared secrets and releases them on every terminal
+      // path — so leaving early without clearing strands a 32-byte runNonce and
+      // claimToken in the Map for the process's lifetime, once per retry.
+      this.pendingRuntimeSecrets.delete(spec.jobName)
       throw new Error(`PactFlow K3s Run "${spec.jobName}" Spec digest does not match its immutable inputs`)
     }
     if (secrets === undefined || pactFlowSecretHash(secrets.runNonce) !== spec.runNonceHash
       || pactFlowSecretHash(secrets.claimToken) !== spec.claimTokenHash) {
+      this.pendingRuntimeSecrets.delete(spec.jobName)
       throw new Error(`PactFlow K3s Run "${spec.jobName}" has no matching runtime claim secrets`)
     }
     // Persist the creation intent before any external resource exists, so a crash
@@ -1580,7 +1609,7 @@ export class PactFlowK3sWorker {
       ] : []),
       { name: 'WORKER_TYPE', value: spec.harness },
       { name: 'MODEL', value: spec.model },
-      { name: 'HARNESS_TIMEOUT_SECONDS', value: String(Math.max(1, spec.activeDeadlineSeconds - 30)) },
+      { name: 'HARNESS_TIMEOUT_SECONDS', value: String(harnessTimeoutSeconds(spec.activeDeadlineSeconds)) },
     ]
     if (spec.apiMode === 'anthropic-messages') {
       return [
@@ -1655,7 +1684,10 @@ export class PactFlowK3sWorker {
     const send = <T>(operation: (options: ConfigurationOptions) => Promise<T>): Promise<T> =>
       signal === undefined
         ? this.withRequestDeadline(operation)
-        : operation(this.probeReadOptions(signal, Date.now() + PACTFLOW_K3S_REQUEST_TIMEOUT_MS))
+        // probeReadOptions measures the deadline against performance.now(); a
+        // Date.now() epoch here made the difference ~1.7e12 ms, past TIMEOUT_MAX,
+        // so Node clamped the timer to 1 ms and aborted the request immediately.
+        : operation(this.probeReadOptions(signal, performance.now() + PACTFLOW_K3S_REQUEST_TIMEOUT_MS))
     const list = await send(o => this.core.listNamespacedPod({
       namespace: this.config.namespace, labelSelector: `job-name=${spec.jobName}`,
     }, o))
@@ -1871,26 +1903,13 @@ export class PactFlowK3sWorker {
 
   private async cancel(spec: PactFlowK3sRunSpec): Promise<void> {
     if (spec.jobUid !== undefined) return await this.cleanupRun(spec)
-    const failures: unknown[] = []
-    for (const operation of [
-      () => this.deleteConfigMap(spec),
-      () => this.deleteInputSecret(spec),
-      ...(spec.ephemeralModelSecret === true ? [() => this.deleteModelSecret(spec)] : []),
-    ]) {
-      try { await operation() } catch (error) { failures.push(error) }
-    }
-    try {
-      await this.withRequestDeadline(options => this.batch.deleteNamespacedJob({
-        name: spec.jobName,
-        namespace: spec.namespace,
-        gracePeriodSeconds: 0,
-        propagationPolicy: 'Background',
-        body: {},
-      }, options))
-    } catch (error) {
-      if (!this.isNotFound(error)) failures.push(error)
-    }
-    if (failures.length > 0) throw new Error(`PactFlow failed to cancel K3s Job "${spec.jobName}" resources`)
+    // Without a confirmed Job UID there is no identity to cancel against. The
+    // previous branch here deleted the ConfigMap, the Secrets and the Job by their
+    // reusable NAMES, with no UID precondition, and swallowed delete timeouts as
+    // if they were successes — two direct violations of the deletion invariant.
+    // No current caller reaches it, which is exactly why it could sit here: fail
+    // closed so a future caller gets a refusal instead of a name-based delete.
+    throw new Error(`PactFlow cannot cancel K3s Job "${spec.jobName}" without a confirmed Job UID; the responsibility stays recorded for explicit recovery`)
   }
 
   /**
@@ -1936,37 +1955,10 @@ export class PactFlowK3sWorker {
     return names.length === 0 ? '' : `; ${label}: ${names.join(', ')}`
   }
 
-  private async deleteConfigMap(spec: PactFlowK3sRunSpec): Promise<void> {
-    try {
-      await this.withRequestDeadline(options => this.core.deleteNamespacedConfigMap({
-        name: spec.configMapName, namespace: spec.namespace,
-      }, options))
-    } catch (error) {
-      if (!this.isNotFound(error) && !this.isTimeout(error)) throw error
-    }
-  }
-
-  private async deleteInputSecret(spec: PactFlowK3sRunSpec): Promise<void> {
-    if (spec.inputSecretName === undefined) return
-    try {
-      const name = spec.inputSecretName
-      await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
-        name, namespace: spec.namespace,
-      }, options))
-    } catch (error) {
-      if (!this.isNotFound(error) && !this.isTimeout(error)) throw error
-    }
-  }
-
-  private async deleteModelSecret(spec: PactFlowK3sRunSpec): Promise<void> {
-    try {
-      await this.withRequestDeadline(options => this.core.deleteNamespacedSecret({
-        name: spec.modelSecretName, namespace: spec.namespace,
-      }, options))
-    } catch (error) {
-      if (!this.isNotFound(error) && !this.isTimeout(error)) throw error
-    }
-  }
+  // deleteConfigMap / deleteInputSecret / deleteModelSecret used to live here.
+  // All three deleted by reusable NAME with no UID precondition and treated a
+  // delete timeout as success. Their only caller was `cancel()`'s unbound branch,
+  // now a refusal — so they are gone rather than left available to the next caller.
 
   private modelSecret(
     name: string,
