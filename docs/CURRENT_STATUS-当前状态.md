@@ -33,7 +33,7 @@
 | 运行预算（A11） | passed | `run-budgets`；`run-budgets.spec.ts`（6，含 `retryNode` 强制 + **输出上限由预算单一权威决定并实际生效**） |
 | Harness 能力分级（A10） | passed | `harness-capability-levels`；`harness-capabilities.spec.ts`（9：级别推导 + **不可证级别不虚报**对抗守卫 + **声明可查询**）+ `k3s-cleanup.spec.ts#capability-level`（镜像/API 探针均报级别）+ **真实集群** `pactflow-harness-probes`（四模板 2/2） |
 | 只读项目移交（A12） | passed | `project-handover`；`project-handover.spec.ts`（5：含**包版本与 reader 版本可追溯**）+ **前端只读入口**（`overlay` 导出摘要 JSON + 复制，e2e 覆盖） |
-| 代码输入过期追踪（F03 增强） | **partial** | `code-input-staleness`；检测器与记录已就位并通过测试，但**触发路径当前不可达**（成功节点不可重跑）——见 §4 |
+| 代码输入过期追踪（F03 增强） | passed | `code-input-staleness`（经 `node-rerun-authorization` 扩展）；触发路径已打通——`rerunPreview` 是它的首个生产消费者（此前 `@Remote('staleCodeInputs')` 客户端与 Agent 面均不调用），重跑授权决策点呈现依赖/分支/上次提交/当前提交四项，解析不出的依赖显式标注而非当作「未过期」。`node-rerun.spec.ts`（19，真实 Git 与真实派发） |
 | 宿主窄端口（R12/J9） | passed | `host-narrow-ports`；`host-narrow-ports.spec.ts`（4：cleanup/probe + 派发/恢复均在不含 `ctx` 的宿主替身上驱动）+ `cleanup-retention-guard.spec.ts`（2）。`CleanupHost`/`ProbeRecoveryHost`/`DispatchHost`/`RecoveryHost` 四个端口均已剥离整个 `ctx` |
 | K3s 批次收尾阶段（R04） | **passed** | `k3s-batch-finalization`；2026-09-11 真实集群验证 TTL 回收（两次）与零残留归零（两态）；见 `docs/b-class-k3s-acceptance-20260911.md` |
 | 保留窗口与陈旧标记（A05 扩展） | passed | `failure-scene-retention-policy`；`retention-policy.spec.ts`（10：窗口/陈旧 + 容量汇总 + 有界测量 + 端到端体积） |
