@@ -21,7 +21,12 @@ const VALIDATION_SENSITIVE_PATTERNS: readonly RegExp[] = [
 
 /** Whether one changed path touches the project's verification wiring. */
 export function isValidationSensitivePath(path: string): boolean {
-  if (VALIDATION_SENSITIVE_FILES.includes(path)) return true
+  // Match on the basename, not the whole path. Exact-string matching only ever
+  // saw a file at the repository root, so in a monorepo — this repository
+  // included — `packages/x/package.json` and `apps/y/vitest.config.ts` were
+  // invisible, and the approval prompt told the reviewer the wiring was untouched.
+  const basename = path.slice(path.lastIndexOf('/') + 1)
+  if (VALIDATION_SENSITIVE_FILES.includes(basename)) return true
   return VALIDATION_SENSITIVE_PATTERNS.some(pattern => pattern.test(path))
 }
 

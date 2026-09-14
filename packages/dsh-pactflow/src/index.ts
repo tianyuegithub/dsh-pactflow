@@ -850,12 +850,18 @@ export class PactFlowService extends TypertRemoteService {
           },
         }
       }
-    } else if (inspected.gitea !== undefined && this.infrastructure !== undefined
-      && this.infrastructure.settings.gitProviders.length > 0) {
+    } else if (inspected.gitea !== undefined) {
       // An explicit endpoint + credential combination must resolve to exactly one
       // registered Provider: otherwise a caller could pair a registered credential
       // ref with an unregistered target. When the remote itself already matches a
       // Provider, the explicit fields must agree with that match.
+      //
+      // An empty registry resolves to no Provider, which is a refusal, not a pass:
+      // requiring `length > 0` let a fresh or cleared install accept any endpoint
+      // paired with any configured credential ref.
+      if (this.infrastructure === undefined) {
+        throw new Error('PactFlow Gitea binding requires registered Git Provider settings')
+      }
       const endpoint = inspected.gitea.baseUrl.replace(/\/+$/, '')
       const byEndpoint = this.infrastructure.settings.gitProviders.filter(
         provider => provider.baseUrl.replace(/\/+$/, '') === endpoint)
@@ -873,6 +879,15 @@ export class PactFlowService extends TypertRemoteService {
       }
     }
     if (inspected.auth !== undefined) {
+      // `credential_ref` is a free string on a model-callable tool, and the Host
+      // hands whatever it names to the Git server through GIT_ASKPASS. Only
+      // "is it configured" was ever checked, so a model could bind a model API
+      // key, a registry password or an object-store secret as a Git password and
+      // have it written into someone else's authentication log. The Gitea branch
+      // above already enforces provenance; this brings the HTTPS branch level.
+      if (this.infrastructure?.nonGitCredentialRefs().has(inspected.auth.credentialRef) === true) {
+        throw new Error(`PactFlow Git credential reference "${inspected.auth.credentialRef}" belongs to another registered resource and cannot be used as a Git credential`)
+      }
       const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
       if (credentials === undefined) throw new Error('PactFlow Git authentication requires the Credentials service')
       const info = await credentials.describe(credentialRef(inspected.auth.credentialRef))
@@ -3646,8 +3661,12 @@ export class PactFlowService extends TypertRemoteService {
     // A historical binding whose endpoint + credential ref does not correspond to a
     // registered Provider must not be trusted with a credential: it stays
     // read-only/blocked until the user re-confirms a registered Provider.
-    if (provider === undefined && this.infrastructure !== undefined
-      && this.infrastructure.settings.gitProviders.length > 0) {
+    //
+    // An empty registry, and no infrastructure settings at all, are the same fact:
+    // the binding corresponds to nothing. Requiring `length > 0` meant a fresh
+    // install and one whose registry was cleared — the common state right after an
+    // upgrade — trusted every historical binding with a live credential instead.
+    if (provider === undefined) {
       throw new Error('PactFlow Gitea binding does not correspond to a registered Git Provider; re-confirm the provider before use')
     }
     if (binding.username !== undefined) return binding

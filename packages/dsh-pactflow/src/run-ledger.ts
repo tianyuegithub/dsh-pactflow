@@ -18,6 +18,15 @@ export interface PactFlowRunCleanupRecord {
   readonly createdAt: string
   readonly jobUid?: string
   readonly children?: readonly PactFlowRunCleanupChild[]
+  /**
+   * Child names this run intended to create, recorded before any of them exists.
+   *
+   * Purely diagnostic: a name is not an identity, and nothing may ever be deleted
+   * from this list. It exists for the crash window between "create sent" and
+   * "receipt received", where no UID was ever observed — an operator recovering
+   * by hand otherwise has no record of what this run was about to create.
+   */
+  readonly plannedChildNames?: readonly string[]
 }
 
 function sanitizeChildren(value: unknown): readonly PactFlowRunCleanupChild[] | undefined {
@@ -68,6 +77,7 @@ export class PactFlowRunCleanupLedger {
       if (event.phase === 'intent') {
         this.records.set(event.jobName, {
           jobName: event.jobName, fingerprint, createdAt: new Date().toISOString(),
+          ...(event.childNames.length === 0 ? {} : { plannedChildNames: [...event.childNames] }),
         })
       } else if (event.phase === 'confirmed') {
         if (existing === undefined) {
@@ -142,10 +152,14 @@ export class PactFlowRunCleanupLedger {
           || typeof record.createdAt !== 'string') {
           throw new Error('PactFlow run cleanup ledger holds an unreadable record; recorded responsibilities are not discarded')
         }
+        const plannedChildNames = Array.isArray(record.plannedChildNames)
+          && record.plannedChildNames.every(name => typeof name === 'string' && name.trim() !== '')
+          ? [...record.plannedChildNames] : undefined
         this.records.set(record.jobName, {
           jobName: record.jobName,
           fingerprint: record.fingerprint,
           createdAt: record.createdAt,
+          ...(plannedChildNames === undefined ? {} : { plannedChildNames }),
           ...(typeof record.jobUid === 'string' && record.jobUid.trim() !== '' ? { jobUid: record.jobUid } : {}),
           ...(() => {
             const children = sanitizeChildren(record.children)

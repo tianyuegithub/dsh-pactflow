@@ -65,6 +65,26 @@ describe('PactFlow cleanup ledger durability', () => {
     expect(onDisk.map(entry => entry.jobName).sort()).toEqual(['dsh-pf-mine', 'dsh-pf-other'])
   })
 
+  it('records the child names a run intended to create, without making them deletable', async () => {
+    // The intent carried four planned names (ConfigMap, input/model/artifact
+    // Secrets) and the ledger dropped every one. A crash between "create sent" and
+    // "receipt received" then left an entry naming nothing: no UID was ever seen,
+    // so nothing can be deleted — and with the names gone, an operator recovering
+    // by hand had no record of what the run was about to create either.
+    const path = join(root(), 'run-cleanups.json')
+    const ledger = new PactFlowRunCleanupLedger(path)
+    await ledger.apply('fp', {
+      phase: 'intent', jobName: 'dsh-pf-planned',
+      childNames: ['dsh-pf-planned', 'dsh-pf-planned-input', 'dsh-pf-planned-artifact'],
+    })
+
+    const [entry] = await new PactFlowRunCleanupLedger(path).list()
+    expect(entry?.plannedChildNames).toEqual(['dsh-pf-planned', 'dsh-pf-planned-input', 'dsh-pf-planned-artifact'])
+    // A name is not an identity: nothing here may be presented as owned.
+    expect(entry).not.toHaveProperty('jobUid')
+    expect(entry).not.toHaveProperty('children')
+  })
+
   it('keeps recording after one write fails', async () => {
     const path = join(root(), 'run-cleanups.json')
     const ledger = new PactFlowRunCleanupLedger(path)

@@ -21,6 +21,62 @@ describe('PactFlow Git credential binding', () => {
       new Promise<void>(resolve => { server.close(() => { resolve() }) })))
   })
 
+  it.each([
+    ['a model API key', 'PACTFLOW_MODEL_KEY'],
+    ['a registry password', 'PACTFLOW_REGISTRY_PASSWORD'],
+    ['an object-store secret key', 'PACTFLOW_ARTIFACT_SECRET'],
+  ] as const)('refuses to bind %s as a Git HTTPS credential', async (_label, ref) => {
+    // `credential_ref` is a free string on a model-callable tool, and the Host
+    // hands whatever it names to the Git server through GIT_ASKPASS. Only
+    // "is it configured" was checked, so any of these could be bound as a Git
+    // password and end up in someone else's authentication log.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-cred-deputy-'))
+    const priorDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = join(root, '.dsh')
+    const ctx = new Context()
+    try {
+      const { workspace, remote } = createGitFixture(root)
+      execFileSync('git', ['-C', workspace, 'remote', 'set-url', 'origin', `https://git.example/owner/repo.git`], { stdio: 'ignore' })
+      execFileSync('git', ['-C', workspace, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { stdio: 'ignore' })
+      void remote
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(PactFlowService, {
+        infrastructure: {
+          clusters: [], templates: [], workerPools: [], gitProviders: [],
+          registries: [{
+            id: 'harbor', displayName: 'Harbor', kind: 'harbor' as const, endpoint: 'https://registry.example', project: 'p',
+            username: 'robot', usernameCredentialRef: 'PACTFLOW_REGISTRY_USER',
+            passwordCredentialRef: 'PACTFLOW_REGISTRY_PASSWORD',
+          }],
+          modelConnections: [{
+            id: 'model', displayName: 'Model', apiMode: 'openai-chat-completions',
+            baseUrl: 'https://model.example', model: 'm', apiKeyCredentialRef: 'PACTFLOW_MODEL_KEY',
+          }],
+          artifactStores: [{
+            id: 'store', displayName: 'Store', kind: 's3' as const, endpoint: 'https://s3.example', region: 'r', bucket: 'pactflow-artifacts',
+            accessKeyCredentialRef: 'PACTFLOW_ARTIFACT_ACCESS', secretKeyCredentialRef: 'PACTFLOW_ARTIFACT_SECRET',
+          }],
+        },
+      })
+      ctx.provide('credentials', {
+        describe: () => Promise.resolve({ configured: true, source: 'memory', writable: true }),
+        resolve: () => Promise.resolve({ value: 'isolated-test-token', source: 'memory' }),
+      } as never)
+      const session = ctx.sessions.create(SessionId(`deputy-${ref}`), { meta: { agentPreset: 'pactflow', cwd: workspace } })
+      const project = ctx.pactflow.initialize(session.id, { name: 'Deputy' })
+      await expect(ctx.pactflow.bindGit(session.id, {
+        expectedRevision: project.revision, remote: 'origin', defaultBranch: 'main',
+        username: 'worker', credentialRef: ref,
+      })).rejects.toThrow(/belongs to another registered resource/)
+    } finally {
+      await ctx.fiber.dispose()
+      if (priorDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = priorDshHome
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('refuses to send a registered credential to an unregistered endpoint', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-pactflow-cred-binding-'))
     const priorDshHome = process.env.DSH_HOME
@@ -319,6 +375,22 @@ describe('PactFlow Git credential binding', () => {
       }))
       await expect(ctx.pactflow.verifyGitea(session.id))
         .rejects.toThrow(/does not correspond to a registered Git Provider/)
+
+      // An EMPTY registry is the same fact: the binding corresponds to nothing.
+      // The check used to require `gitProviders.length > 0`, so a fresh install
+      // and an install whose registry was cleared — the common state right after
+      // an upgrade — trusted every historical binding with a live credential.
+      Reflect.set(ctx.pactflow, 'infrastructure', new PactFlowInfrastructure({
+        clusters: [], registries: [], templates: [], modelConnections: [], workerPools: [], gitProviders: [],
+      }))
+      await expect(ctx.pactflow.verifyGitea(session.id))
+        .rejects.toThrow(/does not correspond to a registered Git Provider/)
+
+      // No infrastructure settings at all is likewise not permission. This one
+      // refuses further upstream (there is no configuration to resolve against),
+      // so the message differs — what matters is that it refuses.
+      Reflect.set(ctx.pactflow, 'infrastructure', undefined)
+      await expect(ctx.pactflow.verifyGitea(session.id)).rejects.toThrow()
     } finally {
       if (priorDshHome === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = priorDshHome

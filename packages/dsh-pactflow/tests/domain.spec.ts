@@ -664,7 +664,22 @@ describe('PactFlow domain foundation', () => {
       execFileSync('git', [
         '-C', workspace, 'remote', 'set-url', 'origin', gitServer.url,
       ])
-      const ctx = await harness()
+      // The explicit endpoint + credential pairing must correspond to a registered
+      // Provider; with an empty registry it corresponds to nothing and is refused,
+      // so this case registers the Provider it names.
+      const ctx = new Context()
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(PactFlowService, {
+        infrastructure: {
+          clusters: [], registries: [], templates: [], modelConnections: [], workerPools: [],
+          gitProviders: [{
+            id: 'gitea', displayName: 'Gitea', kind: 'gitea' as const,
+            baseUrl: gitServer.url, tokenCredentialRef: 'PACTFLOW_GITEA_API_TOKEN',
+            username: 'pactflow-worker',
+          }],
+        },
+      })
       const session = ctx.sessions.create(SessionId('git-auth'), {
         meta: { agentPreset: 'pactflow', cwd: workspace },
       })

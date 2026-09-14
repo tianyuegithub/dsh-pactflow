@@ -294,6 +294,29 @@ export class PactFlowInfrastructure {
     return this.releaseOnce(poolId)
   }
 
+  /**
+   * Credential refs that belong to a registered resource other than a Git Provider.
+   *
+   * Binding one of these as a Git password would hand it to a Git server through
+   * GIT_ASKPASS — a model API key, a registry password or an object-store secret
+   * ending up in someone else's auth log. `pactflow_bind_git` takes the ref as a
+   * free string from the model, so the check has to live on the Host side.
+   */
+  nonGitCredentialRefs(): ReadonlySet<string> {
+    const refs = new Set<string>()
+    for (const registry of this.settings.registries) {
+      for (const ref of [registry.usernameCredentialRef, registry.passwordCredentialRef]) {
+        if (ref !== undefined) refs.add(ref)
+      }
+    }
+    for (const model of this.models.values()) refs.add(model.apiKeyCredentialRef)
+    for (const store of this.artifactStores.values()) {
+      refs.add(store.accessKeyCredentialRef)
+      refs.add(store.secretKeyCredentialRef)
+    }
+    return refs
+  }
+
   /** Look up one registered Git provider by its stable id. */
   giteaProvider(id: string): PactFlowGitProviderSettings {
     const provider = this.providers.find(candidate => candidate.id === id)
