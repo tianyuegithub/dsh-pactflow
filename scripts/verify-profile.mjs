@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,6 +36,11 @@ try {
   requireText(installed, 'pactflowPresetRoot')
   requireText(installed, 'id: pactflow')
   requireText(installed, 'name: dsh-pactflow')
+  // The preset's skill rows live in its own agent.cordis.yml under the package-owned
+  // preset root, so they have no lifecycle of their own — they are reachable exactly
+  // while that root is. Assert the root really does carry them while installed, so
+  // the residue check after removal is about something that was actually there.
+  requireSkillCatalog(testHome, true)
   await bootWeb(true)
 
   // Re-adding the same complete artifact exercises the profile upgrade path:
@@ -52,6 +57,11 @@ try {
   const removed = runDsh(['--profile', 'web', '--dump-config'])
   rejectText(removed, 'dsh-pactflow')
   rejectText(removed, 'pactflowPresetRoot')
+  // No preset root means no skill directory to mount: the rows cannot outlive the
+  // Bundle that carried them. Checked explicitly rather than argued, because
+  // "it has no separate lifecycle" is precisely the kind of claim that stops
+  // being true the moment someone gives it one.
+  requireSkillCatalog(testHome, false)
   await bootWeb(false)
   console.log(`verify-profile (${runtime.kind}): install, boot, remove, and clean boot passed`)
 } finally {
@@ -78,6 +88,47 @@ function runDsh(args) {
 
 function requireText(value, expected) {
   if (!value.includes(expected)) throw new Error(`profile output is missing ${JSON.stringify(expected)}`)
+}
+
+/**
+ * Whether the installed Bundle still carries the preset's skill catalog on disk.
+ *
+ * The preset root is resolved at run time (`cordis.patch.yml` injects it as a
+ * service), so it is not a path in `--dump-config`. The rows and the skill
+ * directories are therefore checked where they actually live: inside the package
+ * as installed under this run's DSH_HOME.
+ */
+function findPresetRoot(home) {
+  const stack = [home]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    let entries
+    try { entries = readdirSync(current, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const path = join(current, entry.name)
+      if (entry.name === 'pactflow' && existsSync(join(path, 'agent.cordis.yml'))) return path
+      stack.push(path)
+    }
+  }
+  return undefined
+}
+
+function requireSkillCatalog(home, expected) {
+  const preset = findPresetRoot(home)
+  if (!expected) {
+    if (preset !== undefined) throw new Error(`removed Bundle left a PactFlow preset behind at ${preset}`)
+    return
+  }
+  if (preset === undefined) throw new Error('installed Bundle ships no PactFlow preset directory')
+  const agent = readFileSync(join(preset, 'agent.cordis.yml'), 'utf8')
+  for (const row of ['dsh-skill-filesystem', 'dsh-tool-skill']) {
+    if (!agent.includes(row)) throw new Error(`installed preset is missing the ${row} row`)
+  }
+  const skills = join(preset, 'skills')
+  if (!existsSync(skills)) throw new Error(`installed preset has no skills directory at ${skills}`)
+  const count = readdirSync(skills, { withFileTypes: true }).filter(entry => entry.isDirectory()).length
+  if (count === 0) throw new Error('installed preset ships an empty skills directory')
 }
 
 function rejectText(value, rejected) {

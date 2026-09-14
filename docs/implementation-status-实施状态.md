@@ -45,10 +45,33 @@ Requirement 名在现 spec 中不存在却写成了 MODIFIED；已按校验器�
   事件类型，写冻结就无从发生。
 - **3.4 / 5.1**：3.4 由逐 Harness 守卫覆盖；5.1 前置已满足且其守卫 17 例全绿。
 
+### 纠正一处误判：`verify:profile:dev` 本机可跑，`agent-skill-composition` 5.1 已通过
+
+先前把该任务记为「`verify:profile:dev` 链路需已安装宿主，本机无」——**前提有误**。该命令
+用的是 DSH **源码**（`DSH_SOURCE` 指向兄弟 fork checkout），而那两个 checkout 一直都在
+（`../deepseek-harness-pactflow-p0`、`../deepseek-harness-pactflow-upstream-pr`，`CLAUDE.md`
+的依赖前提段本来就写明了）。实跑全链通过：install → boot → 重复 add（升级路径，断言 Bundle
+层不重复）→ boot → remove → dump-config 无残留 → 干净复启且 `pactflow/health` 返回 404。
+
+并把「skill 行随 preset 卸载」由论证改为核验：`scripts/verify-profile.mjs` 新增
+`requireSkillCatalog`，安装后在本次 DSH_HOME 下定位实际安装的 preset 目录，断言
+`agent.cordis.yml` 含两行 skill 且 `skills/` 下有目录；remove 后断言该目录整体消失。
+**canary 实证**：把 `skills/` 改名为 `skillz/` 后转红，改回后复跑全绿。「没有独立生命周期」
+正是一旦有人给它一个生命周期就会立刻失效的那种说法，所以改为每次跑都检查。
+
+边界如实记录：这是**开发通道**证据（脚本自己打印 `not release evidence`），不等于官方发行版
+上的安装验收——后者仍受上游 external event producer 能力缺口阻断。
+
 ### 本机确证不可执行的（未勾选，按规则不得计为通过）
 
-`~/.dsh` 不存在、`kubectl` 二进制不存在、`DEEPSEEK_API_KEY` / `PACTFLOW_GITEA_API_TOKEN`
-/ `PACTFLOW_RELAY_IMAGE` / `KUBECONFIG` / `DSH_CLI_ENTRY` 全未设置。
+逐项实测而非假设：`~/.dsh` 不存在；`kubectl` / `k3s` / `podman` / `minikube` / `kind`
+二进制均未安装；`~/.kube/` 不存在；`DEEPSEEK_API_KEY` / `PACTFLOW_GITEA_API_TOKEN` /
+`PACTFLOW_RELAY_IMAGE` / `KUBECONFIG` / `DSH_CLI_ENTRY` /
+`PACTFLOW_REAL_ARTIFACT_ENDPOINT` 全未设置。
+
+**Docker 已安装**，但 worker 镜像的基础层在 `192.168.31.200:8080`（Harbor）上，实测
+`docker pull` 超时不可达，故 `build:worker-image` 与依赖它的 `test:worker-container`、
+`test:worker-interactions` 同样阻断——这一条此前只是推断，现已实测确证。
 
 - `dsh-harness-telemetry` 0.1/0.2/0.3（spike，需按 digest 钉版的镜像且容器内连模型）、
   第 2 节（执行器上报）、第 5 节（镜像重建钉版）、第 7 节（真实 K3s 终验）。

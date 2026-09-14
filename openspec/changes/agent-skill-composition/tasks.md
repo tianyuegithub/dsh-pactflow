@@ -36,7 +36,13 @@
 
 ## 5. 可卸载性
 
-- [ ] 5.1 remove 后重启无残留：**未跑**。skill 行随 preset 卸载（`agent.cordis.yml` 内的行没有独立生命周期），但 `verify:profile:dev` 链路需已安装宿主，本机无
+- [x] 5.1 remove 后重启无残留：**已跑通**（2026-09-15）。此前记的前提有误——`verify:profile:dev` 用的是 **DSH 源码**（`DSH_SOURCE` 指向兄弟 fork checkout），不需要已安装宿主，而该 checkout 一直都在。实跑 `DSH_SOURCE=../deepseek-harness-pactflow-p0 pnpm run verify:profile:dev`，全链通过：install → boot → 重复 add（升级路径，断言 Bundle 层不重复）→ boot → remove → dump-config 无残留 → 干净复启且 `pactflow/health` 返回 404。
+
+  并把「skill 行随 preset 卸载」由论证改为**核验**：脚本新增 `requireSkillCatalog`，安装后在本次 DSH_HOME 下定位实际安装的 preset 目录，断言 `agent.cordis.yml` 含 `dsh-skill-filesystem` / `dsh-tool-skill` 两行且 `skills/` 下有目录；remove 后断言该 preset 目录整体消失。**canary 实证**：把 `skills/` 改名为 `skillz/` 后该断言转红（`installed preset has no skills directory at …/presets/pactflow/skills`），改回后复跑全绿。
+
+  「没有独立生命周期」这类说法正是一旦有人给它一个生命周期就会立刻失效的那种，所以改为每次跑都检查，而不是写在注释里。
+
+  记录边界：这是**开发通道**证据（脚本自己打印 `not release evidence`），不等于官方发行版上的安装验收——后者仍受上游 external event producer 能力缺口阻断。
 
 ## 6. 终验
 
