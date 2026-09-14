@@ -93,4 +93,25 @@ describe('PactFlow verification-script hygiene', () => {
     expect(tryIndex, 'expected a top-level try block').toBeGreaterThan(-1)
     expect(declIndex).toBeLessThan(tryIndex)
   })
+
+  it('type-checks leaf projects rather than empty solution stubs', () => {
+    // `tsconfig.host.json` / `tsconfig.client.json` at the root are solution files:
+    // `{"files": [], "references": [...]}`. `tsc --noEmit -p` on one of those checks
+    // the empty file list and exits 0 WITHOUT descending into the referenced
+    // project, so the entry point reported "type-check cleanly" while src/index.ts
+    // held 18 real errors. The contract already says a type error must exit
+    // non-zero; this keeps the entry point pointed at projects that actually have
+    // sources to check.
+    const source = readFileSync(join(scriptsRoot, 'typecheck.mjs'), 'utf8')
+    const projects = [...source.matchAll(/'([^']*tsconfig\.[a-z]+\.json)'/g)].map(match => match[1]!)
+    expect(projects.length, 'typecheck.mjs must name the projects it checks').toBeGreaterThan(0)
+    for (const project of projects) {
+      const config = JSON.parse(readFileSync(resolve(scriptsRoot, '..', project), 'utf8')) as {
+        files?: readonly string[]
+        include?: readonly string[]
+      }
+      const inputs = (config.files?.length ?? 0) + (config.include?.length ?? 0)
+      expect(inputs, `${project} has no sources, so checking it proves nothing`).toBeGreaterThan(0)
+    }
+  })
 })
