@@ -2,6 +2,21 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-15 需求级评论（change `need-comment-threads`，14/15 任务完成，真实会话验证未跑、未归档）
+
+当前阶段：评论的事件、投影、宿主入口、Agent 工具与工作台讨论区全部落地并通过全量门禁。**仅剩任务 5.1 真实会话验证**（需真实 DSH 会话中人与模型各发一条），归档待用户授权。
+
+- 事件与版本：新增 `pactflow/comment-added` 与 `pactflow/comment-voided`；`PACTFLOW_EVENT_TYPES_V0_7` **逐条字面列出 21 类**（不由 V0_6 推导）；生产者 `0.6.0 → 0.7.0`，补 `0.6.0` 只读注册（现 0.1.0–0.6.0 六个）。运维手册计数与 `ops-doc-event-count` 守卫同步至 21/19/19。
+- **老会话可写性（任务 1.3）真实验证**：`producer-upgrade.spec.ts` 用真实 `SessionStore` 造出已持久化 `0.6.0` 声明的会话，再以 `0.7.0` 句柄写入 `comment-added` —— 成功，且日志追加升级后声明（`['0.6.0','0.7.0']`）。**两条对抗路径同验**：词汇窄化（丢一个类型）与版本降级均如实抛 `conflicting declaration`，证明测试确实在驱动升级门而非一个什么都放行的运行时。**边界如实标注**：这是对 fork 验证的，上游 PR 未合并，属工作假设。
+- 投影：独立 `pactflowCollaboration` 单元，只存**每主体计数 + 每需求有界尾部 20 条摘要**，正文经 `@Remote('listComments')` 分页。注入 100 条后尾部仍为 20、计数仍为 100；测试断言常驻投影的序列化结果**不含正文**。作废以追加事件就地标记，原文不动；计数只由 `comment-added` 推动，故对已移出尾部的评论的作废是无害 no-op —— 若要在 fold 里证明其存在，需要一份「每个写过的 id」索引，那正是这个投影要避免的无界增长；存在性改在写入边界（`voidComment` 读全量日志）校验。
+- 作者身份由**入口**决定：`@Remote('addComment')` = human，`appendAgentComment()` = agent。**参数里根本没有 author 字段**；测试传 `author: 'human'` 给 agent 入口，落账仍为 `agent`。
+- 预算：`run-budget.ts` 新增 `maxAgentCommentsPerSubject`（默认 20，单一权威不另造硬编码）+ `evaluateAgentCommentBudget`。人不受该预算约束；每个主体（need/node/run）各自计数。正文长度沿用 `maxOutputBytes`。
+- Agent 面：新增 `pactflow_add_comment`（工具描述明写「授权 NOTHING，绝不用于请求或声称批准」）；`pactflow_view` 快照新增 `discussion`，**每条带 `source: 'pactflow-comment'` 与作者类别**，已作废条目完全不进模型上下文。`pactFlowDiscussionView` 拆到 `src/discussion-view.ts` 以便宿主与客户端共用一份实现（domain.ts 带 zod，不进浏览器包）。
+- 客户端：工作台进展页新增「讨论」区——作者标签、时间、正文、发表框、逐条作废、「查看全部（含已作废）」分页。`discussion` 声明为**可选字段**且组件做防御：该字段跨 Remote 边界，升级期间客户端可能配到尚无此字段的宿主，缺失时进展页照常渲染（有专门用例）。
+- 新增测试 4 个文件共 **57 项**：`comment-threads`（19，领域/fold）、`comment-host`（17，真实服务集成）、`producer-upgrade`（4，升级通道）、`session-workbench-view` 讨论区（5）+ 既有夹具更新。
+- 验证：`pnpm run check` **exit 0** —— **108 文件 / 794 用例（787 通过 / 7 环境门控跳过 / 0 失败）**，`pack:check` 19 产物；`openspec validate --all --strict` 56/56。
+- 三处守卫如实拦截了本批改动并被逐一处置：`release-manifest-accuracy`（清单 `hostEventProducerVersion` 未随 0.7.0 同步 —— 判断**无需重建镜像**，worker 从不写 Session Event，该字段是宿主侧记录）、`ops-doc-event-count`（手册计数）、`domain`/`preset`（工具清单与生产者版本）。
+
 ## 2026-09-15 分发清单版本守卫（change `manifest-producer-version-guard`，已实施、未归档）
 
 当前阶段：七个新立项 change 的第一个，按 tasks 全部完成并通过全量门禁。**归档待用户授权。**
