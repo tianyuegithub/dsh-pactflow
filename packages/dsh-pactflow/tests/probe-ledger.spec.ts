@@ -65,23 +65,42 @@ describe('PactFlow probe cleanup ledger', () => {
       .rejects.toThrow('corrupted')
   })
 
-  it('skips structurally invalid rows but retains incomplete valid records', async () => {
+  it('retains incomplete but readable records exactly as written', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pactflow-probe-ledger-'))
     roots.push(root)
     const path = join(root, 'probe-cleanups.json')
     await writeFile(path, JSON.stringify([
-      { jobName: '', fingerprint: 'f'.repeat(64), kind: 'harness', createdAt: 'x' },
-      { jobName: 'no-kind', fingerprint: 'f'.repeat(64), kind: 'other', createdAt: 'x' },
       { jobName: 'dsh-pf-image-e', fingerprint: 'f'.repeat(64), kind: 'image', createdAt: 'x' },
       { jobName: 'dsh-pf-probe-f', fingerprint: 'f'.repeat(64), kind: 'harness', createdAt: 'x',
         jobUid: 'job-uid', secretName: 'secret-name' },
-      42,
     ]), 'utf8')
     const ledger = new PactFlowProbeCleanupLedger(path)
     const records = await ledger.list()
     expect(records).toHaveLength(2)
     expect(records[0]).toMatchObject({ jobName: 'dsh-pf-image-e', kind: 'image' })
+    // A record awaiting its UID keeps exactly the fields it has: no invented
+    // secretUid, because a fabricated UID is a licence to delete.
     expect(records[1]).toMatchObject({ jobName: 'dsh-pf-probe-f', jobUid: 'job-uid', secretName: 'secret-name' })
     expect(records[1]).not.toHaveProperty('secretUid')
+  })
+
+  it.each([
+    ['an empty jobName', { jobName: '', fingerprint: 'f'.repeat(64), kind: 'harness', createdAt: 'x' }],
+    ['an unknown kind', { jobName: 'no-kind', fingerprint: 'f'.repeat(64), kind: 'other', createdAt: 'x' }],
+    ['a non-object row', 42],
+  ] as const)('refuses to load a ledger containing %s rather than dropping the row', async (_label, row) => {
+    // This case used to assert the opposite — that such a row is skipped. Skipping
+    // is not inert: `persist()` rewrites the whole file from memory, so the next
+    // write deletes the skipped row for good, with nothing logged, and the cluster
+    // resources it named lose their only recorded owner. Adding a required field is
+    // enough to turn every record written by the previous version into such a row.
+    const root = await mkdtemp(join(tmpdir(), 'pactflow-probe-ledger-'))
+    roots.push(root)
+    const path = join(root, 'probe-cleanups.json')
+    await writeFile(path, JSON.stringify([
+      { jobName: 'dsh-pf-image-e', fingerprint: 'f'.repeat(64), kind: 'image', createdAt: 'x' },
+      row,
+    ]), 'utf8')
+    await expect(new PactFlowProbeCleanupLedger(path).list()).rejects.toThrow(/not discarded/)
   })
 })

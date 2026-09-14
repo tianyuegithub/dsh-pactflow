@@ -64,6 +64,13 @@ export async function reconcileProbeCleanupsImpl(host: ProbeRecoveryHost): Promi
       continue
     }
     try {
+      // Reconciliation reclaims abandoned resources; it must never reclaim one the
+      // cluster is still using. A Job still executing belongs to the recovery path
+      // that is reconnecting to it, so the responsibility is retained, not acted on.
+      if (await worker.runIsActive(entry)) {
+        host.logger.warn('PactFlow run cleanup "%s" is still executing; responsibility retained for recovery', entry.jobName)
+        continue
+      }
       await worker.cleanupRunIdentity(entry)
       await host.runLedger.remove(entry.jobName)
     } catch (error) {

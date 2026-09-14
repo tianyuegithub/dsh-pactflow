@@ -1148,7 +1148,8 @@ export class PactFlowService extends TypertRemoteService {
       if (run.k3s !== undefined && k3sRecord !== undefined) {
         const persistedK3sRecord = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[k3sRecord.id] ?? k3sRecord
         if (!await this.continueCleanupRecord(session, persistedK3sRecord, async () => {
-          await this.workerForRun(run.k3s!).cleanupRun(run.k3s!)
+          const worker = this.workerForRun(run.k3s!)
+          await worker.cleanupRun(run.k3s!, this.runCleanupRecorder(worker))
         })) cleanupFailures.push(`k3s:${run.k3s.jobName}`)
       }
       const gitRecord = cleanupRecords.find(record => record.runId === run.id && record.target.startsWith('git'))
@@ -1295,6 +1296,7 @@ export class PactFlowService extends TypertRemoteService {
       node: (session, rawId) => this.node(session, rawId),
       runState: session => this.runState(session),
       workerForRun: spec => this.workerForRun(spec),
+      runCleanupRecorder: k3s => this.runCleanupRecorder(k3s),
       resolveGitAuth: spec => this.resolveGitAuth(spec),
     }
   }

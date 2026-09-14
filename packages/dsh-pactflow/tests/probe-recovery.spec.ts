@@ -160,7 +160,9 @@ describe('PactFlow run creation-intent recovery', () => {
       const remove = vi.fn(async () => {})
       Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-a')]), remove })
       const cleanupRunIdentity = vi.fn(async () => {})
-      Reflect.set(ctx.pactflow, 'k3s', { connectionFingerprint: () => 'fp-a', cleanupRunIdentity })
+      Reflect.set(ctx.pactflow, 'k3s', {
+        connectionFingerprint: () => 'fp-a', cleanupRunIdentity, runIsActive: vi.fn(async () => false),
+      })
       await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
       expect(cleanupRunIdentity).toHaveBeenCalledTimes(1)
       expect(remove).toHaveBeenCalledWith('dsh-pf-run-recovery')
@@ -176,6 +178,60 @@ describe('PactFlow run creation-intent recovery', () => {
       Reflect.set(ctx.pactflow, 'k3s', { connectionFingerprint: () => 'fp-a', cleanupRunIdentity })
       await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
       // No confirmed identity: never delete by name, keep the record for explicit recovery.
+      expect(cleanupRunIdentity).not.toHaveBeenCalled()
+      expect(remove).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('never deletes a Job that is still running', async () => {
+    // A Host crash leaves a confirmed entry behind with the Job still executing.
+    // Force-deleting it here (gracePeriodSeconds 0, Background propagation) throws
+    // away a live model run and its already-produced commits, and the concurrent
+    // recovery path then observes `missing` and settles the Run as failed. The
+    // entry belongs to the reconnecting recovery path, not to startup cleanup.
+    const ctx = await startService()
+    try {
+      const remove = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-a')]), remove })
+      const cleanupRunIdentity = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'k3s', {
+        connectionFingerprint: () => 'fp-a', cleanupRunIdentity,
+        runIsActive: vi.fn(async () => true),
+      })
+      await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
+      expect(cleanupRunIdentity).not.toHaveBeenCalled()
+      expect(remove).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('still reconciles once the Job has reached a terminal state', async () => {
+    const ctx = await startService()
+    try {
+      const remove = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-a')]), remove })
+      const cleanupRunIdentity = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'k3s', {
+        connectionFingerprint: () => 'fp-a', cleanupRunIdentity,
+        runIsActive: vi.fn(async () => false),
+      })
+      await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(true)
+      expect(cleanupRunIdentity).toHaveBeenCalledTimes(1)
+      expect(remove).toHaveBeenCalledWith('dsh-pf-run-recovery')
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('retains the responsibility when liveness cannot be determined', async () => {
+    // Not knowing whether the Job is alive is not permission to destroy it.
+    const ctx = await startService()
+    try {
+      const remove = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'runLedger', { list: vi.fn(async () => [runEntry('fp-a')]), remove })
+      const cleanupRunIdentity = vi.fn(async () => {})
+      Reflect.set(ctx.pactflow, 'k3s', {
+        connectionFingerprint: () => 'fp-a', cleanupRunIdentity,
+        runIsActive: vi.fn(async () => { throw new Error('API server unreachable') }),
+      })
+      await expect(Reflect.get(ctx.pactflow, 'reconcileProbeCleanups').call(ctx.pactflow)).resolves.toBe(false)
       expect(cleanupRunIdentity).not.toHaveBeenCalled()
       expect(remove).not.toHaveBeenCalled()
     } finally { await ctx.fiber.dispose() }

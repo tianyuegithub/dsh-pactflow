@@ -2,7 +2,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { ExternalSessionEventProducerHandle } from '@deepseek-ai/dsh-session'
 import type { PACTFLOW_EVENT_TYPES } from '../domain.ts'
 import type { PactFlowGitWorkspace, PactFlowGitAuthSecret } from '../git-workspace.ts'
-import type { PactFlowK3sWorker } from '../k3s-worker.ts'
+import type { PactFlowK3sWorker, PactFlowRunCleanupRecorder } from '../k3s-worker.ts'
 import type { PactFlowDeliveryProjection } from '../types.ts'
 import type {
   PactFlowCleanupRecord,
@@ -47,6 +47,8 @@ export interface CleanupHost {
   node(session: Session, rawId: string): PactFlowNode
   runState(session: Session): Readonly<Record<string, PactFlowRun>>
   workerForRun(spec: PactFlowK3sRunSpec): PactFlowK3sWorker
+  /** Discharge the persisted Run cleanup responsibility once the resources are gone. */
+  runCleanupRecorder(k3s: PactFlowK3sWorker): PactFlowRunCleanupRecorder
   resolveGitAuth(spec: PactFlowGitRunSpec): Promise<PactFlowGitAuthSecret | undefined>
 }
 
@@ -155,7 +157,8 @@ export async function ensureK3sCleanup(
   if (pending.state === 'failed') {
     await host.retryCleanup(session.id, { cleanupId: pending.id })
   } else if (pending.state !== 'succeeded') await host.runCleanupRecord(session, pending, async () => {
-    await host.workerForRun(run.k3s!).cleanupRun(run.k3s!)
+    const worker = host.workerForRun(run.k3s!)
+    await worker.cleanupRun(run.k3s!, host.runCleanupRecorder(worker))
   })
 }
 
@@ -193,7 +196,8 @@ export async function cleanupAction(host: CleanupHost, session: Session, record:
   if (record.target === 'k3s' || record.target.startsWith('k3s:')) {
     const run = record.runId === undefined ? undefined : host.runState(session)[record.runId]
     if (run?.k3s === undefined) return
-    await host.workerForRun(run.k3s).cleanupRun(run.k3s)
+    const worker = host.workerForRun(run.k3s)
+    await worker.cleanupRun(run.k3s, host.runCleanupRecorder(worker))
     return
   }
   if (record.target === 'git' || record.target.startsWith('git:')) {

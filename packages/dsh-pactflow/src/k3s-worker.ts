@@ -1165,6 +1165,39 @@ export class PactFlowK3sWorker {
    * the Job by UID. A record without a confirmed UID fails closed (explicit
    * recovery), and a missing object counts as already clean.
    */
+  /**
+   * Whether the Job recorded in a persisted cleanup entry is still executing.
+   *
+   * Startup reconciliation deletes by UID with `gracePeriodSeconds: 0`. Applied to
+   * a Job that is still running — the exact state a Host crash leaves behind — that
+   * destroys a live model run along with the commits it already produced, and the
+   * recovery path that was reconnecting to it then observes `missing` and settles
+   * the Run as failed. So liveness is asked before any such deletion, and a Job
+   * whose state cannot be read is treated as live: not knowing is not permission.
+   */
+  async runIsActive(identity: PactFlowRunCleanupIdentity): Promise<boolean> {
+    const { jobName, jobUid } = identity
+    if (typeof jobUid !== 'string' || jobUid.trim() === '') return false
+    let job: V1Job
+    try {
+      job = await this.withRequestDeadline(options => this.batch.readNamespacedJob({
+        name: jobName, namespace: this.config.namespace,
+      }, options))
+    } catch (error) {
+      // Gone means gone: there is nothing left to protect, and the children still
+      // recorded against this entry do need reconciling.
+      if (this.isNotFound(error)) return false
+      throw error
+    }
+    // A different Job reusing the name is not ours, and must not be judged live
+    // on our behalf; `cleanupRunIdentity`'s UID precondition refuses it anyway.
+    if (job.metadata?.uid !== jobUid) return false
+    if (job.metadata.deletionTimestamp !== undefined) return false
+    const status = job.status ?? {}
+    if ((status.succeeded ?? 0) > 0 || (status.failed ?? 0) > 0) return false
+    return (status.active ?? 0) > 0
+  }
+
   async cleanupRunIdentity(identity: PactFlowRunCleanupIdentity): Promise<void> {
     const { jobName, jobUid, children } = identity
     if (typeof jobUid !== 'string' || jobUid.trim() === '') {
@@ -1195,7 +1228,7 @@ export class PactFlowK3sWorker {
     }
   }
 
-  async cleanupRun(spec: PactFlowK3sRunSpec): Promise<void> {
+  async cleanupRun(spec: PactFlowK3sRunSpec, record?: PactFlowRunCleanupRecorder): Promise<void> {
     const missingIdentity = resourceIdentityError(spec)
     if (missingIdentity !== undefined) throw new Error(missingIdentity)
     // ConfigMap/model Secret carry an ownerReference to the Job. Deleting all
@@ -1264,6 +1297,10 @@ export class PactFlowK3sWorker {
     } catch (error) {
       if (!this.isNotFound(error)) throw new Error(`PactFlow failed to clean K3s Job "${spec.jobName}"`)
     }
+    // Discharge the persisted responsibility. Without this the entry outlived every
+    // completed Run: the ledger grew without bound, and each Host restart re-ran a
+    // deletion against resources that were already gone.
+    try { await record?.({ phase: 'cleaned', jobName: spec.jobName }) } catch { /* startup reconciliation retries entry removal */ }
   }
 
   private async ownedCleanupUid(

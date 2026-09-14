@@ -1,6 +1,8 @@
+import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { withWorkspaceFileLock } from './workspace-lock.ts'
 import type { PactFlowRunCleanupEvent } from './k3s-worker.ts'
 
 export interface PactFlowRunCleanupChild {
@@ -44,22 +46,39 @@ export class PactFlowRunCleanupLedger {
 
   constructor(private readonly path = join(resolveDshHome(), 'pactflow', 'run-cleanups.json')) {}
 
+  /**
+   * Read-modify-write under the cross-process lock.
+   *
+   * Two Host processes can share one DSH_HOME — an upgrade overlap, `verify:profile`
+   * beside a live instance, e2e beside a real one. Without this, each holds its own
+   * view and the later writer erases the earlier one's responsibilities, with no
+   * reconciliation able to notice, because reconciliation reads the same view.
+   */
+  private async mutate(operation: () => boolean): Promise<void> {
+    await withWorkspaceFileLock(this.path, async () => {
+      await this.load()
+      if (!operation()) return
+      await this.persist()
+    })
+  }
+
   async apply(fingerprint: string, event: PactFlowRunCleanupEvent): Promise<void> {
-    await this.load()
-    const existing = this.records.get(event.jobName)
-    if (event.phase === 'intent') {
-      this.records.set(event.jobName, {
-        jobName: event.jobName, fingerprint, createdAt: new Date().toISOString(),
-      })
-    } else if (event.phase === 'confirmed') {
-      if (existing === undefined) {
-        throw new Error(`PactFlow Run cleanup responsibility for "${event.jobName}" was not persisted before creation`)
+    await this.mutate(() => {
+      const existing = this.records.get(event.jobName)
+      if (event.phase === 'intent') {
+        this.records.set(event.jobName, {
+          jobName: event.jobName, fingerprint, createdAt: new Date().toISOString(),
+        })
+      } else if (event.phase === 'confirmed') {
+        if (existing === undefined) {
+          throw new Error(`PactFlow Run cleanup responsibility for "${event.jobName}" was not persisted before creation`)
+        }
+        this.records.set(event.jobName, { ...existing, jobUid: event.jobUid, children: event.children })
+      } else {
+        this.records.delete(event.jobName)
       }
-      this.records.set(event.jobName, { ...existing, jobUid: event.jobUid, children: event.children })
-    } else {
-      this.records.delete(event.jobName)
-    }
-    await this.persist()
+      return true
+    })
   }
 
   async list(): Promise<readonly PactFlowRunCleanupRecord[]> {
@@ -68,23 +87,33 @@ export class PactFlowRunCleanupLedger {
   }
 
   async remove(jobName: string): Promise<void> {
-    await this.load()
-    if (!this.records.delete(jobName)) return
-    await this.persist()
+    await this.mutate(() => this.records.delete(jobName))
   }
 
   private async persist(): Promise<void> {
-    this.writes = this.writes.then(async () => {
+    // `.then(onFulfilled)` on a rejected promise never runs its callback, so a
+    // single failed write used to poison the chain for the rest of the process:
+    // every later apply() rejected with the same stale error and nothing was ever
+    // recorded again. Recover the chain either way, and surface this write's own
+    // outcome to this caller.
+    const write = this.writes.catch(() => undefined).then(async () => {
       await mkdir(dirname(this.path), { recursive: true })
-      const temporary = `${this.path}.tmp`
-      await writeFile(temporary, `${JSON.stringify([...this.records.values()], null, 2)}\n`, { mode: 0o600 })
+      const temporary = `${this.path}.${process.pid.toString(36)}.${randomBytes(6).toString('hex')}.tmp`
+      // `wx` refuses to follow a pre-placed symlink and refuses a concurrent
+      // writer's temporary file rather than interleaving with it.
+      await writeFile(temporary, `${JSON.stringify([...this.records.values()], null, 2)}\n`, { mode: 0o600, flag: 'wx' })
       await rename(temporary, this.path)
     })
-    await this.writes
+    this.writes = write.catch(() => undefined)
+    await write
   }
 
   private async load(): Promise<void> {
-    this.loaded ??= (async () => {
+    // Read from disk every time. A permanently cached view plus a whole-file
+    // rewrite meant a second Host process on the same DSH_HOME silently erased
+    // the first one's responsibilities.
+    this.loaded = (async () => {
+      this.records = new Map()
       let text: string
       try {
         text = await readFile(this.path, 'utf8')
@@ -99,12 +128,20 @@ export class PactFlowRunCleanupLedger {
         throw new Error('PactFlow run cleanup ledger is corrupted; recorded responsibilities are not discarded')
       }
       if (!Array.isArray(parsed)) throw new Error('PactFlow run cleanup ledger is corrupted; recorded responsibilities are not discarded')
+      // A record this version cannot read is not a record to drop: `persist()`
+      // rewrites the whole file, so skipping one deletes it, silently, and the
+      // cluster resources it named lose their owner. Adding a required field is
+      // enough to trigger it — that is exactly how `fingerprint` was introduced.
       for (const item of parsed) {
-        if (typeof item !== 'object' || item === null) continue
+        if (typeof item !== 'object' || item === null) {
+          throw new Error('PactFlow run cleanup ledger holds an unreadable record; recorded responsibilities are not discarded')
+        }
         const record = item as Partial<PactFlowRunCleanupRecord>
         if (typeof record.jobName !== 'string' || record.jobName.trim() === ''
           || typeof record.fingerprint !== 'string' || record.fingerprint.trim() === ''
-          || typeof record.createdAt !== 'string') continue
+          || typeof record.createdAt !== 'string') {
+          throw new Error('PactFlow run cleanup ledger holds an unreadable record; recorded responsibilities are not discarded')
+        }
         this.records.set(record.jobName, {
           jobName: record.jobName,
           fingerprint: record.fingerprint,
