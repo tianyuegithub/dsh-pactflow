@@ -4,7 +4,18 @@
 
 - [x] 0.1 评估结论（对 fork 核实）：`@deepseek-ai/dsh-attachment` 的**存储与语义不可复用**——`AttachmentStore` seam 全是图片语义（`validateImage`/`saveImage`/`readImage`、`ImageMediaType` 仅四种光栅格式、解码归一化、`ImageVariantId` 变体），且存 DSH_HOME 并绑对话历史。但评估揭示了更关键的一点：**客户端到宿主根本不存在独立的"传输层"——字节直接作为 Typert Remote 的参数传递**。证据：`@deepseek-ai/dsh-commands` 的 `@Remote execute(agent, line, images: readonly EncodedImageAttachment[], signal)`，而 `EncodedImageAttachment.data` 是 `Uint8Array`；`packages/typert/protocol` 未声明任何字节上限。
 - [x] 0.2 据此**选定候选 1 的实质形态**：附件字节以 `Uint8Array` 作为 Remote 参数直送宿主，宿主侧经脱敏门后 put 进对象存储。**不引入分片协议**（0.2 原方案），**不新增 HTTP 端点**（0.3 原方案）——二者均无需评估即被更优解取代，否决依据即本条。
-- [ ] 0.3 ~~宿主新增上传端点~~ 不再需要（见 0.2）
+- [x] 0.3 ~~宿主新增上传端点~~ **不再需要**（见 0.2）：评估发现客户端到宿主根本不存在独立传输层，字节直接作为 Typert Remote 参数传递，分片协议与新 HTTP 端点两个候选均被更优解取代。作为已裁决的非任务结项，不再占据未完成计数
+
+## 1 节为何不单独实施（2026-09-15 记录）
+
+第 1 节标注「可与任务 0 并行」，但**单独实施会产生只有代价没有收益的状态**：新增
+`pactflow/attachment-linked` 会提升 external producer 声明版本，而第 2 节（真正写入
+该事件的路径）依赖任务 0.4 的阈值实测，本机无已安装宿主故无法完成。结果是每个用户
+的会话都换上一个没有任何写入方的新版本声明。
+
+任务 0.4 自己立的规矩是「阈值在实测前不预设」；同一条理由适用于这里——**词汇表在有
+写入方之前不预先提升版本**。第 1 节因此等第 2 节可做时一并实施，届时 1.1 的「按实施
+时实际版本号」才有确定答案。
 - [ ] 0.4 按选定传输层确定附件通道阈值：**未定**。Remote 参数的实际字节天花板（传输缓冲与内存）需对真实宿主实测，本机无已安装宿主。阈值在实测前不预设——`artifact-ref-handoff` 的既有通道阈值（result-document 3 KiB / bridge 32 KiB）不适用于此路径
 
 ## 1. 事件词汇（可与任务 0 并行）
