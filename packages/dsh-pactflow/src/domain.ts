@@ -33,6 +33,7 @@ import type {
   PactFlowProjectProjection,
   PactFlowRelease,
   PactFlowRerunAuthorization,
+  PactFlowReviewGateRecord,
   PactFlowReview,
   PactFlowRun,
   PactFlowRunsProjection,
@@ -379,7 +380,11 @@ const cleanupSchema = pactFlowSchema<PactFlowCleanupRecord>(z.object({
   // gitea-review-gate: the wait state rides this record. Declared so the fold
   // keeps it instead of stripping it (a field zod does not declare is dropped —
   // the exact defect close-with-binding-auth had to fix for gitResultSchema).
-  reviewGate: z.object({
+  // Bound to the interface, not a bare z.object: an optional field added to
+  // PactFlowReviewGateRecord would otherwise typecheck fine and be silently
+  // stripped on parse — the exact shape of the gitResultSchema defect that once
+  // made closing permanently unable to find its own credentials.
+  reviewGate: pactFlowSchema<PactFlowReviewGateRecord>(z.object({
     needId: z.string().min(1),
     pullRequestNumber: z.number().int().positive(),
     pullRequestUrl: z.string().min(1),
@@ -401,7 +406,7 @@ const cleanupSchema = pactFlowSchema<PactFlowCleanupRecord>(z.object({
       })),
     }).optional(),
     externallyMerged: z.boolean().optional(),
-  }).optional(),
+  })).optional(),
   attempt: z.number().int().positive(), error: z.string().optional(), nextRetryAt: z.number().int().nonnegative().optional(),
 }).refine(value => value.runId !== undefined || value.needId !== undefined, 'cleanup record must reference a Run or Need'))
 

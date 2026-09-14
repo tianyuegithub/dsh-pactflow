@@ -1,5 +1,6 @@
 import type {
   PactFlowCollaborationProjection,
+  PactFlowCommentCounters,
   PactFlowDiscussionEntry,
   PactFlowDiscussionView,
 } from './types.ts'
@@ -21,11 +22,30 @@ export function pactFlowDiscussionView(
   state: PactFlowCollaborationProjection | undefined,
 ): PactFlowDiscussionView {
   const recent: Record<string, readonly PactFlowDiscussionEntry[]> = {}
+  const subjects = new Set<string>()
   for (const [needId, entries] of Object.entries(state?.recent ?? {})) {
     const visible = entries
       .filter(entry => !entry.voided)
       .map((entry): PactFlowDiscussionEntry => ({ ...entry, source: 'pactflow-comment' }))
-    if (visible.length > 0) recent[needId] = visible
+    if (visible.length === 0) continue
+    recent[needId] = visible
+    for (const entry of visible) subjects.add(subjectKeyOf(entry))
   }
-  return { counters: state?.counters ?? {}, recent }
+  // Counters are keyed per SUBJECT, and Runs are unbounded — a project that has
+  // commented on 300 Runs would otherwise ship 300 counter keys into every model
+  // snapshot forever, none of them ever reclaimed. Carry only the subjects whose
+  // comments are actually visible here, so this view stays proportional to what
+  // it shows rather than to everything ever commented on.
+  const counters: Record<string, PactFlowCommentCounters> = {}
+  for (const [key, value] of Object.entries(state?.counters ?? {})) {
+    if (subjects.has(key)) counters[key] = value
+  }
+  return { counters, recent }
+}
+
+/** Mirror of the host-side subject key, kept here so the client shares one rule. */
+function subjectKeyOf(entry: Pick<PactFlowDiscussionEntry, 'needId' | 'nodeId' | 'runId'>): string {
+  if (entry.nodeId !== undefined) return `node:${entry.nodeId}`
+  if (entry.runId !== undefined) return `run:${entry.runId}`
+  return `need:${entry.needId}`
 }

@@ -133,3 +133,38 @@ describe('PactFlow review gate cancellation', () => {
     expect(ctx.pactflow.cancelReviewGate(session.id, { needId: NEED })).toEqual({ cancelled: false })
   })
 })
+
+describe('PactFlow review gate is cleared once closing is done with it', () => {
+  it('drops the wait state through the same path cancellation uses', () => {
+    // Left behind, a later recheck would observe `merged: true` on a PR the Host
+    // itself merged and verified, judge it "merged outside the platform, never
+    // verified by the Host", and write that accusation against our own work into
+    // the durable log — permanently, since nothing reverses it.
+    session.append('pactflow/cleanup-recorded', { v: 1, record: closingCleanup(gate()) })
+    expect(readGate()).toBeDefined()
+
+    Reflect.get(ctx.pactflow, 'clearReviewGate').call(ctx.pactflow, session, NEED)
+    expect(readGate()).toBeUndefined()
+
+    // The cleanup record itself survives; only the wait annotation goes.
+    const cleanup = ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${NEED}-closing`]
+    expect(cleanup?.target).toBe('closing:pactflow/integration')
+  })
+
+  it('is a no-op when there is no wait state to clear', () => {
+    session.append('pactflow/cleanup-recorded', { v: 1, record: closingCleanup() })
+    const before = session.events.length
+    Reflect.get(ctx.pactflow, 'clearReviewGate').call(ctx.pactflow, session, NEED)
+    // No event appended: re-recording an unchanged cleanup would bump the log for
+    // nothing on every closing.
+    expect(session.events.length).toBe(before)
+  })
+
+  it('refuses to record a wait state with no closing cleanup to ride on', () => {
+    // Returning quietly would leave the caller reporting "waiting for review"
+    // while nothing was recorded, and every re-entry would rebuild the record
+    // with recheckCount 0 — making the recheck ceiling meaningless.
+    expect(() => Reflect.get(ctx.pactflow, 'persistReviewGate').call(ctx.pactflow, session, gate()))
+      .toThrow(/cannot be recorded/)
+  })
+})

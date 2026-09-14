@@ -25,6 +25,7 @@ export type PactFlowReviewGateRefusal =
   | 'base-changed'
   | 'subject-drift'
   | 'check-regressed'
+  | 'wrong-pull-request'
 
 export type PactFlowReviewGateVerdict =
   | { readonly kind: 'ready'; readonly gap: PactFlowReviewGateGap }
@@ -90,6 +91,19 @@ export function evaluateReviewGate(input: {
 }): PactFlowReviewGateVerdict {
   const { record, observed, currentNeedRevision } = input
 
+  // Identity first: everything below compares an observation against a record,
+  // and both carry a PR number. Two PRs can share a head and a base (one closed
+  // and reopened, or a duplicate), so without this the approvals of a DIFFERENT
+  // pull request would silently satisfy this gate while the message printed the
+  // recorded number.
+  if (observed.number !== record.pullRequestNumber) {
+    return {
+      kind: 'refused',
+      reason: 'wrong-pull-request',
+      detail: `观测到的是 PR #${String(observed.number)}，等待态登记的是 PR #${String(record.pullRequestNumber)}`,
+    }
+  }
+
   // Checked before drift: a merged PR is a fact to report, and reporting "head
   // drifted" about something already merged would describe the wrong problem.
   if (observed.merged) {
@@ -138,8 +152,21 @@ export function evaluateReviewGate(input: {
     }
   }
 
-  if (gap.missingApprovals === 0 && observed.checks.every(check => check.state === 'success')) {
+  const observedContexts = new Set(observed.checks.map(check => check.context))
+  const unobserved = record.requiredChecks.filter(context => !observedContexts.has(context))
+  if (gap.missingApprovals === 0 && unobserved.length === 0
+    && observed.checks.every(check => check.state === 'success')) {
     return { kind: 'ready', gap }
+  }
+  if (unobserved.length > 0) {
+    // A required check the observation does not even mention is not a passing
+    // check; declaring ready here would hand a merge to a gate we did not read.
+    return {
+      kind: 'waiting',
+      gap,
+      autoRecheckExhausted: record.recheckCount >= record.maxRechecks,
+      detail: `${describeReviewGateGap(gap)}；未观测到必需检查：${unobserved.join('、')}`,
+    }
   }
 
   const autoRecheckExhausted = record.recheckCount >= record.maxRechecks

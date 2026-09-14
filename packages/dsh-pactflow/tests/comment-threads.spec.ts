@@ -10,6 +10,7 @@ import {
   pactFlowCommentSubjectKey,
   pactflowCollaborationProjection,
 } from '../src/domain.ts'
+import { pactFlowDiscussionView } from '../src/discussion-view.ts'
 import { PACTFLOW_DEFAULT_RUN_BUDGET, evaluateAgentCommentBudget } from '../src/run-budget.ts'
 import type { PactFlowCollaborationState, PactFlowComment } from '../src/types.ts'
 
@@ -214,5 +215,43 @@ describe('PactFlow comment projection bounds', () => {
     const state = fold([needCreated(), added(comment())])
     const view = pactflowCollaborationProjection.wire!.view!(state as never) as Record<string, unknown>
     expect(Object.keys(view).sort()).toEqual(['counters', 'recent'])
+  })
+})
+
+describe('PactFlow discussion view stays proportional to what it shows', () => {
+  it('carries counters only for subjects whose comments are visible', () => {
+    // Counters are keyed per subject and Runs are unbounded: a project that has
+    // commented on hundreds of Runs would otherwise ship hundreds of counter keys
+    // into every model snapshot forever, none ever reclaimed.
+    const view = pactFlowDiscussionView({
+      counters: {
+        'need:need-1': { total: 1, agent: 0 },
+        'run:run-old-1': { total: 1, agent: 1 },
+        'run:run-old-2': { total: 1, agent: 1 },
+      },
+      recent: {
+        'need-1': [{
+          id: 'comment-1' as never, needId: 'need-1' as never, author: 'human',
+          excerpt: 'visible', createdAt: 1, voided: false,
+        }],
+      },
+    })
+    expect(Object.keys(view.counters)).toEqual(['need:need-1'])
+    expect(view.recent['need-1']).toHaveLength(1)
+  })
+
+  it('drops the counters of a Need whose every comment was voided', () => {
+    const view = pactFlowDiscussionView({
+      counters: { 'need:need-1': { total: 2, agent: 2 } },
+      recent: {
+        'need-1': [{
+          id: 'comment-1' as never, needId: 'need-1' as never, author: 'agent',
+          excerpt: 'retracted', createdAt: 1, voided: true,
+        }],
+      },
+    })
+    // Showing "2 comments" beside zero visible entries reads as a contradiction.
+    expect(view.counters).toEqual({})
+    expect(view.recent).toEqual({})
   })
 })

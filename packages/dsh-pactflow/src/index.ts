@@ -1126,6 +1126,9 @@ export class PactFlowService extends TypertRemoteService {
       recordedAt: Date.now(),
     }
     if (recordedRelease === undefined) this.events.append(session, 'pactflow/release-recorded', { v: 1, release })
+    // The wait is over. See clearReviewGate: leaving it behind turns a later
+    // recheck into a permanent, unreversible accusation against our own merge.
+    this.clearReviewGate(session, need.id)
     const currentNeed = this.need(session, need.id)
     const deployed = currentNeed.phase === 'deployed'
       ? currentNeed
@@ -4337,9 +4340,8 @@ export class PactFlowService extends TypertRemoteService {
     const need = this.need(session, request.needId)
     const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${need.id}-closing`]
     const gate = existing?.reviewGate
-    if (existing === undefined || gate === undefined) return { cancelled: false }
-    const { reviewGate: _removed, ...withoutGate } = existing
-    this.appendCleanupRecord(session, withoutGate)
+    if (gate === undefined) return { cancelled: false }
+    this.clearReviewGate(session, need.id)
     return { cancelled: true, pullRequestNumber: gate.pullRequestNumber }
   }
 
@@ -4351,8 +4353,28 @@ export class PactFlowService extends TypertRemoteService {
 
   private persistReviewGate(session: Session, record: PactFlowReviewGateRecord): void {
     const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${record.needId}-closing`]
-    if (existing === undefined) return
+    if (existing === undefined) {
+      // Returning quietly would leave the caller reporting "waiting for review"
+      // while nothing was recorded — and every re-entry would rebuild the record
+      // with recheckCount 0, making the recheck ceiling meaningless.
+      throw new Error(`PactFlow closing cleanup record for need "${record.needId}" is missing; the review gate cannot be recorded`)
+    }
     this.appendCleanupRecord(session, { ...existing, reviewGate: record })
+  }
+
+  /**
+   * Drop the wait state once closing is done with it.
+   *
+   * Left behind, a later recheck observes `merged: true` on a PR the Host itself
+   * merged and verified, judges it "merged outside the platform", and writes
+   * that accusation against our own work into the durable log — permanently,
+   * since nothing reverses it.
+   */
+  private clearReviewGate(session: Session, needId: string): void {
+    const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${needId}-closing`]
+    if (existing?.reviewGate === undefined) return
+    const { reviewGate: _done, ...withoutGate } = existing
+    this.appendCleanupRecord(session, withoutGate)
   }
 
   /**

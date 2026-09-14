@@ -145,6 +145,38 @@ describe('PactFlow review gate fail-closed conditions', () => {
   })
 })
 
+describe('PactFlow review gate checks what it is looking at', () => {
+  it('refuses an observation of a different pull request', () => {
+    // Two PRs can share a head and a base (closed and reopened, or a duplicate),
+    // so head/base drift alone would not notice. Without this the approvals of
+    // ANOTHER pull request would satisfy this gate while the message printed the
+    // recorded number.
+    const verdict = evaluate({}, { number: 9, approvals: 2, checks: [] })
+    expect(verdict).toMatchObject({ kind: 'refused', reason: 'wrong-pull-request' })
+    expect(verdict.kind === 'refused' && verdict.detail).toContain('#9')
+    expect(verdict.kind === 'refused' && verdict.detail).toContain('#7')
+  })
+
+  it('does not call itself ready when a required check was never observed', () => {
+    // The observation simply does not mention ci/test. A check nobody read is
+    // not a check that passed.
+    const verdict = evaluate({}, {
+      approvals: 2, checks: [{ context: 'ci/build', state: 'success' }],
+    })
+    expect(verdict.kind).toBe('waiting')
+    expect(verdict.kind === 'waiting' && verdict.detail).toContain('未观测到必需检查')
+    expect(verdict.kind === 'waiting' && verdict.detail).toContain('ci/test')
+  })
+
+  it('is ready once every required check is both observed and green', () => {
+    const verdict = evaluate({}, {
+      approvals: 2,
+      checks: [{ context: 'ci/build', state: 'success' }, { context: 'ci/test', state: 'success' }],
+    })
+    expect(verdict.kind).toBe('ready')
+  })
+})
+
 describe('PactFlow review gate recheck budget', () => {
   it('keeps waiting when the automatic recheck budget runs out', () => {
     // Exhaustion is not a failure and never a merge: what runs out is the
