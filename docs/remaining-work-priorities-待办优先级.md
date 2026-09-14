@@ -118,3 +118,27 @@ E-19 主目录同步**已执行**（`/Users/ty/Codes/dsh-pactflow` 的 `main` �
 `deployed` 语义 / 不可信代码强隔离 / F03 触发前置 / 跨主机双客户端部署 / A10 的 `tool-invocation` 与 `verification` 两级不可证 / A11 的 token 用量统计 —— 六项均已裁决「保持现状」或「非目标」，按规则**不应再计入待办面**。
 
 A04（Gitea `waiting-review/waiting-checks` 协作闭环）仍是真实环境前置，非实现缺口。
+
+---
+
+## 2026-09-15 收尾：七个 change 的实际推进
+
+| change | 任务 | 状态 | 未完成的是什么 |
+| --- | --- | --- | --- |
+| `manifest-producer-version-guard` | 7/7 | **实施完成，待归档授权** | — |
+| `need-comment-threads` | 15/16 | 实施完成，待归档授权 | 5.1 真实会话中人与模型各发一条 |
+| `node-rerun-authorization` | 23/26 | 实施完成，待归档授权 | 7.1/7.2 真实端到端与真实挂机对照；5.1 收口漂移序列夹具 |
+| `gitea-review-gate-closure` | 22/26 | 实施完成，待归档授权 | 6.1–6.3 真实受保护仓库 + CI + 真人批准；3.3 宿主级外部合并三条（需 closing.spec 的 Gitea 桩夹具） |
+| `agent-skill-composition` | 17/23 | **合入门未过，不得归档** | 3.1–3.4 三个真实模型套件重跑（本 change 自定的合入条件）；5.1 卸载无残留；6.1 真实会话按需加载 |
+| `need-attachments` | 2/18 | 任务 0 完成，主体未实施 | 传输层已选定（Remote 参数直送字节）；阈值待真实宿主实测；主体实施未开始 |
+| `dsh-harness-telemetry` | 0/27 | **任务 0 spike 本机不可执行** | 需拉取按 digest 钉版的 worker 镜像并在容器内连模型；本机无集群与 Harbor 凭据 |
+
+### 未完成项的共同形状
+
+除 `need-attachments` 主体尚未实施、`dsh-harness-telemetry` 卡在 spike 之外，其余全部未完成项都是**同一类**：需要真实集群 / 真实模型额度 / 真人参与的验收。本机不可达，按「未运行不得计为通过」如实留空，**没有一项是靠削弱断言换来的绿**。
+
+### 需要你决定的
+
+1. **归档授权**：前四个 change 已实施完成（`agent-skill-composition` 除外，它的合入门未过）。归档需你授权。
+2. **`agent-skill-composition` 的处置**：persona 收缩已提交但合同要求三个真实套件通过才算合入。要么安排跑那三个套件，要么显式裁决放宽该条件（不建议——那三个套件正是用来证明收缩没让模型行为退化的）。
+3. **是否继续实施 `need-attachments` 主体**：传输层已定，可以开工；但终验依赖 `artifact-ref-handoff` 5.1/7.1，同样卡真实环境。

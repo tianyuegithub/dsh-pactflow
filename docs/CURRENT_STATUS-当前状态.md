@@ -7,8 +7,8 @@
 
 > **历史固化快照（2026-09-11，`36d9057`）**：该提交当时的终态记录，**已不再描述当前基线**（当前基线见下方「基线」段，距此快照 36 个提交）。用户指令「把当前成果固化收尾」。终态：`check` 72 文件 / 561 测试 / 13 包产物全绿；`openspec validate --all --strict` 37/37；46 change 归档 / 37 spec；`origin` 与主目录 `/Users/ty/Codes/dsh-pactflow`（`main`）三方一致；工作树干净。发布物 `dist/dsh-pactflow-0.2.1.tgz` SHA256 `ce9b3537f58fdbd3eb145789b1f191dd2ff512775456c3427574ca1c92edfae0`（构建确定性由「build 前后产物哈希相同 + 测试直接导入产物」保证）。密封扫描收据两份（`…93cb38201725` / `…0178b1d09938`，后者覆盖全部当日代码；结论 `inconclusive`，三族处置见 `docs/security-scan-20260911.md`）。**无待用户裁决事项**；此后启动新工作即属新目标立项（见 §4 与待办清单）。
 
-**基线（2026-09-15 实测）**：分支 `main`，HEAD `f8fddaf`（距上述固化快照 36 个提交）；`pnpm run check` = **104 文件 / 745 用例（738 通过 / 7 按环境门控跳过 / 0 失败）/ 229 套件全过 / 19 个必需包产物**，全绿；
-`openspec validate --all --strict` **49/49** 通过（**48 个 spec / 61 个已归档 change / 1 个活跃 change `artifact-ref-handoff`**）。7 个跳过全部来自未武装的真实存储套件（`artifact-store.real` 2、`artifact-handoff.real` 4）与 1 项平台相关预检，**按规则不计为通过**。
+**基线（2026-09-15 收尾实测）**：分支 `main`（距 2026-09-11 固化快照 59 个提交）；`pnpm run check` = **114 文件 / 893 用例（886 通过 / 7 按环境门控跳过 / 0 失败）/ 25 个必需包产物**，全绿；
+`openspec validate --all --strict` **56/56** 通过（**48 个 spec / 61 个已归档 change / 8 个活跃 change**）。7 个跳过全部来自未武装的真实存储套件（`artifact-store.real` 2、`artifact-handoff.real` 4）与 1 项平台相关预检，**按规则不计为通过**。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
@@ -58,6 +58,11 @@
 | Web 控制台原生组成 | passed | `client-composition-guard`；`client-composition.spec.ts`（3）。守护完成条件「无 iframe、无第二层 Web 壳、无私有 DSH 源码导入」 |
 | 出网目标来源约束 | passed | `egress-url-origin`；`egress-url-origin.spec.ts`（4）。Agent 面只能以注册 id 引用出网目标，不接受任意 URL |
 | 大内容外置传址（第七类资源） | **partial** | `artifact-ref-handoff`（**活跃 change，未归档**）；隔离级全绿：`artifact-store`（11）、`artifact-store-binding`（7）、`artifact-upload-gate`（6）、`artifact-retention`（5）、`artifact-channels`（8）、`k3s-artifact-store`（7）、`worker-log-upload`（6）。真实 RustFS 连通已验（SigV4 PUT/GET/HEAD/LIST、后端不返回 versionId）；**5.1/7.1 全链真实验收 not-run**——见 §4 |
+| 分发清单版本准确 | passed | `operator-doc-accuracy`（扩展）；`release-manifest-accuracy.spec.ts`（3）。清单 `hostEventProducerVersion` / `hostPluginVersion` 与代码事实绑定，`src/index.ts` 的 `VERSION` 也绑到包版本；任一漂移即失败并指名两侧取值。**修复了一处自引入即存在的漂移**（清单写 0.5.0 而宿主注册 0.6.0，全仓库无人校验） |
+| 需求级评论 | **partial** | `need-comment-threads`（**活跃 change，未归档**）；`comment-threads`（19，fold 与有界投影）、`comment-host`（17，真实服务集成）、`producer-upgrade`（4，老会话可写性真实验证）。作者身份由入口决定（参数里无 author 字段）；评论零授权；agent 评论受 `maxAgentCommentsPerSubject` 预算；作废不删除；已作废不进模型上下文。**剩真实会话验证（5.1）未跑** |
+| 受保护分支收口等待态 | **partial** | `gitea-review-gate-closure`（**活跃 change，未归档**）；`review-gate`（27）、`review-gate-boundary`（8）、`review-gate-persistence`（7）、`autopilot-review-gate`（8）。补上了「仓库一开分支保护、架构 §4 最强保证就自动失效」的洞：收口不再放弃而是持久等待，复查齐备后**重新调用 `closeGitNeed`** 故核验实现唯一是结构性的。**剩真实受保护仓库端到端（6.1–6.3）与宿主级外部合并三条（3.3）未跑** |
+| 已成功节点重跑 | **partial** | `node-rerun-authorization`（**活跃 change，未归档**）；`node-rerun.spec.ts`（19，全程真实 Git 与真实派发）。架构 §3.4 措辞经用户裁决修订为「未经所有者显式授权的终态复活」；fold 层此前并无该判定（拒绝只在服务层），现下沉并要求事件内持久授权证据；下游只标记不级联；挂机不得自动选中含重跑的方案。**剩真实端到端（7.1/7.2）与收口漂移序列（5.1）未跑** |
+| Agent Skill 组合 | **blocked（合入门未过）** | `agent-skill-composition`（**活跃 change，未归档**）；`agent-skill-composition.spec.ts`（21，红线守卫双向检查）+ `preset.spec.ts` **真实挂载审计通过**。六个随包 skill 挂载成功，persona **4676 → 1603 字节（-66%）**。但本 change 自己写死的合入条件是「收缩后三个真实模型套件（`test:real-worker` / `test:autopilot` / `test:worker-interactions`）重跑全部通过」——**本机不可达故未跑，因此收缩不得视为完成，该 change 不得归档** |
 
 ## 1.5 仓库纪律守卫（元能力）
 
