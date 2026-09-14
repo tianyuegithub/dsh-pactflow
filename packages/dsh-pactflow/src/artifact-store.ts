@@ -69,8 +69,8 @@ export const PACTFLOW_CHANNEL_LIMITS: Readonly<Record<PactFlowBoundedChannel, nu
    * 32 MiB, for three reasons. Latency: 432ms round-trip, still interactive, while
    * the next rung up already feels stalled. Memory: the whole payload is resident
    * on both client and host at once, so the real cost is several times this.
-   * And failure shape — the one that decides it: 32 MiB sits an order of magnitude
-   * below every measured or structural limit, so exceeding it is always OUR refusal
+   * And failure shape — the one that decides it: 32 MiB sits a factor of 8 under what was
+   * measured to pass and 16 under the structural limit, so exceeding it is always OUR refusal
    * with our own message, never V8's `Invalid string length` or an opaque transport
    * error. The contract promises a local pre-send refusal carrying an oversize code
    * and guidance; that promise only holds while the threshold stays far from the

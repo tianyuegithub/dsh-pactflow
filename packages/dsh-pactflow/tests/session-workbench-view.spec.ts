@@ -270,11 +270,25 @@ describe('WorkbenchEvidenceView', () => {
       runs: { byId: {} },
       delivery: { ...value.delivery, reviews: {}, documents: {}, releases: {} },
     })
-    expect(html.match(/<section/g)).toHaveLength(2)
-    expect(html).toContain('该需求尚未记录评审决定')
-    expect(html).toContain('未记录成功的命令验证或失败运行证据')
-    expect(html).toContain('该需求尚未关联交付文档')
-    expect(html).toContain('没有宿主交付记录')
+    // The point is that the four "nothing recorded yet" statements sit together in
+    // ONE section, rather than fragmenting into four empty panels — not that the
+    // delivery tab may only ever hold two sections. Attachments are a separate
+    // subject with its own section, and counting sections conflated the two.
+    for (const statement of [
+      '该需求尚未记录评审决定', '未记录成功的命令验证或失败运行证据',
+      '该需求尚未关联交付文档', '没有宿主交付记录',
+    ]) expect(html).toContain(statement)
+    // The three delivery-evidence statements stay together in the「验收与交付」
+    // section rather than fragmenting into three empty panels. Previously this was
+    // written as「the tab renders exactly 2 sections」, which also happened to pin
+    // the tab's total section count — so adding attachments, a separate subject
+    // with its own section, failed a case that was never about attachments.
+    const evidence = html.slice(html.indexOf('验收与交付'))
+    const first = evidence.indexOf('未记录成功的命令验证或失败运行证据')
+    const last = evidence.indexOf('没有宿主交付记录')
+    expect(first).toBeGreaterThan(-1)
+    expect(last).toBeGreaterThan(first)
+    expect(evidence.slice(first, last)).not.toContain('<section')
   })
 
   it('进展页为阻塞节点显示最近运行原因', () => {

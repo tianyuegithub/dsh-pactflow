@@ -77,6 +77,12 @@ export interface OverlayInjected {
   /** A11: explicit human resume for a paused node. */
   resumeNode(sessionId: string, nodeId: string, expectedRevision: number, signal: AbortSignal): Promise<unknown>
   artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{ readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string }>
+  linkAttachment?(sessionId: string, request: {
+    readonly needId: string; readonly fileName: string; readonly mediaType: string; readonly contentBase64: string
+  }, signal?: AbortSignal): Promise<unknown>
+  readAttachment?(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<{
+    readonly contentBase64: string
+  }>
   rerunPreview(sessionId: string, request: { readonly nodeId: string }, signal?: AbortSignal): Promise<{
     readonly staleInputs: readonly { readonly dependency: string; readonly branch: string; readonly recorded: string; readonly latest: string }[]
     readonly unresolved: readonly string[]
@@ -119,7 +125,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, rerunPreview, rerunNode, recheckReviewGate, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, linkAttachment, readAttachment, rerunPreview, rerunNode, recheckReviewGate, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const sessionCwd = useSessions(sessions => state.sessionId === null ? undefined : sessions.byId[state.sessionId]?.cwd)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
@@ -397,6 +403,18 @@ export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover
             <span className="pf-workbench-muted">{snapshot.delivery.autopilots?.[selectedNeed.id] ? `挂机：${({ running: '运行中', paused: '已暂停', blocked: '已阻塞', stopped: '已停止', completed: '已完成' })[snapshot.delivery.autopilots[selectedNeed.id]!.state]}` : '尚未开启挂机'}</span></div>}
           <WorkbenchEvidenceView snapshot={snapshot} needId={selectedNeed.id} tab={tab}
             onLoadArtifactLog={(runId, signal) => artifactLog(String(state.sessionId), runId, signal)}
+            {...linkAttachment === undefined || selectedNeed === undefined ? {} : {
+              onLinkAttachment: async (input: { readonly fileName: string; readonly mediaType: string; readonly contentBase64: string }) => {
+                await linkAttachment(String(state.sessionId), { needId: String(selectedNeed.id), ...input })
+                // Go back through the overlay's own load path rather than fetching
+                // here: that path carries the generation guard, so a reload raced by
+                // a session switch is discarded instead of painting the wrong Need.
+                overlay.set({ ...overlay.getSnapshot(), phase: 'idle' })
+              },
+            }}
+            {...readAttachment === undefined ? {} : {
+              onReadAttachment: async (attachmentId: string) => { await readAttachment(String(state.sessionId), attachmentId) },
+            }}
             onAddComment={async body => { await addComment(String(state.sessionId), { needId: selectedNeed.id, body }) }}
             onVoidComment={async commentId => { await voidComment(String(state.sessionId), { commentId }) }}
             onLoadComments={signal => listComments(String(state.sessionId), { needId: selectedNeed.id, limit: 200 }, signal)}

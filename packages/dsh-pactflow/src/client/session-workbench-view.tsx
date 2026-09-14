@@ -1,7 +1,10 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { PACTFLOW_ARTIFACT_OVERSIZE_CODE, PACTFLOW_CHANNEL_LIMITS } from '../artifact-store.ts'
+
 import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type {
+  PactFlowAttachment,
   PactFlowDiscussionEntry,
   PactFlowDocument,
   PactFlowNode,
@@ -11,6 +14,9 @@ import type {
   PactFlowValidationEvidence,
 } from '../types.ts'
 import { nodeStateLabel, phaseLabel } from './workbench-labels.ts'
+
+/** The attachment channel threshold, taken from the single source that defines it. */
+const PACTFLOW_ATTACHMENT_MAX_BYTES = PACTFLOW_CHANNEL_LIMITS.attachment
 
 export interface WorkbenchEvidenceViewProps {
   readonly snapshot: PactFlowSnapshot
@@ -35,6 +41,13 @@ export interface WorkbenchEvidenceViewProps {
     readonly externallyMerged?: boolean | undefined
   } | undefined
   readonly onRecheckReviewGate?: () => Promise<void>
+  /** need-attachments: upload one attachment, and read one back verified. */
+  readonly onLinkAttachment?: (input: {
+    readonly fileName: string; readonly mediaType: string; readonly contentBase64: string
+  }) => Promise<void>
+  readonly onReadAttachment?: (attachmentId: string) => Promise<void>
+  /** Absent when the project has no artifact store bound; the entry says so. */
+  readonly attachmentStoreBound?: boolean
   /** node-rerun-authorization: preview and authorize re-running a succeeded node. */
   readonly onPreviewRerun?: (nodeId: string) => Promise<{
     readonly staleInputs: readonly { readonly dependency: string; readonly branch: string; readonly recorded: string; readonly latest: string }[]
@@ -553,6 +566,87 @@ function ReviewGate({
   </Section>
 }
 
+/**
+ * Attachments on this Need: link one, and read one back.
+ *
+ * The size check happens HERE, before a single byte is sent. The contract asks
+ * for a local pre-send refusal carrying an oversize code and guidance, and the
+ * reason it asks is that the alternative is uploading tens of megabytes only to
+ * be told no — or worse, uploading part of them. The Host refuses again on its
+ * own side; this is not a substitute for that check, it is the one that saves the
+ * transfer.
+ *
+ * With no artifact store bound the entry states that and stays disabled. There is
+ * deliberately no inline fallback: an attachment that cannot be externalized is
+ * not an attachment that gets stored somewhere else instead.
+ */
+function Attachments({ attachments, storeBound, onLink, onRead }: {
+  readonly attachments: readonly PactFlowAttachment[]
+  readonly storeBound?: boolean | undefined
+  readonly onLink?: ((input: {
+    readonly fileName: string; readonly mediaType: string; readonly contentBase64: string
+  }) => Promise<void>) | undefined
+  readonly onRead?: ((attachmentId: string) => Promise<void>) | undefined
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const pick = async (file: File): Promise<void> => {
+    setError(null)
+    if (file.size > PACTFLOW_ATTACHMENT_MAX_BYTES) {
+      // The same code the Host would return, stated before anything is sent.
+      setError(`${PACTFLOW_ARTIFACT_OVERSIZE_CODE}：附件 ${formatBytes(file.size)} 超过 ${formatBytes(PACTFLOW_ATTACHMENT_MAX_BYTES)} 上限，未发送任何内容。请改为上传更小的文件，或把大内容放进对象存储后以地址引用。`)
+      return
+    }
+    if (onLink === undefined) return
+    setBusy(true)
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      let binary = ''
+      for (const byte of bytes) binary += String.fromCharCode(byte)
+      await onLink({
+        fileName: file.name,
+        mediaType: file.type === '' ? 'application/octet-stream' : file.type,
+        contentBase64: btoa(binary),
+      })
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally { setBusy(false) }
+  }
+
+  return <Section title="附件">
+    {storeBound === false
+      ? <p style={mutedStyle}>本项目未绑定对象存储，附件入口不可用。附件内容必须外置存放，因此不会退回为内联大文本，也不会写入任何替代位置。请先在项目设置里绑定对象存储。</p>
+      : <div style={{ display: 'grid', gap: 8 }}>
+        <input type="file" disabled={busy || onLink === undefined}
+          onChange={event => {
+            const file = event.currentTarget.files?.[0]
+            if (file !== undefined) void pick(file)
+          }} />
+        {error === null ? null : <p style={{ ...mutedStyle, color: '#b42318' }}>{error}</p>}
+      </div>}
+    {attachments.length === 0
+      ? <p style={mutedStyle}>暂无附件。</p>
+      : <ul style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 6 }}>
+        {attachments.map(attachment => <li key={attachment.id}>
+          <span>{attachment.fileName}</span>
+          <span style={mutedStyle}>　{attachment.mediaType}　{formatBytes(attachment.ref.bytes)}</span>
+          {/* The digest is shown because reading verifies against it: a mismatch
+              is a refusal, not a silent substitution. */}
+          <span style={mutedStyle}>　sha256 {attachment.ref.hash.slice(0, 12)}…</span>
+          {onRead === undefined ? null
+            : <Button size="sm" variant="ghost" onClick={() => { void onRead(attachment.id) }}>读取并校验</Button>}
+        </li>)}
+      </ul>}
+  </Section>
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+}
+
 function DeliveryView({
   reviews,
   documents,
@@ -636,7 +730,8 @@ export function WorkbenchEvidenceView({
   tab,
   onResume,
   resumingNodeId, onLoadArtifactLog, onAddComment, onVoidComment, onLoadComments,
-  reviewGate, onRecheckReviewGate, onPreviewRerun, onRerun }: WorkbenchEvidenceViewProps) {
+  reviewGate, onRecheckReviewGate, onPreviewRerun, onRerun,
+  onLinkAttachment, onReadAttachment, attachmentStoreBound }: WorkbenchEvidenceViewProps) {
   const need = snapshot.needs.byId[needId]
   if (need === undefined) {
     return <div style={rootStyle}><Section title="需求内容"><p style={mutedStyle}>所选需求已不在当前会话快照中，请重新选择需求。</p></Section></div>
@@ -648,6 +743,7 @@ export function WorkbenchEvidenceView({
   const reviews = Object.values(snapshot.delivery.reviews).filter(review => review.needId === needId)
   const documents = Object.values(snapshot.delivery.documents).filter(document => document.needId === needId)
   const releases = Object.values(snapshot.delivery.releases).filter(release => release.needId === needId)
+  const attachments = Object.values(snapshot.delivery.attachments ?? {}).filter(attachment => attachment.needId === needId)
 
   return <div style={rootStyle}>
     {tab === 'progress'
@@ -659,6 +755,8 @@ export function WorkbenchEvidenceView({
       : tab === 'runs'
         ? <RunsView nodes={nodes} runs={runs} onLoadArtifactLog={onLoadArtifactLog} />
         : <>{reviewGate === undefined ? null : <ReviewGate gate={reviewGate} onRecheck={onRecheckReviewGate} />}
-          <DeliveryView reviews={reviews} documents={documents} runs={runs} releases={releases} /></>}
+          <DeliveryView reviews={reviews} documents={documents} runs={runs} releases={releases} />
+          <Attachments attachments={attachments} storeBound={attachmentStoreBound}
+            onLink={onLinkAttachment} onRead={onReadAttachment} /></>}
   </div>
 }

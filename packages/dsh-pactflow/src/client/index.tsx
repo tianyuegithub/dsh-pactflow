@@ -335,6 +335,16 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },
+      linkAttachment: async (sessionId, request, signal) => {
+        const result = await pactflow.linkAttachment({ sessionId, request }, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      readAttachment: async (sessionId, attachmentId, signal) => {
+        const result = await pactflow.readAttachment({ sessionId, attachmentId }, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
     }),
   }, PactFlowOverlay))
   return disposeRemote
