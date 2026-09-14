@@ -7,6 +7,11 @@ import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type {
+  PactFlowCollaborationProjection,
+  PactFlowCollaborationState,
+  PactFlowComment,
+  PactFlowCommentCounters,
+  PactFlowCommentSummary,
   PactFlowDagProjection,
   PactFlowDagState,
   PactFlowDeliveryProjection,
@@ -112,7 +117,38 @@ export const PACTFLOW_EVENT_TYPES_V0_3 = [
 export const PACTFLOW_EVENT_TYPES_V0_4 = ['pactflow/autopilot-updated', ...PACTFLOW_EVENT_TYPES_V0_3] as const
 export const PACTFLOW_EVENT_TYPES_V0_5 = [...PACTFLOW_EVENT_TYPES_V0_4, 'pactflow/worker-interaction'] as const
 export const PACTFLOW_EVENT_TYPES_V0_6 = PACTFLOW_EVENT_TYPES_V0_5
-export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_6
+
+/**
+ * Exact vocabulary written by dsh-pactflow 0.7.0 (comment threads). Spelled out
+ * in full rather than spread from V0_6: the historical tuples are a read
+ * compatibility contract, and one deriving from another turns a future edit of
+ * the base into a silent rewrite of history.
+ */
+export const PACTFLOW_EVENT_TYPES_V0_7 = [
+  'pactflow/autopilot-updated',
+  'pactflow/cleanup-recorded',
+  'pactflow/comment-added',
+  'pactflow/comment-voided',
+  'pactflow/document-linked',
+  'pactflow/need-created',
+  'pactflow/need-updated',
+  'pactflow/node-created',
+  'pactflow/node-updated',
+  'pactflow/phase-transitioned',
+  'pactflow/project-configured',
+  'pactflow/project-initialized',
+  'pactflow/release-recorded',
+  'pactflow/review-recorded',
+  'pactflow/run-bound',
+  'pactflow/run-claimed',
+  'pactflow/run-queue-cancelled',
+  'pactflow/run-queued',
+  'pactflow/run-renewed',
+  'pactflow/run-settled',
+  'pactflow/worker-interaction',
+] as const
+
+export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_7
 
 /**
  * The external producer version this build declares when it writes. It travels
@@ -121,7 +157,7 @@ export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_6
  * than inside the decorated service class: unit tests never import `index.ts` as
  * a module, and a number nothing can read is a number nothing can guard.
  */
-export const PACTFLOW_EVENT_PRODUCER_VERSION = '0.6.0'
+export const PACTFLOW_EVENT_PRODUCER_VERSION = '0.7.0'
 
 const gitAuthSchema = pactFlowSchema<PactFlowGitAuth>(z.object({
   kind: z.literal('https-token'), username: z.string().min(1), credentialRef: z.string().min(1),
@@ -252,6 +288,53 @@ const reviewSchema = pactFlowSchema<PactFlowReview>(z.object({
   executionPlan: executionPlanAuthorizationSchema.optional(),
 }))
 
+/**
+ * How many recent summaries the resident projection keeps per Need, and how much
+ * of a body each summary quotes. These shape the projection, they are not
+ * budgets: the body's own size limit is the run budget's `maxOutputBytes`, which
+ * stays the single authority for stored text.
+ */
+export const PACTFLOW_COMMENT_RECENT_LIMIT = 20
+export const PACTFLOW_COMMENT_EXCERPT_BYTES = 280
+
+const commentSchema = pactFlowSchema<PactFlowComment>(z.object({
+  id: pactFlowIdSchema<'comment'>(), needId: pactFlowIdSchema<'need'>(),
+  nodeId: pactFlowIdSchema<'node'>().optional(), runId: pactFlowIdSchema<'run'>().optional(),
+  author: z.enum(['human', 'agent']),
+  body: z.string().min(1),
+  createdAt: z.number().int().nonnegative(),
+}).refine(value => value.nodeId === undefined || value.runId === undefined,
+  'comment targets at most one of a node or a Run'))
+
+const commentSummarySchema = pactFlowSchema<PactFlowCommentSummary>(z.object({
+  id: pactFlowIdSchema<'comment'>(), needId: pactFlowIdSchema<'need'>(),
+  nodeId: pactFlowIdSchema<'node'>().optional(), runId: pactFlowIdSchema<'run'>().optional(),
+  author: z.enum(['human', 'agent']),
+  excerpt: z.string(),
+  createdAt: z.number().int().nonnegative(),
+  voided: z.boolean(),
+}))
+
+const commentCountersSchema = pactFlowSchema<PactFlowCommentCounters>(z.object({
+  total: z.number().int().nonnegative(), agent: z.number().int().nonnegative(),
+}))
+
+/** Which subject a comment hangs on. Node and Run narrow inside their Need. */
+export function pactFlowCommentSubjectKey(
+  comment: Pick<PactFlowComment, 'needId' | 'nodeId' | 'runId'>,
+): string {
+  if (comment.nodeId !== undefined) return `node:${comment.nodeId}`
+  if (comment.runId !== undefined) return `run:${comment.runId}`
+  return `need:${comment.needId}`
+}
+
+/** Bounded quote of a body for the resident tail; never the body itself. */
+export function pactFlowCommentExcerpt(body: string): string {
+  const buffer = Buffer.from(body, 'utf8')
+  if (buffer.byteLength <= PACTFLOW_COMMENT_EXCERPT_BYTES) return body
+  return `${buffer.subarray(0, PACTFLOW_COMMENT_EXCERPT_BYTES).toString('utf8').replace(/�$/, '')}…`
+}
+
 const documentSchema = pactFlowSchema<PactFlowDocument>(z.object({
   id: pactFlowIdSchema<'document'>(), needId: pactFlowIdSchema<'need'>(),
   kind: z.enum(['requirement', 'design', 'plan', 'review', 'verification', 'release']),
@@ -324,6 +407,11 @@ const eventPayloadSchemas: { readonly [Type in PactFlowEventType]: z.ZodType<Ses
   'pactflow/run-bound': z.object({ v: z.literal(1), run: runSchema, node: nodeSchema }),
   'pactflow/run-renewed': z.object({ v: z.literal(1), run: runSchema, node: nodeSchema }),
   'pactflow/run-settled': z.object({ v: z.literal(1), run: runSchema, node: nodeSchema }),
+  'pactflow/comment-added': z.object({ v: z.literal(1), comment: commentSchema }),
+  'pactflow/comment-voided': z.object({
+    v: z.literal(1), commentId: pactFlowIdSchema<'comment'>(), needId: pactFlowIdSchema<'need'>(),
+    voidedAt: z.number().int().nonnegative(),
+  }),
   'pactflow/document-linked': z.object({ v: z.literal(1), document: documentSchema }),
   'pactflow/review-recorded': z.object({ v: z.literal(1), review: reviewSchema }),
   'pactflow/release-recorded': z.object({ v: z.literal(1), release: releaseSchema }),
@@ -653,10 +741,123 @@ export const pactflowDeliveryProjection: ProjectionDefinition<'pactflowDelivery'
   wire: { viewSchema: deliveryProjectionSchema, view: pactFlowDeliveryView },
 }
 
+const collaborationProjectionSchema = pactFlowSchema<PactFlowCollaborationProjection>(z.object({
+  counters: z.record(z.string(), commentCountersSchema),
+  recent: z.record(z.string(), z.array(commentSummarySchema)),
+}))
+
+const collaborationStateSchema = pactFlowSchema<PactFlowCollaborationState>(z.object({
+  counters: z.record(z.string(), commentCountersSchema),
+  recent: z.record(z.string(), z.array(commentSummarySchema)),
+  needIds: z.array(pactFlowIdSchema<'need'>()),
+  nodeNeeds: z.record(z.string(), pactFlowIdSchema<'need'>()),
+  runNeeds: z.record(z.string(), pactFlowIdSchema<'need'>()),
+}))
+
+/**
+ * Discussion projection.
+ *
+ * It holds per-subject counters and a bounded per-Need tail, never the bodies:
+ * paging the full history is the Host's job, so this stays flat as a Need
+ * accumulates comments.
+ *
+ * Voiding marks a summary in place when the comment is still inside the tail;
+ * for one that has aged out there is nothing resident to mark, and the fold
+ * makes no attempt to prove the target ever existed — proving it would need an
+ * index of every comment id ever written, which is exactly the unbounded growth
+ * this projection exists to avoid. Existence is checked at the write boundary,
+ * where the full event history is available. A stray void is therefore a no-op
+ * rather than something that can inflate a counter: `total` and `agent` move
+ * only on `comment-added`.
+ */
+export const pactflowCollaborationProjection: ProjectionDefinition<'pactflowCollaboration'> = {
+  key: 'pactflowCollaboration', stateVersion: 1, stateSchema: collaborationStateSchema,
+  init: () => ({ counters: {}, recent: {}, needIds: [], nodeNeeds: {}, runNeeds: {} }),
+  apply: (state, event) => {
+    event = parseEventPayload(event)
+    if (event.type === 'pactflow/need-created') {
+      const id = event.data.need.id
+      return state.needIds.includes(id) ? state : { ...state, needIds: [...state.needIds, id] }
+    }
+    if (event.type === 'pactflow/node-created' || event.type === 'pactflow/node-updated') {
+      const node = event.data.node
+      if (!state.needIds.includes(node.needId)) throw new Error('PactFlow node refers to a missing Need')
+      const owner = state.nodeNeeds[node.id]
+      if (owner !== undefined && owner !== node.needId) throw new Error('PactFlow node changed Need ownership')
+      return owner === node.needId ? state : { ...state, nodeNeeds: { ...state.nodeNeeds, [node.id]: node.needId } }
+    }
+    if (event.type === 'pactflow/run-claimed') {
+      const needId = event.data.node.needId
+      if (!state.needIds.includes(needId)) throw new Error('PactFlow Run refers to a missing Need')
+      const owner = state.runNeeds[event.data.run.id]
+      if (owner !== undefined && owner !== needId) throw new Error('PactFlow Run changed Need ownership')
+      return owner === needId ? state : { ...state, runNeeds: { ...state.runNeeds, [event.data.run.id]: needId } }
+    }
+    if (event.type === 'pactflow/comment-added') {
+      versioned(event)
+      const comment = event.data.comment
+      if (!state.needIds.includes(comment.needId)) throw new Error('PactFlow comment refers to a missing Need')
+      if (comment.nodeId !== undefined) {
+        const owner = state.nodeNeeds[comment.nodeId]
+        if (owner === undefined) throw new Error(`PactFlow comment refers to a missing node "${comment.nodeId}"`)
+        if (owner !== comment.needId) throw new Error(`PactFlow comment crosses Needs: node "${comment.nodeId}" belongs to another Need`)
+      }
+      if (comment.runId !== undefined) {
+        const owner = state.runNeeds[comment.runId]
+        if (owner === undefined) throw new Error(`PactFlow comment refers to a missing Run "${comment.runId}"`)
+        if (owner !== comment.needId) throw new Error(`PactFlow comment crosses Needs: Run "${comment.runId}" belongs to another Need`)
+      }
+      const tail = state.recent[comment.needId] ?? []
+      // Replaying the same event must not double-count.
+      if (tail.some(entry => entry.id === comment.id)) return state
+      const key = pactFlowCommentSubjectKey(comment)
+      const counters = state.counters[key] ?? { total: 0, agent: 0 }
+      const summary: PactFlowCommentSummary = {
+        id: comment.id, needId: comment.needId,
+        ...(comment.nodeId === undefined ? {} : { nodeId: comment.nodeId }),
+        ...(comment.runId === undefined ? {} : { runId: comment.runId }),
+        author: comment.author, excerpt: pactFlowCommentExcerpt(comment.body),
+        createdAt: comment.createdAt, voided: false,
+      }
+      return {
+        ...state,
+        counters: {
+          ...state.counters,
+          [key]: { total: counters.total + 1, agent: counters.agent + (comment.author === 'agent' ? 1 : 0) },
+        },
+        recent: {
+          ...state.recent,
+          [comment.needId]: [...tail, summary].slice(-PACTFLOW_COMMENT_RECENT_LIMIT),
+        },
+      }
+    }
+    if (event.type === 'pactflow/comment-voided') {
+      versioned(event)
+      const { commentId, needId } = event.data
+      if (!state.needIds.includes(needId)) throw new Error('PactFlow comment void refers to a missing Need')
+      const tail = state.recent[needId]
+      if (tail === undefined) return state
+      let changed = false
+      const next = tail.map(entry => {
+        if (entry.id !== commentId || entry.voided) return entry
+        changed = true
+        return { ...entry, voided: true }
+      })
+      return changed ? { ...state, recent: { ...state.recent, [needId]: next } } : state
+    }
+    return state
+  },
+  wire: {
+    viewSchema: collaborationProjectionSchema,
+    view: state => ({ counters: state.counters, recent: state.recent }),
+  },
+}
+
 export const PACTFLOW_PROJECTIONS = [
   pactflowProjectProjection,
   pactflowNeedsProjection,
   pactflowDagProjection,
   pactflowRunsProjection,
   pactflowDeliveryProjection,
+  pactflowCollaborationProjection,
 ] as const

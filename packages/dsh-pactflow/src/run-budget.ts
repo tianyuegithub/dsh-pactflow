@@ -9,6 +9,13 @@ export interface PactFlowRunBudget {
   readonly maxAttempts: number
   /** Maximum bytes of captured output/log text kept for one observation. */
   readonly maxOutputBytes: number
+  /**
+   * Maximum comments an agent may leave on one subject (Need, node or Run).
+   * Comments are log-only and cannot be deleted, so an unbounded agent is an
+   * unbounded, unclearable pile. Humans are not subject to this budget: the cap
+   * exists to bound what a model writes, not what a person decides to say.
+   */
+  readonly maxAgentCommentsPerSubject: number
 }
 
 export const PACTFLOW_DEFAULT_RUN_BUDGET: PactFlowRunBudget = {
@@ -16,11 +23,12 @@ export const PACTFLOW_DEFAULT_RUN_BUDGET: PactFlowRunBudget = {
   // Matches the long-standing outcome/log cap so wiring the budget in does not
   // silently enlarge stored text.
   maxOutputBytes: 4_096,
+  maxAgentCommentsPerSubject: 20,
 }
 
 export type PactFlowBudgetVerdict =
   | { readonly exhausted: false }
-  | { readonly exhausted: true; readonly reason: 'attempts' | 'output-bytes'; readonly detail: string }
+  | { readonly exhausted: true; readonly reason: 'attempts' | 'output-bytes' | 'agent-comments'; readonly detail: string }
 
 /** Whether the next attempt is still within budget. */
 export function evaluateAttemptBudget(maxAttempts: number, nextAttempt: number): PactFlowBudgetVerdict {
@@ -31,6 +39,26 @@ export function evaluateAttemptBudget(maxAttempts: number, nextAttempt: number):
     exhausted: true,
     reason: 'attempts',
     detail: `attempt ${String(nextAttempt)} exceeds the budget of ${String(maxAttempts)} attempts`,
+  }
+}
+
+/**
+ * Whether one more agent comment on this subject is still within budget. The
+ * caller passes the count already recorded for that exact subject; `human`
+ * authors never reach here.
+ */
+export function evaluateAgentCommentBudget(maxAgentComments: number, recorded: number): PactFlowBudgetVerdict {
+  if (!Number.isSafeInteger(maxAgentComments) || maxAgentComments < 1) {
+    throw new Error('PactFlow agent comment budget must be a positive integer')
+  }
+  if (!Number.isSafeInteger(recorded) || recorded < 0) {
+    throw new Error('PactFlow recorded agent comment count must be a non-negative integer')
+  }
+  if (recorded < maxAgentComments) return { exhausted: false }
+  return {
+    exhausted: true,
+    reason: 'agent-comments',
+    detail: `subject already holds ${String(recorded)} agent comment(s), the budget is ${String(maxAgentComments)}`,
   }
 }
 

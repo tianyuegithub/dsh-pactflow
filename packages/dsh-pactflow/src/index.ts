@@ -38,7 +38,9 @@ import {
   PACTFLOW_EVENT_TYPES_V0_4,
   PACTFLOW_EVENT_TYPES_V0_5,
   PACTFLOW_EVENT_TYPES_V0_6,
+  PACTFLOW_EVENT_TYPES_V0_7,
   PACTFLOW_PROJECTIONS,
+  pactFlowCommentSubjectKey,
   PACTFLOW_NEXT_PHASE as NEXT_PHASE,
   pactFlowDeliveryView,
 } from './domain.ts'
@@ -119,14 +121,23 @@ import {
 import { PactFlowProjectCapacity } from './project-capacity.ts'
 import { PactFlowExecutionCapacity } from './execution-capacity.ts'
 import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
-import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAttemptBudget } from './run-budget.ts'
+import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAgentCommentBudget, evaluateAttemptBudget } from './run-budget.ts'
 import { assertWithinChannelLimit, PactFlowArtifactStoreClient } from './artifact-store.ts'
 import { harnessCapabilityProfile } from './harness-capabilities.ts'
 import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
 import { staleCodeInputs } from './input-staleness.ts'
 import { PACTFLOW_DEFAULT_RETENTION_BYTES, PACTFLOW_DEFAULT_RETENTION_MS, measureRetainedSceneBytes, summarizeRetentionCapacity } from './retention-policy.ts'
 import type { PactFlowRetentionSummary } from './types.ts'
-import { PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
+import { PactFlowCommentId, PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
+import type {
+  PactFlowAddCommentRequest,
+  PactFlowCollaborationState,
+  PactFlowComment,
+  PactFlowCommentAuthor,
+  PactFlowCommentPage,
+  PactFlowListCommentsRequest,
+  PactFlowRecordedComment,
+} from './types.ts'
 import type {
   BindPactFlowGitRequest,
   PactFlowAdoptWorkspaceGitRequest,
@@ -457,10 +468,11 @@ export class PactFlowService extends TypertRemoteService {
     ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.3.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_3, mode: 'read-only' })
     ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.4.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_4, mode: 'read-only' })
     ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.5.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_5, mode: 'read-only' })
+    ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.6.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_6, mode: 'read-only' })
     this.events = ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
       version: EVENT_PRODUCER_VERSION,
-      eventTypes: PACTFLOW_EVENT_TYPES_V0_6,
+      eventTypes: PACTFLOW_EVENT_TYPES_V0_7,
     })
     for (const projection of PACTFLOW_PROJECTIONS) ctx.sessionProjections.register(projection as never)
     this.interactionSigner = new WorkerInteractionSigner(() => ctx.get('credentials') as CredentialProvider | undefined)
@@ -3919,6 +3931,132 @@ export class PactFlowService extends TypertRemoteService {
       .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
     const latest = reviews[0]
     return latest?.decision === 'approved' ? latest.subjectDigest : undefined
+  }
+
+  /**
+   * Append one comment.
+   *
+   * The author is decided here, by which entry point was used, and never by what
+   * the caller passed: the Remote below is the console (a person), and
+   * `appendAgentComment` is the Agent tool. A model able to sign itself `human`
+   * would be a forged-human-trace channel even though comments authorize
+   * nothing, so the parameter simply does not exist.
+   */
+  private appendComment(
+    sessionId: string,
+    request: PactFlowAddCommentRequest,
+    author: PactFlowCommentAuthor,
+  ): PactFlowComment {
+    const session = this.livePactFlowSession(sessionId)
+    const need = this.need(session, request.needId)
+    if (request.nodeId !== undefined && request.runId !== undefined) {
+      throw new Error('PactFlow comment targets at most one of a node or a Run')
+    }
+    if (request.nodeId !== undefined) {
+      const node = this.node(session, request.nodeId)
+      if (node.needId !== need.id) throw new Error(`PactFlow node "${node.id}" belongs to another Need`)
+      if (node.state === 'archived') throw new Error(`PactFlow node "${node.id}" is archived`)
+    }
+    if (request.runId !== undefined) {
+      const run = this.run(session, request.runId)
+      if (this.node(session, run.nodeId).needId !== need.id) {
+        throw new Error(`PactFlow Run "${run.id}" belongs to another Need`)
+      }
+    }
+    const body = request.body.trim()
+    if (body.length === 0) throw new Error('PactFlow comment body must not be empty')
+    // One text budget, not a second hardcoded cap: maxOutputBytes stays the
+    // single authority for stored text.
+    assertWithinChannelLimit('event-payload', Buffer.byteLength(body, 'utf8'), this.runBudget.maxOutputBytes)
+
+    const draft = {
+      needId: need.id,
+      ...(request.nodeId === undefined ? {} : { nodeId: PactFlowNodeId(request.nodeId) }),
+      ...(request.runId === undefined ? {} : { runId: PactFlowRunId(request.runId) }),
+    }
+    if (author === 'agent') {
+      const key = pactFlowCommentSubjectKey(draft)
+      const recorded = this.collaborationState(session).counters[key]?.agent ?? 0
+      const verdict = evaluateAgentCommentBudget(this.runBudget.maxAgentCommentsPerSubject, recorded)
+      if (verdict.exhausted) {
+        throw new Error(`PactFlow agent comment budget exhausted for ${key}: ${verdict.detail}`)
+      }
+    }
+    const comment: PactFlowComment = {
+      id: PactFlowCommentId(`comment-${randomUUID()}`),
+      ...draft, author, body, createdAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/comment-added', { v: 1, comment })
+    return comment
+  }
+
+  /** Console entry point: the author is a person. */
+  @Remote('addComment')
+  addComment(sessionId: string, request: PactFlowAddCommentRequest): PactFlowComment {
+    return this.appendComment(sessionId, request, 'human')
+  }
+
+  /** Agent tool entry point: the author is recorded as the model, always. */
+  appendAgentComment(sessionId: string, request: PactFlowAddCommentRequest): PactFlowComment {
+    return this.appendComment(sessionId, request, 'agent')
+  }
+
+  /**
+   * Void one comment. Log-only means the original event is never rewritten or
+   * removed; this appends a marker that folds into the tail. Only a person may
+   * void — a model able to void could erase the record it just wrote.
+   */
+  @Remote('voidComment')
+  voidComment(sessionId: string, request: { readonly commentId: string }): { readonly voided: true } {
+    const session = this.livePactFlowSession(sessionId)
+    const commentId = PactFlowCommentId(request.commentId)
+    // Existence is verified here, against the full log, rather than in the fold:
+    // proving it there would need an index of every comment id ever written,
+    // which is exactly the unbounded growth the projection avoids.
+    const existing = this.readComments(session).find(entry => entry.id === commentId)
+    if (existing === undefined) throw new Error(`PactFlow comment "${commentId}" does not exist`)
+    this.events.append(session, 'pactflow/comment-voided', {
+      v: 1, commentId, needId: existing.needId, voidedAt: Date.now(),
+    })
+    return { voided: true }
+  }
+
+  /** Paged discussion history; bodies live here, never in the resident state. */
+  @Remote('listComments')
+  listComments(sessionId: string, request: PactFlowListCommentsRequest): PactFlowCommentPage {
+    const session = this.livePactFlowSession(sessionId)
+    const needId = PactFlowNeedId(request.needId)
+    const all = this.readComments(session)
+      .filter(entry => entry.needId === needId)
+      .filter(entry => request.nodeId === undefined || entry.nodeId === request.nodeId)
+      .filter(entry => request.runId === undefined || entry.runId === request.runId)
+    const limit = Math.min(Math.max(request.limit ?? 50, 1), 200)
+    const offset = Math.max(request.offset ?? 0, 0)
+    return {
+      total: all.length,
+      comments: all.slice(offset, offset + limit),
+      nextOffset: offset + limit < all.length ? offset + limit : undefined,
+    }
+  }
+
+  /** Replay comments from the log, applying voids. Bodies are not projected. */
+  private readComments(session: Session): readonly PactFlowRecordedComment[] {
+    const byId = new Map<string, PactFlowRecordedComment>()
+    for (const event of session.events) {
+      if (event.type === 'pactflow/comment-added') {
+        const comment = event.data.comment
+        byId.set(comment.id, { ...comment, voided: false })
+      } else if (event.type === 'pactflow/comment-voided') {
+        const current = byId.get(event.data.commentId)
+        if (current !== undefined) byId.set(current.id, { ...current, voided: true })
+      }
+    }
+    return [...byId.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+  }
+
+  private collaborationState(session: Session): PactFlowCollaborationState {
+    return this.ctx.sessionProjections.stateOf(session, 'pactflowCollaboration')
+      ?? { counters: {}, recent: {}, needIds: [], nodeNeeds: {}, runNeeds: {} }
   }
 
   /** Resolve one node from the DAG projection. */

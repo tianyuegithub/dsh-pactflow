@@ -22,6 +22,7 @@ export type PactFlowNodeId = PactFlowId<'node'>
 export type PactFlowRunId = PactFlowId<'run'>
 export type PactFlowReviewId = PactFlowId<'review'>
 export type PactFlowDocumentId = PactFlowId<'document'>
+export type PactFlowCommentId = PactFlowId<'comment'>
 
 /** Validate and brand one project id at the domain boundary. */
 export function PactFlowProjectId(value: string): PactFlowProjectId {
@@ -45,6 +46,12 @@ export function PactFlowNodeId(value: string): PactFlowNodeId {
     throw new Error('PactFlow node id must be 1-64 lower-kebab-case characters')
   }
   return normalized as PactFlowNodeId
+}
+
+/** Validate and brand one Host-owned comment id. */
+export function PactFlowCommentId(value: string): PactFlowCommentId {
+  if (!/^comment-[0-9a-f-]{36}$/.test(value)) throw new Error('PactFlow comment id is invalid')
+  return value as PactFlowCommentId
 }
 
 /** Validate and brand one Host-owned run id. */
@@ -819,6 +826,50 @@ export interface PactFlowReview {
   readonly executionPlan?: PactFlowExecutionPlanAuthorization
 }
 
+/**
+ * Who wrote a comment. The Host decides this from session context and overwrites
+ * whatever the caller claimed: a model able to sign itself `human` would be a
+ * forged-human-trace channel even though comments authorize nothing.
+ */
+export type PactFlowCommentAuthor = 'human' | 'agent'
+
+/**
+ * One durable discussion entry. Comments are log-only and carry no authority:
+ * they never unlock a gate, advance a phase or count as approval evidence.
+ *
+ * `needId` is always present — it is what the workbench filters on — and an
+ * optional `nodeId` or `runId` narrows the subject to something inside that
+ * Need. At most one of the two may be set.
+ */
+export interface PactFlowComment {
+  readonly id: PactFlowCommentId
+  readonly needId: PactFlowNeedId
+  readonly nodeId?: PactFlowNodeId | undefined
+  readonly runId?: PactFlowRunId | undefined
+  readonly author: PactFlowCommentAuthor
+  readonly body: string
+  readonly createdAt: number
+}
+
+/** Per-subject comment counters. Bounded by subject count, not comment count. */
+export interface PactFlowCommentCounters {
+  readonly total: number
+  /** Drives the agent comment budget; humans are never counted against it. */
+  readonly agent: number
+}
+
+/** Bounded projection entry: enough to render the tail, never the full history. */
+export interface PactFlowCommentSummary {
+  readonly id: PactFlowCommentId
+  readonly needId: PactFlowNeedId
+  readonly nodeId?: PactFlowNodeId | undefined
+  readonly runId?: PactFlowRunId | undefined
+  readonly author: PactFlowCommentAuthor
+  readonly excerpt: string
+  readonly createdAt: number
+  readonly voided: boolean
+}
+
 export interface PactFlowDocument {
   readonly id: PactFlowDocumentId
   readonly needId: PactFlowNeedId
@@ -1112,10 +1163,31 @@ export interface PactFlowDeliveryState extends PactFlowDeliveryProjection {
   readonly runNeeds: Readonly<Record<string, PactFlowNeedId>>
 }
 
+/**
+ * Resident discussion view. It deliberately holds counters plus a bounded tail
+ * and never the bodies: full history is paged through the Host, so this stays
+ * flat as a Need accumulates comments.
+ */
+export interface PactFlowCollaborationProjection {
+  /** Keyed by subject key (`need:<id>` / `node:<id>` / `run:<id>`). */
+  readonly counters: Readonly<Record<string, PactFlowCommentCounters>>
+  /** Most-recent bounded summaries, keyed by Need id. */
+  readonly recent: Readonly<Record<string, readonly PactFlowCommentSummary[]>>
+}
+
+/** Compact Host-only ownership indexes; not part of the public view. */
+export interface PactFlowCollaborationState extends PactFlowCollaborationProjection {
+  readonly needIds: readonly PactFlowNeedId[]
+  readonly nodeNeeds: Readonly<Record<string, PactFlowNeedId>>
+  readonly runNeeds: Readonly<Record<string, PactFlowNeedId>>
+}
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     'pactflow/worker-interaction': { readonly v: 1; readonly record: WorkerInteractionRecord }
     'pactflow/autopilot-updated': { readonly v: 1; readonly record: PactFlowAutopilotRecord }
+    'pactflow/comment-added': { readonly v: 1; readonly comment: PactFlowComment }
+    'pactflow/comment-voided': { readonly v: 1; readonly commentId: PactFlowCommentId; readonly needId: PactFlowNeedId; readonly voidedAt: number }
     'pactflow/document-linked': { readonly v: 1; readonly document: PactFlowDocument }
     'pactflow/need-created': { readonly v: 1; readonly need: PactFlowNeed }
     'pactflow/need-updated': { readonly v: 1; readonly need: PactFlowNeed }
@@ -1143,6 +1215,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     pactflowDag: PactFlowDagState
     pactflowRuns: PactFlowRunsProjection
     pactflowDelivery: PactFlowDeliveryState
+    pactflowCollaboration: PactFlowCollaborationState
   }
   interface SessionProjectionMap {
     pactflowProject: PactFlowProjectProjection
@@ -1150,6 +1223,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     pactflowDag: PactFlowDagProjection
     pactflowRuns: PactFlowRunsProjection
     pactflowDelivery: PactFlowDeliveryProjection
+    pactflowCollaboration: PactFlowCollaborationProjection
   }
 }
 
@@ -1222,4 +1296,30 @@ export interface PactFlowDrainStatus {
     readonly state: string
     readonly retain?: boolean
   }[]
+}
+
+/** One comment as read back from the log, with its void marker applied. */
+export interface PactFlowRecordedComment extends PactFlowComment {
+  readonly voided: boolean
+}
+
+export interface PactFlowAddCommentRequest {
+  readonly needId: string
+  readonly nodeId?: string | undefined
+  readonly runId?: string | undefined
+  readonly body: string
+}
+
+export interface PactFlowListCommentsRequest {
+  readonly needId: string
+  readonly nodeId?: string | undefined
+  readonly runId?: string | undefined
+  readonly limit?: number | undefined
+  readonly offset?: number | undefined
+}
+
+export interface PactFlowCommentPage {
+  readonly total: number
+  readonly comments: readonly PactFlowRecordedComment[]
+  readonly nextOffset?: number | undefined
 }
