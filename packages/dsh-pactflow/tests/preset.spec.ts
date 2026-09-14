@@ -11,6 +11,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it } from 'vitest'
 import PactFlowService from '../lib/index.js'
@@ -29,6 +30,13 @@ describe('PactFlow packaged Agent Preset', () => {
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(AgentLoop, { agents: [] })
+    // The skill REGISTRY lives on the host plane (the deployment's own web
+    // composition disables the host-plane provider and consumer rows precisely
+    // so each preset owns its own layer). The preset mounts the provider and the
+    // loader tool; without the registry here they would sit "waiting for skills"
+    // and the mount audit would report an activation failure that the real host
+    // never has.
+    await ctx.plugin(SkillRegistry)
     await ctx.plugin(PactFlowService)
     ctx.provide('shell', { sandboxMode: undefined } as never)
     ctx.provide('shellEnv', { collect: () => ({}) } as never)
@@ -66,6 +74,8 @@ describe('PactFlow packaged Agent Preset', () => {
       'pactflow_transition_need',
       'pactflow_view',
       'read',
+      // The on-demand loader itself; the skill BODIES stay out of the prompt.
+      'skill',
     ])
     expect(ctx.tools.schemas()).toEqual([])
     await handle.dispose()
