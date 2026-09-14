@@ -1,0 +1,3 @@
+# Upload-gate test fixture: a fake sentinel value asserting the gate REJECTS
+# generic credential forms — not a real secret.
+173584c2fe65f80897cf4a8dd94c838e3950f606:packages/dsh-pactflow/tests/artifact-upload-gate.spec.ts:generic-api-key:19

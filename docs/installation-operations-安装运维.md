@@ -39,7 +39,7 @@ dsh --profile web
 
 **离线交付目录（发布时打包，非本仓构建产物）**：正式离线交付目录除 tarball 外还包含 `dsh-pactflow-<version>-source.bundle`（插件截至发布提交的完整 Git 历史）与 `deepseek-harness-pactflow-prerequisites-<hash>.bundle`（尚未进入官方 DSH 的上游前置分支），以及校验清单 `SHA256SUMS`；安装或恢复前在 `dist/` 中执行 `shasum -a 256 -c SHA256SUMS`，安装包或任一源码包校验失败都必须停止。
 
-> 现状说明（2026-09-11 核实）：`pnpm run pack` 只产出 `dist/dsh-pactflow-<version>.tgz`；**上述 source bundle 与 `SHA256SUMS` 由发布流程另行生成，本仓当前没有生成它们的脚本**。因此本地 `dist/` 内通常看不到它们——请勿对不存在的 `SHA256SUMS` 执行校验，也不要据本节误认为它们已随构建产出。
+> 生成方式（2026-09-14 固化）：`pnpm run pack` 产出 tarball 后，`pnpm run dist`（`scripts/build-distribution.mjs`）按上述规格重建整个离线交付目录——含两个钉版 worker 镜像（业务 + 验收，digest 取自 `worker/dsh/release-manifest.json`）的 `docker save` 归档、source bundle、前置分支 bundle 与 `SHA256SUMS`；在目录内执行 `shasum -a 256 -c SHA256SUMS` 校验，任一失败即停止。同事从零安装的完整路径见 [上手手册](getting-started-同事上手手册.md)。
 
 ## 3. 非密钥 Settings
 

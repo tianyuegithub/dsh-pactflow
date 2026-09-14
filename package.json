@@ -9,6 +9,7 @@
     "check": "pnpm run build && pnpm run test && pnpm run pack:check",
     "check:release": "node scripts/check-release.mjs",
     "pack": "pnpm run build && pnpm --dir packages/dsh-pactflow pack --pack-destination ../../dist",
+    "dist": "node scripts/build-distribution.mjs",
     "pack:check": "node scripts/check-package.mjs",
     "test": "vitest run packages/dsh-pactflow/tests --maxWorkers=1",
     "test:web": "vitest run --config vitest.e2e.config.ts",

@@ -58,6 +58,7 @@ dsh plugin --profile web add https://github.com/tianyuegithub/dsh-pactflow/relea
 - [最终开发计划](docs/development-plan-开发计划.md)
 - [当前实施状态](docs/implementation-status-实施状态.md)
 - [安装与运维](docs/installation-operations-安装运维.md)
+- [同事上手手册](docs/getting-started-同事上手手册.md)（从零安装 + 七类资源配置 + 镜像导入 + 跑通第一条链路）
 - DSH 上游研究仓库：`/Users/ty/Codes/deepseek-harness`
 
 ## 验证边界
