@@ -55,9 +55,9 @@
 
 ## 3. Agent 面与读取
 
-- [ ] 3.1 Agent 只读：工具面无上传能力，宿主对 Agent 来源的上传请求拒绝；消费前 MUST resolve+校验，校验不符显式失败不回落记忆。验证：单测（含「以记忆替代对象内容」路径不存在的对抗断言）
-- [ ] 3.2 `pactflow_view` 快照补附件摘要（ref、字节数、媒体类型、校验状态），不含内容本体。验证：单测
-- [ ] 3.3 宿主读取入口复用 `artifactLog` 的解析与绑定约束；越出绑定拒绝。验证：单测
+- [x] 3.1 Agent 面无任何 attach/upload/link 工具，且**不暴露任何 endpoint/bucket/access_key/secret_key/artifact_store 参数**——绑定是宿主的，一个这样的参数就能让模型把上传瞄准项目从未绑定的地方。`readAttachment` 经 `resolveArtifact`，它逐项校验 bytes 与 sha256，不符即抛 `corrupt`，**消费方因此不可能拿到与记录不符的内容**；「回落到记忆」的路径不存在，因为该函数要么返回校验过的字节要么抛错。**canary 实证**：给 Agent 面加一个带 `endpoint` 参数的 `pactflow_upload_attachment`，两条守卫同时转红，随后已还原。验证：`attachment-agent-scope.spec.ts`
+- [x] 3.2 附件随 `pactflowDelivery` 投影进入快照，`pactflow_view` 自动携带——无需为它开第二条读取路径。用例断言文件名、sha256 与媒体类型可见，而签名地址与凭证字段不可见。验证：同上
+- [x] 3.3 `readAttachment` 与 `artifactLog` 共用同一个 `artifactStoreClient(session)` 与同一个 `resolveArtifact`；后者内部 `boundKey(ref)` 强制 ref 落在绑定内，越出绑定即拒绝。用例另断言未曾 link 过的 id 被拒。验证：同上
 
 ## 4. 客户端
 
