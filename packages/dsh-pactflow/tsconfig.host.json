@@ -24,6 +24,7 @@
     "src/host/settings-adapter.ts",
     "src/harness-discovery.ts",
     "src/harness-capabilities.ts",
+    "src/harness-verification.ts",
     "src/infrastructure-health.ts",
     "src/infrastructure.ts",
     "src/infrastructure-probe.ts",

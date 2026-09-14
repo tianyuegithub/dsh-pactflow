@@ -21,6 +21,7 @@ import {
   type V1ObjectMeta,
 } from '@kubernetes/client-node'
 import { harnessAchievedLevel, harnessProbeMaxLevel, type PactFlowHarnessCapabilityLevel } from './harness-capabilities.ts'
+import { parseRunUsage, type PactFlowRunUsage } from './run-budget.ts'
 import { PACTFLOW_GIT_SECRET_PREFIX } from './git-workspace.ts'
 import type {
   PactFlowApiMode,
@@ -211,6 +212,36 @@ interface WorkerResultDocument {
   readonly logTail?: string
   readonly logArtifact?: unknown
   readonly logDegraded?: boolean
+  /**
+   * Optional telemetry. Only the `dsh` executor's adapter is written in this
+   * repository, so only it can be made to report these; a third-party Harness's
+   * document simply omits them, and that omission is legal.
+   */
+  readonly usage?: unknown
+  readonly toolInvocations?: unknown
+}
+
+/**
+ * Read the usage section out of a result document.
+ *
+ * Two shapes land on "unavailable" by different routes, and neither ever yields a
+ * figure: a document that omits the section (legal — every third-party Harness),
+ * and a document whose section is malformed (not a document to salvage; filling
+ * in a default would put a number nobody measured into the durable record).
+ */
+export function parseResultUsage(document: unknown): PactFlowRunUsage {
+  if (typeof document !== 'object' || document === null) return { available: false }
+  return parseRunUsage((document as { readonly usage?: unknown }).usage)
+}
+
+/**
+ * Read the reported tool-invocation count, or `undefined` when the runner does
+ * not report one. A reported zero is a count; an absent field is not.
+ */
+export function parseResultToolInvocations(document: unknown): number | undefined {
+  if (typeof document !== 'object' || document === null) return undefined
+  const value = (document as { readonly toolInvocations?: unknown }).toolInvocations
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 export type PactFlowK3sObservation =
