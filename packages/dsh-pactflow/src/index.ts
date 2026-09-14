@@ -132,7 +132,7 @@ import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowRe
 import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAgentCommentBudget, evaluateAttemptBudget } from './run-budget.ts'
 import { assertWithinChannelLimit, PactFlowArtifactStoreClient, type PactFlowArtifactRef } from './artifact-store.ts'
 import { assertArtifactUploadSafe } from './worker/redact.ts'
-import { harnessCapabilityProfile } from './harness-capabilities.ts'
+import { PACTFLOW_HARNESS_CAPABILITY_LEVELS, harnessCapabilityProfile, hostAttestableLevels } from './harness-capabilities.ts'
 import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
 import { staleCodeInputs } from './input-staleness.ts'
 import { PACTFLOW_DEFAULT_RETENTION_BYTES, PACTFLOW_DEFAULT_RETENTION_MS, artifactObjectRecord, measureRetainedSceneBytes, reconcileArtifactObjects, summarizeArtifactLedger, summarizeRetentionCapacity } from './retention-policy.ts'
@@ -2889,6 +2889,11 @@ export class PactFlowService extends TypertRemoteService {
         apiMode: profile.apiMode,
         structuredOutput: profile.structuredOutput,
         maxLevel: profile.maxLevel,
+        // Both lists, per Harness. Absence and inability look the same to a
+        // reader, so the unattestable rungs are named rather than left out.
+        attestable: hostAttestableLevels(template.harness),
+        unattestable: PACTFLOW_HARNESS_CAPABILITY_LEVELS
+          .filter(level => !hostAttestableLevels(template.harness).includes(level)),
       })
     }
     return views

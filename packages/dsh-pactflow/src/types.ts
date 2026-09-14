@@ -104,12 +104,27 @@ export interface PactFlowHarnessTemplateView {
 }
 
 /** Declared capability of one configured Harness (A10); serializable for the Remote boundary. */
+export type PactFlowCapabilityLevelName =
+  'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
+
 export interface PactFlowHarnessCapabilityView {
   readonly templateId: string
   readonly harness: PactFlowHarness
   readonly apiMode: PactFlowApiMode
   readonly structuredOutput: 'native' | 'text'
-  readonly maxLevel: 'connection' | 'protocol' | 'tool-invocation' | 'artifact' | 'verification' | 'cancellation'
+  readonly maxLevel: PactFlowCapabilityLevelName
+  /**
+   * Levels this Harness's probes can attest, and the ones they cannot — both
+   * stated, per Harness.
+   *
+   * The unattestable list is not derivable by the reader from the attestable one
+   * plus the ladder, because "we have no evidence for this" and "this Harness
+   * lacks the ability" look identical when a level is simply absent. Naming them
+   * is what keeps the presentation from reading as a capability judgement about
+   * someone else's runner.
+   */
+  readonly attestable: readonly PactFlowCapabilityLevelName[]
+  readonly unattestable: readonly PactFlowCapabilityLevelName[]
 }
 
 /** User-facing Harness image and resource profile, independent of any model. */

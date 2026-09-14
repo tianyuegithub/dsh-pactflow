@@ -10,6 +10,7 @@
     "src/artifact-store.ts",
     "src/discussion-view.ts",
     "src/client/index.tsx",
+    "src/client/harness-capability-view.tsx",
     "src/client/locale.ts",
     "src/client/overlay.tsx",
     "src/client/autopilot-controls.tsx",

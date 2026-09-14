@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { isHarnessProfile, friendlyOption } from './resource-model.ts'
+import { PactFlowHarnessCapabilities, harnessCapabilityViewOf } from './harness-capability-view.tsx'
 import { ActionFeedbackToast, useActionFeedback } from './action-feedback.tsx'
 import { releaseTemporaryCredentialRefs } from './credential-probe.ts'
 import { EditableResourceCards, DeleteResourceDialog, CredentialInput, HarborArtifactField, ModelDiscoveryField, HarnessSelectionField } from './resource-cards.tsx'
@@ -509,6 +510,11 @@ export function PactFlowSettingsCard({
         showLogFor={row => expandedLogs.has(`git-provider:${row.id}`)}
         onToggleLog={row => setExpandedLogs(current => toggleSet(current, `git-provider:${row.id}`))}
         onViewProbe={row => probe('git-provider', row.id, true)} />
+      {/* Capability levels per Harness, derived from the same registered templates
+          shown above. Derived rather than fetched: a second source would let the
+          panel show a verdict for a template the list no longer has. */}
+      <PactFlowHarnessCapabilities
+        views={draft.templates.filter(isHarnessProfile).map(row => harnessCapabilityViewOf(row.id, row.harness))} />
       <EditableResourceCards title="Harness 模板" description="只定义开发工具、Worker 镜像与 CPU/内存规格；不绑定模型。"
         rows={draft.templates.filter(isHarnessProfile)} disabled={actionDisabled}
         columns={templateColumns}
