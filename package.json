@@ -22,6 +22,7 @@
     "test:real-approval": "node scripts/run-real-approval-e2e.mjs",
     "test:real-todo": "node scripts/run-real-suite.mjs todo-webapp",
     "test:real-web-gate": "node scripts/run-real-web-gate.mjs",
+    "test:real-artifact": "node scripts/run-real-artifact.mjs",
     "evidence:collect": "node scripts/evidence-collect.mjs",
     "evidence:verify": "node scripts/acceptance-gate.mjs",
     "typecheck": "node scripts/typecheck.mjs",
