@@ -39,6 +39,7 @@ import type {
   PactFlowValidationEvidence,
 } from './types.ts'
 import { pactFlowSchema, pactFlowIdSchema, parsePactFlowVersionedPayload } from './schema.ts'
+export { pactFlowDiscussionView } from './discussion-view.ts'
 
 /** One phase contract shared by live commands and persisted event replay. */
 export const PACTFLOW_NEXT_PHASE: Readonly<Partial<Record<PactFlowPhase, PactFlowPhase>>> = {

@@ -5,6 +5,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PactFlowHealth, PactFlowSnapshot, PactFlowWorkerPoolStatus, PactFlowGiteaStatus, PactFlowWorkspaceProjectConfig, PactFlowRetentionSummary, PactFlowHandoverSummary, PactFlowAutopilotPreview, PactFlowAutopilotRecord, PactFlowStartAutopilotRequest } from '../types.ts'
 import type { AnswerWorkerInteractionRequest, WorkerInteractionRecord } from '../worker-interaction-types.ts'
+import { pactFlowDiscussionView } from '../discussion-view.ts'
 import { NS } from './locale.ts'
 import { createRequestGate } from './request-gate.ts'
 import { createFreshnessTracker, PACTFLOW_RUNTIME_REQUERY_INTERVAL_MS, type PactFlowFreshnessState } from './runtime-freshness.ts'
@@ -76,6 +77,12 @@ export interface OverlayInjected {
   /** A11: explicit human resume for a paused node. */
   resumeNode(sessionId: string, nodeId: string, expectedRevision: number, signal: AbortSignal): Promise<unknown>
   artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{ readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string }>
+  addComment(sessionId: string, request: { readonly needId: string; readonly body: string }, signal?: AbortSignal): Promise<unknown>
+  voidComment(sessionId: string, request: { readonly commentId: string }, signal?: AbortSignal): Promise<unknown>
+  listComments(sessionId: string, request: { readonly needId: string; readonly limit?: number }, signal?: AbortSignal): Promise<{
+    readonly total: number
+    readonly comments: readonly { readonly id: string; readonly author: 'human' | 'agent'; readonly body: string; readonly createdAt: number; readonly voided: boolean }[]
+  }>
 }
 
 type OverlayProps =
@@ -105,7 +112,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const sessionCwd = useSessions(sessions => state.sessionId === null ? undefined : sessions.byId[state.sessionId]?.cwd)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
@@ -114,7 +121,10 @@ export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover
     && projections.pactflowNeeds !== undefined && projections.pactflowDag !== undefined
     && projections.pactflowRuns !== undefined && projections.pactflowDelivery !== undefined
     ? { project: projections.pactflowProject, needs: projections.pactflowNeeds, dag: projections.pactflowDag,
-      runs: projections.pactflowRuns, delivery: projections.pactflowDelivery }
+      runs: projections.pactflowRuns, delivery: projections.pactflowDelivery,
+      // Discussion is additive: a host that has not yet written a comment has no
+      // collaboration projection, and the panel must still render.
+      discussion: pactFlowDiscussionView(projections.pactflowCollaboration) }
     : state.snapshot
   const activeRequests = useRef(new Set<AbortController>())
   // Capacity and workspace data live outside the Session event log, so they are
@@ -380,6 +390,9 @@ export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover
             <span className="pf-workbench-muted">{snapshot.delivery.autopilots?.[selectedNeed.id] ? `挂机：${({ running: '运行中', paused: '已暂停', blocked: '已阻塞', stopped: '已停止', completed: '已完成' })[snapshot.delivery.autopilots[selectedNeed.id]!.state]}` : '尚未开启挂机'}</span></div>}
           <WorkbenchEvidenceView snapshot={snapshot} needId={selectedNeed.id} tab={tab}
             onLoadArtifactLog={(runId, signal) => artifactLog(String(state.sessionId), runId, signal)}
+            onAddComment={async body => { await addComment(String(state.sessionId), { needId: selectedNeed.id, body }) }}
+            onVoidComment={async commentId => { await voidComment(String(state.sessionId), { commentId }) }}
+            onLoadComments={signal => listComments(String(state.sessionId), { needId: selectedNeed.id, limit: 200 }, signal)}
             resumingNodeId={busy?.startsWith('resume:') ? busy.slice(7) : null}
             onResume={(nodeId, revision) => runAction(`resume:${nodeId}`, signal => resumeNode(String(state.sessionId), nodeId, revision, signal))} />
           {tab === 'progress' && currentPool && <p className="pf-workbench-muted">当前项目使用执行池 {currentPool.displayName}：运行 {currentPool.running} / 池并发上限 {currentPool.maxConcurrency}，排队 {currentPool.waiting}。项目限制仍独立生效。</p>}

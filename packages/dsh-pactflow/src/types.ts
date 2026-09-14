@@ -1141,6 +1141,22 @@ export interface PactFlowSnapshot {
   readonly dag: PactFlowDagProjection
   readonly runs: PactFlowRunsProjection
   readonly delivery: PactFlowDeliveryProjection
+  /** Additive: a host that predates comment threads sends no discussion. */
+  readonly discussion?: PactFlowDiscussionView | undefined
+}
+
+/**
+ * One comment as the model sees it. `source` is stamped on every entry so a
+ * comment can never read as an instruction — the same treatment plugin
+ * continuation notices already get. Voided entries never appear here.
+ */
+export interface PactFlowDiscussionEntry extends PactFlowCommentSummary {
+  readonly source: 'pactflow-comment'
+}
+
+export interface PactFlowDiscussionView {
+  readonly counters: Readonly<Record<string, PactFlowCommentCounters>>
+  readonly recent: Readonly<Record<string, readonly PactFlowDiscussionEntry[]>>
 }
 
 export interface PactFlowProjectProjection { readonly project: PactFlowProject | null }

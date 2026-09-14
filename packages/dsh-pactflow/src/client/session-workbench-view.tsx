@@ -2,6 +2,7 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type {
+  PactFlowDiscussionEntry,
   PactFlowDocument,
   PactFlowNode,
   PactFlowReview,
@@ -20,6 +21,17 @@ export interface WorkbenchEvidenceViewProps {
   /** artifact-ref-handoff: fetch an externalized execution log through the Host. */
   readonly onLoadArtifactLog?: (runId: string, signal?: AbortSignal) => Promise<{
     readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string
+  }>
+  /** need-comment-threads: durable discussion on this Need. */
+  readonly onAddComment?: (body: string) => Promise<void>
+  readonly onVoidComment?: (commentId: string) => Promise<void>
+  /** Paged history, including voided entries the live tail leaves out. */
+  readonly onLoadComments?: (signal?: AbortSignal) => Promise<{
+    readonly total: number
+    readonly comments: readonly {
+      readonly id: string; readonly author: 'human' | 'agent'
+      readonly body: string; readonly createdAt: number; readonly voided: boolean
+    }[]
   }>
 }
 
@@ -318,6 +330,75 @@ function Documents({ documents }: { readonly documents: readonly PactFlowDocumen
   </li>)}</ul>
 }
 
+const AUTHOR_LABEL = { human: '人', agent: '执行代理' } as const
+
+function Discussion({
+  entries,
+  onAddComment,
+  onVoidComment,
+  onLoadComments,
+}: {
+  readonly entries: readonly PactFlowDiscussionEntry[]
+  readonly onAddComment?: WorkbenchEvidenceViewProps['onAddComment']
+  readonly onVoidComment?: WorkbenchEvidenceViewProps['onVoidComment']
+  readonly onLoadComments?: WorkbenchEvidenceViewProps['onLoadComments']
+}) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [history, setHistory] = useState<Awaited<ReturnType<NonNullable<typeof onLoadComments>>> | null>(null)
+
+  // The live tail carries excerpts of the ACTIVE comments only. Voided entries
+  // are kept out of it on purpose (a model must never read a retracted note),
+  // so seeing them means paging the history, which returns full bodies.
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true); setError(null)
+    try { await action(); setHistory(null) } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setBusy(false) }
+  }
+
+  return <Section title="讨论">
+    {entries.length === 0 && history === null
+      ? <p style={mutedStyle}>该需求尚无讨论。讨论随需求持久保留，换一个会话也读得到。</p>
+      : <ul style={listStyle}>{(history?.comments ?? entries).map(entry => {
+        const voided = 'voided' in entry && entry.voided
+        const text = 'body' in entry ? entry.body : entry.excerpt
+        return <li key={entry.id} style={rowStyle}>
+          <div style={rowCopyStyle}>
+            <span style={detailStyle}>
+              {AUTHOR_LABEL[entry.author]} · {new Date(entry.createdAt).toLocaleString()}
+              {voided ? ' · 已作废' : ''}
+            </span>
+            <span style={voided ? { ...detailStyle, textDecoration: 'line-through' } : undefined}>{text}</span>
+          </div>
+          {voided || onVoidComment === undefined ? null : <Button size="sm" variant="outline" disabled={busy}
+            onClick={() => { void run(() => onVoidComment(entry.id)) }}>作废</Button>}
+        </li>
+      })}</ul>}
+
+    {onLoadComments === undefined ? null : <Button size="sm" variant="outline" disabled={busy}
+      onClick={() => {
+        if (history !== null) { setHistory(null); return }
+        void run(async () => { setHistory(await onLoadComments()) })
+      }}>{history === null ? '查看全部（含已作废）' : '收起'}</Button>}
+
+    {onAddComment === undefined ? null : <div style={stackStyle}>
+      <textarea
+        aria-label="发表讨论"
+        value={draft}
+        disabled={busy}
+        rows={3}
+        onChange={changed => { setDraft(changed.target.value) }}
+        style={{ ...rowCopyStyle, resize: 'vertical', font: 'inherit' }} />
+      <Button size="sm" disabled={busy || draft.trim().length === 0}
+        onClick={() => { void run(async () => { await onAddComment(draft.trim()); setDraft('') }) }}>发表</Button>
+    </div>}
+
+    {error === null ? null : <p role="alert" style={mutedStyle}>{error}</p>}
+  </Section>
+}
+
 function DeliveryView({
   reviews,
   documents,
@@ -400,7 +481,7 @@ export function WorkbenchEvidenceView({
   needId,
   tab,
   onResume,
-  resumingNodeId, onLoadArtifactLog }: WorkbenchEvidenceViewProps) {
+  resumingNodeId, onLoadArtifactLog, onAddComment, onVoidComment, onLoadComments }: WorkbenchEvidenceViewProps) {
   const need = snapshot.needs.byId[needId]
   if (need === undefined) {
     return <div style={rootStyle}><Section title="需求内容"><p style={mutedStyle}>所选需求已不在当前会话快照中，请重新选择需求。</p></Section></div>
@@ -415,7 +496,9 @@ export function WorkbenchEvidenceView({
 
   return <div style={rootStyle}>
     {tab === 'progress'
-      ? <ProgressView need={need} nodes={nodes} runs={runs} onResume={onResume} resumingNodeId={resumingNodeId} />
+      ? <><ProgressView need={need} nodes={nodes} runs={runs} onResume={onResume} resumingNodeId={resumingNodeId} />
+        <Discussion entries={snapshot.discussion?.recent[needId] ?? []}
+          onAddComment={onAddComment} onVoidComment={onVoidComment} onLoadComments={onLoadComments} /></>
       : tab === 'runs'
         ? <RunsView nodes={nodes} runs={runs} onLoadArtifactLog={onLoadArtifactLog} />
         : <DeliveryView reviews={reviews} documents={documents} runs={runs} releases={releases} />}

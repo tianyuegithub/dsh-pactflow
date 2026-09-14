@@ -76,6 +76,32 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'pactflow_add_comment',
+    description: 'Leave a durable analysis note on a Need, node or Run so it survives this session. Use it for research conclusions, failure analysis and the reasoning behind a recommendation. It is recorded as an agent comment and authorizes NOTHING: it never unlocks a gate, advances a phase or counts as approval — never use it to request or claim approval. There is a per-subject budget, so write one considered note rather than a running log.',
+    parameters: {
+      need_id: { type: 'string', required: true },
+      body: { type: 'string', required: true, description: 'The note itself. Never a credential or raw secret.' },
+      node_id: { type: 'string', description: 'Narrow the subject to one node inside that Need.' },
+      run_id: { type: 'string', description: 'Narrow the subject to one Run inside that Need. Mutually exclusive with node_id.' },
+    },
+    output: OUTPUT,
+    execute(args, exec) {
+      // The author is not a parameter: it is decided by this entry point. A model
+      // able to sign itself `human` would be a forged-human-trace channel even
+      // though comments authorize nothing.
+      return Promise.resolve(jsonObject(ctx.pactflow.appendAgentComment(
+        requireSessionId(exec.agent?.session.id),
+        {
+          needId: args.need_id,
+          body: args.body,
+          ...(args.node_id === undefined ? {} : { nodeId: args.node_id }),
+          ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+        },
+      ) as never))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'pactflow_confirm_execution_plan',
     description: 'Before any Worker dispatch, present concrete execution plans for native human selection. Prefer one complete delivery node including implementation, tests and records; split only for concrete independent benefit. The Host creates the selected nodes and records approval. Do not use for ordinary read-only questions. Use the exact approved node prompts/routes when dispatching; cancellation/custom feedback does not authorize work.',
     parameters: {

@@ -43,6 +43,7 @@ import {
   pactFlowCommentSubjectKey,
   PACTFLOW_NEXT_PHASE as NEXT_PHASE,
   pactFlowDeliveryView,
+  pactFlowDiscussionView,
 } from './domain.ts'
 import { PactFlowGitWorkspace, assertPactFlowValidationAuthorization, type PactFlowGitAuthSecret } from './git-workspace.ts'
 import type { RecoverySnapshot } from './local-workspace.ts'
@@ -2188,6 +2189,7 @@ export class PactFlowService extends TypertRemoteService {
       dag: values.pactflowDag ?? { byId: {} },
       runs: values.pactflowRuns ?? { byId: {} },
       delivery: values.pactflowDelivery ?? { reviews: {}, documents: {}, releases: {}, cleanups: {} },
+      discussion: pactFlowDiscussionView(values.pactflowCollaboration),
     }
   }
 
@@ -2200,6 +2202,7 @@ export class PactFlowService extends TypertRemoteService {
       runs: this.ctx.sessionProjections.stateOf(session, 'pactflowRuns') ?? { byId: {} },
       delivery: pactFlowDeliveryView(this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')
         ?? { reviews: {}, documents: {}, releases: {}, cleanups: {} }),
+      discussion: pactFlowDiscussionView(this.ctx.sessionProjections.stateOf(session, 'pactflowCollaboration')),
     }
   }
 

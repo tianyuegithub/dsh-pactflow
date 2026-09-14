@@ -8,6 +8,7 @@
   },
   "files": [
     "src/artifact-store.ts",
+    "src/discussion-view.ts",
     "src/client/index.tsx",
     "src/client/locale.ts",
     "src/client/overlay.tsx",

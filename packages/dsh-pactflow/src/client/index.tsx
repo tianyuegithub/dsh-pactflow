@@ -237,6 +237,21 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     order: 30,
     locale: NS,
     inject: (): OverlayInjected => ({
+      addComment: async (sessionId, request, signal) => {
+        const result = await pactflow.addComment(sessionId, request, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      voidComment: async (sessionId, request, signal) => {
+        const result = await pactflow.voidComment(sessionId, request, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      listComments: async (sessionId, request, signal) => {
+        const result = await pactflow.listComments(sessionId, request, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
       answerWorkerInteraction: async (sessionId, request) => {
         const result = await pactflow.answerWorkerInteraction(sessionId, request)
         if (!result.ok) throw new Error(result.error.message)
