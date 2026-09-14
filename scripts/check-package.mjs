@@ -82,6 +82,7 @@ const required = [
   'worker/dsh/release-manifest.json',
   'worker/dsh/Dockerfile',
   'worker/dsh/runner.mjs',
+  'worker/dsh/verification.mjs',
   'lib/client.js',
   'lib/typert.host.js',
   'lib/typert.host.d.ts',

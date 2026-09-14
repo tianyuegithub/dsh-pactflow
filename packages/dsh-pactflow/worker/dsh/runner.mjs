@@ -68,5 +68,18 @@ try {
 } catch (error) {
   process.stderr.write(`log externalization skipped: ${error && error.reason ? error.reason : 'upload failed'}\n`)
 }
+// Verification protocol (dsh-harness-telemetry): when the Host mounted a
+// registered profile for this run, execute it and hand back the stepwise report.
+// Best-effort like the log upload above — a failure here must never change the
+// run's own result; it only means the Host attests at most `artifact`, which is
+// the honest outcome when nothing observed a verification.
+try {
+  const { parseMountedProfile, runVerificationProfile } = await import('/opt/pactflow-worker/verification.mjs')
+  const mounted = parseMountedProfile(process.env.PACTFLOW_VERIFICATION_PROFILE)
+  const report = await runVerificationProfile(mounted)
+  if (report !== undefined) await writeFile('/tmp/pactflow-verification-report.json', JSON.stringify(report))
+} catch (error) {
+  process.stderr.write(`verification protocol skipped: ${error && error.reason ? error.reason : 'not available'}\n`)
+}
 process.stdout.write(output.slice(-32768))
 process.exitCode = code

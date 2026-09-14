@@ -16,7 +16,17 @@
 ## 2. dsh 执行器适配插件上报
 
 - [ ] 2.1 `worker/dsh/`：runner 上报工具调用的发生与计数
-- [ ] 2.2 `worker/dsh/`：runner 实现验证协议——按登记 Profile 身份执行多步有序验证，回报逐步结构化报告（Profile 身份、每步退出码、实际顺序、每步时长）
+- [x] 2.2 `worker/dsh/verification.mjs`：runner 侧验证协议。**本条不依赖第 0 节的 spike**——它不需要 DSH 的工具执行钩子，只需要执行已登记 Profile 并如实回报，因此可以先做。
+
+  两处诱惑被刻意拒绝，因为宿主的核对分辨不出、会照单声称：
+  - **前一步失败也要把后面每一步跑完并回报**，不得截断后标成「未到达」。Profile 天生顺序敏感（步二能过是因为步一跑过），截断的报告与顺序错乱的报告对核对而言是同一种证据。
+  - **回报本进程真正 spawn 的命令**，而不是 Profile 声明的那些。二者只在一切正常时相同，而要紧的正是出了问题那次。
+
+  spawn 失败（127）与超时（124）都给退出码而非省略该步——省略会让宿主去核对一个从未结束的步骤。Profile 畸形或未挂载时整体返回 undefined（宿主据此至多声称 `artifact`），而不是部分honour一个没人登记过的身份。
+
+  runner 接线为 best-effort：失败只写一行 stderr，绝不改变本次运行结果。`verification.mjs` 已入 Dockerfile 与 `check-package` 必需产物清单（26 项）。
+
+  验证：`worker-verification-protocol.spec.ts`（13 例）。**两侧在同一个文件里对接**——runner 产出的报告交给宿主的 `reconcileVerificationReport` 真实判定，因为合同是二者之间的约定，各自单独都可能自洽地错。
 - [ ] 2.3 `worker/dsh/`：回传 token 与模型调用数用量；字段缺失时如实留空，不填 0
 - [x] 2.4 `parseResultUsage` / `parseResultToolInvocations`：用量与工具调用是结果文档上的**可选**字段。缺失（第三方 Harness 今天的文档，合法）与畸形（负数、小数、字符串、半填、非对象）经两条不同路径落到同一个答案——不可得，且**任何一条都不产出数字**。补默认值会把没人测量过的数字写进持久记录，正是这个维度存在的理由所否定的。测得的 0 仍与「不告诉我们」可区分。越限仍走既有的 `assertWithinChannelLimit` 失败关闭。验证：`k3s-result-usage.spec.ts`（14 例）
 

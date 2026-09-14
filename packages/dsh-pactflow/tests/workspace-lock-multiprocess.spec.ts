@@ -55,6 +55,22 @@ describe('PactFlow workspace file lock across real processes', () => {
     // The control proves the assertion above is not vacuous: with the identical
     // workload and no lock, interleaving loses updates, so the exact-total check
     // is a real signal rather than sub-millisecond luck.
-    expect(await runWorkload(true)).toBeLessThan(PROCESSES * ITERATIONS)
-  }, 60_000)
+    //
+    // Sampled over several rounds rather than once. Losing an update is a RACE:
+    // it is what the unlocked workload does given any interleaving at all, but a
+    // single round can get lucky on an idle machine — and did, once, under the
+    // load of the full suite. One round losing updates is all the control needs
+    // to prove; requiring every round to lose them asserts something stronger
+    // than the point and makes the case flaky rather than the lock unsafe.
+    const observed: number[] = []
+    for (let round = 0; round < 5; round += 1) {
+      const total = await runWorkload(true)
+      observed.push(total)
+      if (total < PROCESSES * ITERATIONS) return
+    }
+    expect.fail(
+      `the unlocked workload never lost an update across 5 rounds (totals: ${observed.join(', ')}), `
+      + `so the locked assertion of exactly ${String(PROCESSES * ITERATIONS)} proves nothing`,
+    )
+  }, 180_000)
 })
