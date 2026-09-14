@@ -373,3 +373,54 @@ describe('WorkbenchEvidenceView 讨论区', () => {
     expect(() => render('progress', legacy)).not.toThrow()
   })
 })
+
+describe('WorkbenchEvidenceView 等待外部评审', () => {
+  const gate = {
+    pullRequestNumber: 7,
+    pullRequestUrl: 'https://gitea.example/org/repo/pulls/7',
+    missingApprovals: 1,
+    checks: [
+      { context: 'ci/build', state: 'success' },
+      { context: 'ci/test', state: 'running' },
+    ],
+    autoRecheckExhausted: false,
+  }
+
+  it('讲清在等什么、还缺什么、不必手工去网页合并', () => {
+    const markup = render('delivery', snapshot(), { reviewGate: gate })
+    expect(markup).toContain('等待外部评审')
+    expect(markup).toContain('PR #7')
+    expect(markup).toContain('尚缺 1 个')
+    expect(markup).toContain('ci/test')
+    expect(markup).toContain('进行中')
+    // 不能让人以为该自己去网页合并——那会产生宿主没核验过的交付终态。
+    expect(markup).toContain('不需要你到网页上手工合并')
+  })
+
+  it('自动复查耗尽时说明授权与等待态都还在', () => {
+    const markup = render('delivery', snapshot(), {
+      reviewGate: { ...gate, autoRecheckExhausted: true },
+    })
+    expect(markup).toContain('自动复查次数已用完')
+    expect(markup).toContain('可以手动复查')
+  })
+
+  it('平台外合并时说明尚未产生交付终态', () => {
+    const markup = render('delivery', snapshot(), {
+      reviewGate: { ...gate, externallyMerged: true },
+    })
+    expect(markup).toContain('已在平台外被合并')
+    expect(markup).toContain('尚未产生交付终态')
+  })
+
+  it('仅在宿主提供复查入口时呈现复查按钮', () => {
+    expect(render('delivery', snapshot(), { reviewGate: gate })).not.toContain('>复查<')
+    expect(render('delivery', snapshot(), {
+      reviewGate: gate, onRecheckReviewGate: vi.fn(async () => {}),
+    })).toContain('>复查<')
+  })
+
+  it('没有等待态时验收交付页不出现该区块', () => {
+    expect(render('delivery')).not.toContain('等待外部评审')
+  })
+})

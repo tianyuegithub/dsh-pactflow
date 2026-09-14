@@ -224,6 +224,8 @@ describe('autopilot host continuation', () => {
         update: (session, record, changes) => Reflect.get(h.ctx.pactflow, 'updateAutopilot').call(h.ctx.pactflow, session, record, changes),
         block: (session, record, reason) => Reflect.get(h.ctx.pactflow, 'blockAutopilotInSession').call(h.ctx.pactflow, session, record, reason),
         boundedError: error => String(error),
+        reviewGate: () => undefined,
+        recheckReviewGate: async () => {},
       })
       await driver.tick(); await driver.tick()
       const record = (await h.ctx.pactflow.snapshot(h.session.id)).delivery.autopilots!.need!
@@ -244,6 +246,8 @@ describe('autopilot host continuation', () => {
         update: (session, record, changes) => Reflect.get(h.ctx.pactflow, 'updateAutopilot').call(h.ctx.pactflow, session, record, changes),
         block: (session, record, reason) => Reflect.get(h.ctx.pactflow, 'blockAutopilotInSession').call(h.ctx.pactflow, session, record, reason),
         boundedError: error => String(error),
+        reviewGate: () => undefined,
+        recheckReviewGate: async () => {},
       })
       await Promise.all([driver.tick(), driver.tick()]); await driver.tick()
       expect(h.agent.followup).toHaveBeenCalledTimes(1)
