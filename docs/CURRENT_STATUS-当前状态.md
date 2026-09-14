@@ -72,6 +72,7 @@
 | 证据校验单一路径 | passed | `evidence-validation-single-path`；`acceptance-gate.spec.ts`（6）。调用点必须复用同一实现，不得各自内联 |
 | OpenSpec 规格卫生 | passed | `openspec-spec-hygiene`；`openspec-spec-hygiene.spec.ts`（3）。每个 capability 必须带真实 Purpose，不得残留归档工件 |
 | 运维文档数字准确 | passed | `operator-doc-accuracy`；`ops-doc-event-count.spec.ts`（3）。手册中各发行版写入/读取的外部事件类数**绑定代码元组**（曾修复 0.2.1 行写 13 而代码写 17） |
+| 分发清单版本准确 | passed | `operator-doc-accuracy`（扩展）；`release-manifest-accuracy.spec.ts`（2）。worker 镜像清单的 `hostEventProducerVersion` / `hostPluginVersion` 绑定代码事实，任一侧漂移即失败并指名两侧取值 |
 | 发布门禁可诊断 | passed | `release-gate-diagnosability`；`release-gate.spec.ts`（12）。拒绝时必须指名具体责任方，不得只报「不通过」 |
 | 发布门禁前置覆盖 | passed | `release-gate-prerequisite-coverage`；`real-web-gate-prerequisites.spec.ts`（4）。门禁前置逻辑自身的确定性分支被测试覆盖（2026-09-15 已离线化，不再依赖真实集群可达） |
 
@@ -129,7 +130,7 @@
 ### 2026-09-15 新增
 
 - **`artifact-ref-handoff` 的 5.1 / 7.1 未跑（not-run）**：实现链完整且 fail-closed（存储客户端、四通道门禁、脱敏门、凭据注入、保留账本、第七类卡片、工作台呈现全部已交付并有定向测试），缺的只是**真实环境**——真实 K3s + 真实 RustFS + UI 绑定后派发 + 真实模型额度。验收承载已铺好（`tests/artifact-handoff.real.spec.ts` + `pnpm run test:real-artifact`，未武装时显式失败）。**该 change 因此不得归档**。
-- **`worker/dsh/release-manifest.json` 的 `hostEventProducerVersion` 漂移**：清单写 `0.5.0`，而 `src/index.ts:228` 的 `EVENT_PRODUCER_VERSION` 是 `0.6.0`。该字段自引入提交 `1594fa5` 起就是旧值（同一提交把常量从 `0.3.0` 改为 `0.6.0`），`3146903` 更新镜像摘要与 `adapterVersion` 时也未连带更新。**当前无任何测试或脚本校验此字段**（全仓库仅该 JSON 自身出现该键）——与 `operator-doc-accuracy` 守卫的运维文档事件计数属同一类缺陷，但镜像分发清单侧无对应守卫。不影响运行时（无消费者），影响的是镜像兼容性对账的准确性。**处置待定**：改数字是分钟级，补守卫属 `operator-doc-accuracy` 的 spec 扩展，须走 OpenSpec。
+- **~~`worker/dsh/release-manifest.json` 的 `hostEventProducerVersion` 漂移~~ 已修复（2026-09-15，change `manifest-producer-version-guard`）**：清单曾写 `0.5.0` 而代码为 `0.6.0`，自引入提交 `1594fa5` 起即为旧值且全仓库无任何测试校验。已修正为 `0.6.0` 并补守卫 `release-manifest-accuracy.spec.ts`（2：生产者版本绑定 `PACTFLOW_EVENT_PRODUCER_VERSION`、插件版本绑定 `package.json`），常量迁至 `src/domain.ts` 使单测可导入（单测不以模块方式 import `index.ts`）。守卫按先红后绿交付。镜像自身标识字段（digest / `adapterVersion` / `dshVersion` / `protocol`）不在守卫范围——它们由构建钉版产生，无「代码里的另一份」可比对。
 - **两处门禁设计张力（已识别，未处置）**：① `real-suite-inventory` 的 `REQUIRED_NOT_RUN` 桶与 `check:release` 的零跳过要求**互斥**——任何 `expect.fail` 骨架或环境门控套件放进 `e2e/` 都会让发布门禁结构上不可满足（该桶当前为空，故暂未触发）。② `real-web-gate-prerequisites` 靠正则 `^const (enabled|record|realDescribe)\b` 从套件源码反推必需开关，**改个门控变量名即可绕过**该守卫。
 - **终局能力 2（项目身份）与 4（DAG 编排）无专属 capability spec**：行为由单元测试与 `docs/development-plan-开发计划.md` §2.3 承载，散落在多份 spec 中。按架构 §7 判定二者「有证据」，不构成隐性未完成；但若要按终局能力逐条举证，这两条需要现场拼装证据链。属**观察，非缺陷**。
 

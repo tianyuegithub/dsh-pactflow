@@ -109,7 +109,7 @@ E-19 主目录同步**已执行**（`/Users/ty/Codes/dsh-pactflow` 的 `main` �
 
 | # | 事项 | 说明 |
 | --- | --- | --- |
-| 21 | `release-manifest.json` 的 `hostEventProducerVersion` 漂移 | 清单写 `0.5.0`，代码 `EVENT_PRODUCER_VERSION` 是 `0.6.0`；**无任何测试校验此字段**。不影响运行时，影响镜像兼容性对账准确性。改数字是分钟级；补守卫属 `operator-doc-accuracy` 的 spec 扩展，须走 OpenSpec。**待裁决** |
+| 21 ✅ | `release-manifest.json` 的 `hostEventProducerVersion` 漂移 | **已修复（2026-09-15，change `manifest-producer-version-guard`，已实施待归档）**：修正为 `0.6.0` 并补守卫 `release-manifest-accuracy.spec.ts`（先红后绿），同族字段 `hostPluginVersion` 一并绑定；常量迁至 `src/domain.ts` 使单测可导入。`check` 105 文件 / 747 用例全绿 |
 | 22 | 两处门禁设计张力 | ① `REQUIRED_NOT_RUN` 桶与 `check:release` 零跳过要求互斥（该桶当前为空，暂未触发）；② `real-web-gate-prerequisites` 靠正则反推必需开关，**改门控变量名即可绕过**。**待裁决是否加固** |
 | 23 | 架构文档 §6 决策 1 表述过时 | 写着 `confirm-execution-granularity`「当前尚未归档」，实际已于 2026-09-13 归档。**架构文档变更权仅用户**，已出提案待裁决 |
 

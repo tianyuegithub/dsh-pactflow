@@ -2,6 +2,18 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-15 分发清单版本守卫（change `manifest-producer-version-guard`，已实施、未归档）
+
+当前阶段：七个新立项 change 的第一个，按 tasks 全部完成并通过全量门禁。**归档待用户授权。**
+
+- 缺陷事实：`worker/dsh/release-manifest.json` 声明 `hostEventProducerVersion: "0.5.0"`，而宿主实际注册 `0.6.0`。Git 历史定位——`1594fa5` 在同一提交把常量从 `0.3.0` 改为 `0.6.0` 并写入清单 `0.5.0`（即**自引入起就是错的**，不是曾对过后漂移）；`3146903` 刷新镜像 digest 与 `adapterVersion` 时也未连带更新。全仓库仅该 JSON 自身出现该键，**无任何测试或脚本校验**。
+- 改数字的证据基础（非新证据主张）：当前 digest 镜像推送于 `3146903`，其时代码已是 `0.6.0`，其后的 `test:worker-container` 与集群内 Pod 验收均在 `0.6.0` 宿主下完成——即该镜像**本就是**在 `0.6.0` 下构建并验收的，修正清单是纠正记录错误。据此撤销首版 design 中「先钉版再改数字」的排序顾虑。
+- 实施：① `EVENT_PRODUCER_VERSION` 迁至 `src/domain.ts` 并更名 `PACTFLOW_EVENT_PRODUCER_VERSION`，`src/index.ts` 改为导入——迁移原因是单测**不以模块方式 import `src/index.ts`**（默认 vitest 无标准装饰器转换），常量留在服务类文件里则守卫读不到；② 新增 `tests/release-manifest-accuracy.spec.ts`，失败消息指名两侧具体取值；③ 清单修正为 `0.6.0`。
+- **先失败后通过**：守卫首次运行如实报红——`release-manifest.json declares hostEventProducerVersion "0.5.0" but the host registers "0.6.0"`，修正后转绿。
+- 实施中扩展（spec 已同步）：发现同族字段 `hostPluginVersion` 属同一类（对应插件包版本，当前值正确），一并绑定以防未来漂移；spec Requirement 相应由「宿主事件生产者版本」扩展为「与代码事实一一对应的版本字段」，并显式排除镜像自身标识字段（digest / `adapterVersion` / `dshVersion` / `protocol`）——它们由构建钉版产生，不存在「代码里的另一份」可供比对。
+- 验证：`pnpm run typecheck` 干净；`pnpm run check` **exit 0**——`pnpm test` **105 文件 / 747 用例（740 通过 / 7 环境门控跳过 / 0 失败）**（较本批前 +1 文件 +2 用例）、`pack:check` 19 必需产物；`openspec validate --all --strict` **56/56**。
+- 边界：不动镜像、不动 `adapterVersion` / `dshVersion` / 协议版本、不动其它字段——那些归 `dsh-harness-telemetry`。该 change 升 `adapterVersion` 重新钉版前以本 change 归档为前置。
+
 ## 2026-09-15 功能对照 → 七个 change 立项（经独立架构评审修订）+ 架构 §3.4 措辞裁决
 
 当前阶段：按用户要求以功能维度对照计划 §4–§10 七个里程碑与代码，列出未完成功能后立项；经一轮以独立架构师视角的自评审，按评审意见修订后全部通过 `openspec validate --all --strict`（56/56：48 spec + 8 change）。**本批只新增 `openspec/changes/` 与文档，`src/`、`scripts/` 零改动。**
