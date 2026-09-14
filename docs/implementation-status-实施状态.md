@@ -2,6 +2,36 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-15 四路独立评审与处置（本轮收尾）
+
+对本轮 24 个提交、86 文件、6602 行做了四路独立评审（领域与 fold / 宿主服务 / 测试与守卫强度 / 客户端与合同一致性）。**评审真的跑了 canary**，抓出的问题比我自查多得多，其中三条守卫被证明是零防护。
+
+### 已修复的高严重度缺陷（四条，均为本轮引入）
+
+1. **`markStaleSuccessors` 会让运行中的下游永久无法落账**。给 `running`/`claimed` 后继打过期标记时推进了其 revision，而 `settleRunInSession` 拒绝 `currentNode.revision !== currentRun.nodeRevision` 的结果——下游会被一个纯信息性的标记**卡死在半途**。更讽刺的是我自己的 spec 写的是「running 的下游在其结果落账时被标记」，实现却是立刻标记。**修**：只标记 `succeeded` 后继；running/claimed 的在自己结果落账那一刻由 `settleRunInSession` 末尾的自检补上（此时 Run 已终态，推进 revision 无害）。**canary 实证**：恢复旧行为后新用例转红。
+2. **`rerunNode` 预算耗尽会把已成功节点改成 `paused`**，等于**为了拒绝一次操作而摧毁交付终态**——且没有任何路径能把 `succeeded` 放回去，一次点击就让整个需求永远无法收口。我照抄了 `retryNode` 的写法，却没意识到它的前态是 `failed`（改成 paused 无损），而这里是 `succeeded`。**修**：只拒绝，不改动任何状态；预算也进 `rerunRefusal`，让 preview 先行告知而不是点下去才出事。
+3. **`planRerunsSucceededNode` 误伤所有增量方案**。`validateExecutionPlan` **要求**方案必须包含该需求下每一个既有节点，所以只要有一个节点成功过，任何后续方案必然命中——挂机从此再也选不了方案。而它防的威胁根本不存在：`materializePlanReview` 的 `create` 对已存在节点直接 return，方案确认**结构上无法重跑**任何节点。**修**：移除该守卫，改为结构性论证 + 行为测试（批准含已成功节点的方案后，该节点 state/revision/Run 数全不变）。
+4. **挂机等待外部评审时每秒追加一条 `autopilot-updated` 事件**。驱动每秒一跳而评审者以小时计，等于每小时 3600 条事件写进唯一事实源，且 autopilot revision 每秒变动使任何携带 `expectedRevision` 的并发调用必然 CAS 失败。**修**：仅在 reason 真的变化时落账。
+
+### 已修复的零防护守卫（三条）
+
+- **`review-gate-boundary` 的「不得提交评审、不得改分支保护」完全空转**：我用单行正则要求 URL 与 `method: 'POST'` 出现在同一行，而本仓写法是分两行——**该正则永远不可能命中**。评审注入了一个向 `/pulls/N/reviews` POST 批准票的方法，8 项全绿。这是本轮唯一自称「adversarial guard」的边界守卫，实际零防护。**修**：改为行为断言（真实客户端 + recordingFetch，断言读门全程零写请求）+ 写请求总数封顶为 3 并逐一列名。**同一 canary 现在转红**。
+- **「核验实现唯一」靠 `this.gitea.mergePullRequest` 字面量计数**：`const gitea = this.gitea` 别名即可逃逸，把合并搬进 `src/host/*.ts` 也能逃（扫描范围只有 `index.ts`）。**修**：扫描扩到整个宿主面含 `src/host/*.ts`，改为统计 `mergePullRequest(` 总出现次数。
+- **skill 的实际可加载性无人守卫**：把 `skills/` 改成 `skillz/` 指向不存在的目录，`preset.spec` 仍全绿——此时 persona 还在指挥模型去加载六个不存在的 skill，而 persona 正是那 66% 被迁出内容的唯一取回通道。**修**：在 `agent-skill-composition.spec.ts` 用**真实注册表 + 真实文件系统提供方**驱动发现，断言六个 skill 全部解析出来且描述非空。**canary 实证**：目录指错即转红。
+  - 附带发现：`preset.spec.ts` 的 `fs` 桩只有 `sandboxMode`，而 skill 提供方在存在 `ctx.fs` 时**经它读 SKILL.md**，于是目录恒空。这解释了为什么可加载性断言不能放在那个夹具里，落点因此改到独立测试。
+
+### 其它已修
+
+- 红线反向检查曾是**恒真**（`if (element.test(body))` 包住一条循环外已无条件执行过的断言），改为可证伪形式并加自证用例；红线自证从「只模拟删一条」改为**逐条**（否则把另外四条的正则弱化成 `/./` 不会被发现）。
+- `typecheck` 守卫只验「所列工程有 source」，删掉 client 工程仍绿；补「必须覆盖 host 与 client 两面」。
+
+### 评审提出但**未处置**的（如实记录，非缺陷即说明理由）
+
+- `counters` 在「主体数量」维度无界并整体进快照（中）、`comment-added` 去重只覆盖最近 20 条（中低，当前生产路径不可达）、`evaluateReviewGate` 不校验 PR 号身份（中，当前两个调用点都传对）、`reviewGate` 合并成功后不清除导致复查诬告（中）、`readComments` 全量扫描的性能（中）、`pullRequestGateState` 评审列表不翻页（中）、`cancelReviewGate` 无客户端入口（中）、客户端三个新组件绕开 overlay 既有取消/代次防护（中）、`pactflowDelivery` 未升 `stateVersion`（中）、persona 收缩丢了「交付请求起手式」（中）。
+- **这些都是真问题**，但都不是「会造成错误交付」的那一类；本轮已到收尾，逐条处置留作下一批。它们已在此登记，不得因为没写进 tasks.md 就消失。
+- 一条系统性隐患：测试 `import '../lib/index.js'`（构建产物），只跑 `pnpm test` 而不 build 会拿到旧代码的绿。`pnpm run check` 含 build 所以门禁安全，但本地「先失败后通过」会有假阴性。
+- 验证：`pnpm run check` **exit 0** —— **114 文件 / 901 用例（894 通过 / 7 环境门控跳过 / 0 失败）**，`pack:check` 25 必需产物。
+
 ## 2026-09-15 Agent Skill 组合（change `agent-skill-composition`，17/23 任务完成，**persona 收缩未取得合入门**、未归档）
 
 当前阶段：六个随包 skill、preset 挂载、persona 收缩、红线守卫、文档单一来源迁移全部落地，全量门禁全绿，**真实挂载审计通过**。但按本 change 自己写死的合入条件，**收缩尚不得视为完成**——见下。
