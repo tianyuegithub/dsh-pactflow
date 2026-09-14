@@ -378,20 +378,13 @@ export function PactFlowSettingsCard({
   const credentialsForProbe = (
     kind: PactFlowInfrastructureResourceKind, id: string,
   ): readonly [string, string][] => {
-    const refs: string[] = []
-    if (kind === 'registry') {
-      const ref = draft.registries.find(item => item.id === id)?.passwordCredentialRef
-      if (ref !== undefined) refs.push(ref)
-    }
-    if (kind === 'git-provider') {
-      const ref = draft.gitProviders.find(item => item.id === id)?.tokenCredentialRef
-      if (ref !== undefined) refs.push(ref)
-    }
-    if (kind === 'model-connection') {
-      const ref = draft.modelConnections?.find(item => item.id === id)?.apiKeyCredentialRef
-      if (ref !== undefined) refs.push(ref)
-    }
-    return refs.map(ref => [ref, credentialDrafts[ref] ?? ''] as const)
+    // Single source of truth for per-kind credential refs (registry/git-provider/
+    // model-connection/artifact-store all come from here), so a new resource kind
+    // can never be missed by the probe credential preparation again.
+    const resource = resourceRows(draft, kind).find(row => row.id === id)
+    if (resource === undefined) return []
+    return resourceCredentialRefs(kind, resource)
+      .map(ref => [ref, credentialDrafts[ref] ?? ''] as const)
       .filter((entry): entry is [string, string] => entry[1].trim() !== '')
   }
   const appendDiscoveryFailure = (key: string, name: string, error: unknown): void => {
