@@ -496,6 +496,14 @@ export interface PactFlowSaveValidationPolicyRequest {
   readonly groups?: readonly PactFlowValidationPolicyGroup[]
 }
 
+/** artifact-ref-handoff: bind or clear the project's artifact store (owner-only). */
+export interface PactFlowSaveArtifactBindingRequest {
+  readonly workspaceId: string
+  readonly expectedRevision: number
+  /** Empty/omitted clears the binding; non-empty must name a registered store. */
+  readonly artifactStoreId?: string
+}
+
 /** Owner request to replace the host-owned closing baseline (A03-c). */
 export interface PactFlowSaveHostBaselineRequest {
   readonly workspaceId: string

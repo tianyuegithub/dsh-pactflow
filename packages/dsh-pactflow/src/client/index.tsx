@@ -137,12 +137,13 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         return result.value
       },
       catalogs: async () => {
-        const [clusters, pools, templates, models, providers] = await Promise.all([
+        const [clusters, pools, templates, models, providers, stores] = await Promise.all([
           pactflow.listK3sClusters(),
           pactflow.listWorkerPools(), pactflow.listK3sTemplates(),
           pactflow.listModelConnections(), pactflow.listGiteaProviders(),
+          pactflow.listArtifactStores(),
         ])
-        for (const result of [clusters, pools, templates, models, providers]) {
+        for (const result of [clusters, pools, templates, models, providers, stores]) {
           if (!result.ok) throw new Error(result.error.message)
         }
         return {
@@ -153,6 +154,9 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           giteaProviders: providers.value.map((provider: { readonly id: string; readonly displayName: string; readonly username?: string }) => ({
             id: provider.id, name: provider.displayName,
             ...(provider.username === undefined ? {} : { username: provider.username }),
+          })),
+          artifactStores: stores.value.map((store: { readonly id: string; readonly displayName: string; readonly bucket: string }) => ({
+            id: store.id, name: store.displayName, bucket: store.bucket,
           })),
         }
       },
@@ -177,6 +181,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         const result = await pactflow.saveWorkspaceWorkerPolicy({
           workspaceId, expectedRevision, k3sGitSecretName, worker,
         })
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      saveArtifactBinding: async (workspaceId, expectedRevision, artifactStoreId) => {
+        const result = await pactflow.saveArtifactBinding({ workspaceId, expectedRevision, artifactStoreId })
         if (!result.ok) throw new Error(result.error.message)
         return result.value
       },

@@ -182,6 +182,7 @@ import type {
   PactFlowSaveValidationProfilesRequest,
   PactFlowSaveValidationPolicyRequest,
   PactFlowSaveHostBaselineRequest,
+  PactFlowSaveArtifactBindingRequest,
   PactFlowValidationProfile,
   PactFlowValidationProfileInput,
   PactFlowNeed,
@@ -2776,6 +2777,44 @@ export class PactFlowService extends TypertRemoteService {
       id: provider.id, displayName: provider.displayName,
       ...(provider.username === undefined ? {} : { username: provider.username }),
     }))
+  }
+
+  /** List non-secret artifact store identities for Workspace project setup. */
+  @Remote('listArtifactStores')
+  listArtifactStores(): readonly { readonly id: string; readonly displayName: string; readonly bucket: string }[] {
+    return (this.infrastructure?.settings.artifactStores ?? []).map(store => ({
+      id: store.id, displayName: store.displayName, bucket: store.bucket,
+    }))
+  }
+
+  /**
+   * artifact-ref-handoff: bind (or clear, with an empty id) the project's
+   * artifact store. Owner-only path through the Workspace project config,
+   * same revision-CAS discipline as every other project field.
+   */
+  @Remote('saveArtifactBinding')
+  async saveArtifactBinding(request: PactFlowSaveArtifactBindingRequest): Promise<PactFlowWorkspaceProjectConfig> {
+    const workspace = this.requireWorkspace(request.workspaceId)
+    const current = await this.workspaceProjects.get(request.workspaceId)
+    this.requireWorkspaceProjectRevision(current, request.expectedRevision)
+    const storeId = request.artifactStoreId?.trim() ?? ''
+    if (storeId !== '' && this.infrastructure?.artifactStore(storeId) === undefined) {
+      throw new Error(`PactFlow artifact store "${storeId}" is not configured`)
+    }
+    const now = Date.now()
+    // Destructure so an empty submission genuinely CLEARS the binding instead
+    // of carrying the previous one through the spread.
+    const { artifact: _previous, ...carried } = current ?? {} as PactFlowWorkspaceProjectConfig
+    const config: PactFlowWorkspaceProjectConfig = {
+      ...carried,
+      schema: 'dsh_pactflow_workspace_project/v1', workspaceId: request.workspaceId,
+      workspacePath: workspace.path, workspaceTitle: workspace.title,
+      revision: (current?.revision ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now,
+      ...(storeId === '' ? {} : { artifact: { artifactStoreId: storeId, boundAt: now } }),
+    }
+    const written = await this.workspaceProjects.putIfRevision(request.expectedRevision, config)
+    if (!written) throw new Error('PactFlow Workspace project revision changed while saving artifact binding')
+    return config
   }
 
   /** List non-secret K3s cluster identities for Workspace execution targeting. */

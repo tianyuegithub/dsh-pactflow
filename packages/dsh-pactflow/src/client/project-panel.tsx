@@ -36,11 +36,13 @@ export interface PactFlowProjectPanelFace {
     readonly templates: readonly PactFlowHarnessProfileSettings[]
     readonly models: readonly PactFlowModelConnectionSettings[]
     readonly giteaProviders: readonly { readonly id: string; readonly name: string; readonly username?: string }[]
+    readonly artifactStores: readonly { readonly id: string; readonly name: string; readonly bucket: string }[]
   }>
   initializeGit(workspaceId: string, expectedPath: string): Promise<PactFlowWorkspaceProjectView>
   adoptGit(workspaceId: string, expectedRevision: number): Promise<PactFlowWorkspaceProjectConfig>
   gitSecrets(clusterId: string): Promise<readonly string[]>
   saveWorker(workspaceId: string, expectedRevision: number, k3sGitSecretName: string, worker: PactFlowProjectWorkerPolicy): Promise<PactFlowWorkspaceProjectConfig>
+  saveArtifactBinding(workspaceId: string, expectedRevision: number, artifactStoreId: string): Promise<PactFlowWorkspaceProjectConfig>
   saveValidation(workspaceId: string, expectedRevision: number, profiles: readonly PactFlowValidationProfileInput[] | undefined, selectedIds: readonly string[]): Promise<PactFlowWorkspaceProjectConfig>
   savePolicy(workspaceId: string, expectedRevision: number, groups: readonly { readonly id: string; readonly profileIds: readonly string[] }[]): Promise<PactFlowWorkspaceProjectConfig>
   saveHostBaseline(workspaceId: string, expectedRevision: number, commands: readonly { readonly command: string; readonly args: readonly string[]; readonly timeoutMs: number }[]): Promise<PactFlowWorkspaceProjectConfig>
@@ -91,7 +93,7 @@ export function requestProjectPanel(target: ProjectPanelTarget): void {
   projectPanelNavigation.set({ sequence: projectPanelNavigation.getSnapshot().sequence + 1, target })
 }
 
-export function PactFlowProjectPanel({ wide, list, details, migrationCandidates, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveValidation, savePolicy, saveHostBaseline, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
+export function PactFlowProjectPanel({ wide, list, details, migrationCandidates, catalogs, initializeGit, adoptGit, gitSecrets, saveWorker, saveArtifactBinding, saveValidation, savePolicy, saveHostBaseline, createRemote, remoteCandidates, confirmRemote, migrate }: ProjectPanelProps) {
   const [open, setOpen] = useState(false)
   const navigationTarget = useRef<ProjectPanelTarget | null>(null)
   useEffect(() => projectPanelNavigation.subscribe(() => {
@@ -468,6 +470,16 @@ export function PactFlowProjectPanel({ wide, list, details, migrationCandidates,
                   </article>
                 })}</div>}
                 <div style={actionsStyle}><button type="button" disabled={busy || clusterId === '' || poolId === '' || gitSecretName === '' || agentProfiles.length === 0} onClick={() => act(() => saveWorker(selected.workspaceId, selected.config?.revision ?? 0, gitSecretName, { clusterId, workerPoolId: poolId, maxConcurrency: totalWorkers, agentProfiles }), { id: 'agent-strategy', success: 'Agent 策略保存成功' })} style={primaryButtonStyle}>{savingAction === 'agent-strategy' ? '保存中…' : '保存 Agent 策略'}</button></div>
+                <div style={rowCopyStyle}>
+                  <strong>大内容外置（对象存储）</strong>
+                  <span style={detailStyle}>绑定后派发会把执行日志等大内容外置为 artifactRef 地址，工作台可读取全文；未绑定不影响现有行为。</span>
+                  <ArtifactBindingRow
+                    stores={catalog?.artifactStores ?? []}
+                    boundId={selected.config?.artifact?.artifactStoreId ?? ''}
+                    busy={busy}
+                    onSave={(storeId) => act(() => saveArtifactBinding(selected.workspaceId, selected.config?.revision ?? 0, storeId), { id: 'artifact-binding', success: storeId === '' ? '已解除对象存储绑定' : '对象存储绑定已保存' })}
+                  />
+                </div>
               </section>
 
               <section style={cardStyle}><h3 style={cardTitleStyle}>会话配置迁移候选</h3>
@@ -526,6 +538,8 @@ const cardTitleStyle: CSSProperties = { margin: 0, fontSize: 17 }
 const factsStyle: CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 10, margin: 0 }
 const formGridStyle: CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 12 }
 const fieldStyle: CSSProperties = { display: 'grid', gap: 6, fontSize: 13 }
+const rowCopyStyle: CSSProperties = { display: 'grid', gap: 4, minWidth: 0 }
+const detailStyle: CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, overflowWrap: 'anywhere' }
 const inputStyle: CSSProperties = { width: '100%', minHeight: 36, boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-3)', color: 'inherit', padding: '7px 10px' }
 const actionsStyle: CSSProperties = { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }
 const primaryButtonStyle: CSSProperties = { border: 0, borderRadius: 8, background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-3)', padding: '8px 12px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 7 }
@@ -654,4 +668,28 @@ function HostBaselineSection({ config, disabled, onSave }: {
       </div>
     </section>
   )
+}
+
+function ArtifactBindingRow({ stores, boundId, busy, onSave }: {
+  readonly stores: readonly { readonly id: string; readonly name: string; readonly bucket: string }[]
+  readonly boundId: string
+  readonly busy: boolean
+  readonly onSave: (storeId: string) => void
+}) {
+  const [selectedStore, setSelectedStore] = useState<string | null>(null)
+  const value = selectedStore ?? boundId
+  const dirty = value !== boundId
+  if (stores.length === 0) {
+    return <span style={detailStyle}>尚未登记对象存储：先在「设置 → 零脉基础设施」中添加并测试通过。</span>
+  }
+  return <div style={{ display: 'grid', gap: 6 }}>
+    <select value={value} disabled={busy} style={inputStyle}
+      onChange={event => setSelectedStore(event.currentTarget.value)}>
+      <option value="">不绑定（保持现有行为）</option>
+      {stores.map(store => <option key={store.id} value={store.id}>{store.name}（{store.bucket}）</option>)}
+    </select>
+    <div style={actionsStyle}><button type="button" disabled={busy || !dirty}
+      onClick={() => { onSave(value); setSelectedStore(null) }}
+      style={primaryButtonStyle}>{busy ? '保存中…' : '保存绑定'}</button></div>
+  </div>
 }
