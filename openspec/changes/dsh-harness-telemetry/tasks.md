@@ -25,17 +25,17 @@
 - [ ] 3.1 **往上冒充守卫**：宿主执行了验证但 runner 未回报逐步报告 → `verification` MUST NOT 被声称。先失败后通过——先写一版"宿主跑了就算"的实现证明测试能抓住它。验证：单测
 - [ ] 3.2 **往下冒充守卫**：runner 只回报单命令自由格式输出（`cli-response` 形态）→ 至多 `artifact`，不含 `verification`。先失败后通过——先写一版"跑了命令就点亮"的实现证明测试能抓住它。验证：单测
 - [ ] 3.3 宿主逐项核对：报告的步数/顺序/每步命令身份与登记 Profile 不符 → 不声称并指名不符项。验证：单测（顺序颠倒、缺步、多步三例）
-- [ ] 3.4 第三方 Harness 的 `tool-invocation` 与 `verification` 保持不可证。验证：单测
+- [x] 3.4 第三方 Harness 的 `tool-invocation` 与 `verification` 保持不可证。**由任务 1 的逐 Harness 守卫覆盖**：`harness-capabilities.spec.ts` 的「永不虚报」用例已改为 `it.each` 逐 Harness 断言四者的可证集合与阶段映射都不含这两级。`dsh` 将来获得它们时，该循环强制那次授予只对 `dsh` 声明。验证：`harness-capabilities.spec.ts`
 
 ## 4. 用量纳入预算
 
-- [ ] 4.1 `src/run-budget.ts`：新增用量维度与**一等的「不可得」状态**；不可得 MUST NOT 记为 0、MUST NOT 参与预算判定。先失败后通过。验证：单测
-- [ ] 4.2 **既有三项权威不被覆盖**：用量可得时，输出上限仍由 `maxOutputBytes` 单独决定。验证：单测（对抗性守卫）
-- [ ] 4.3 Session Event：用量与工具调用计数走既有运行结果 payload 的**可选结构化字段**，不新增事件类型、不升生产者版本。验证：单测断言旧读端解析不失败、既有会话保持可写；若 `need-comment-threads` / `need-attachments` 已先实施，在当前版本号上重跑
+- [x] 4.1 `src/run-budget.ts`：新增 `PactFlowRunUsage`（`available` 判别联合）、`parseRunUsage`、`PactFlowUsageBudget` 与 `evaluateUsageBudget`。不可得是独立状态而非 0——真实的零仍与「该 Harness 不告诉我们」可区分；部分回报、负数、小数、字符串一律判为不可得而非强制转换（强转会制造一个没人测量过的数字，与把缺失记成 0 是同一缺陷的另一条路径）。判定结果带 `judged`，使「在预算内」与「根本没判」不再是同一个值。验证：`run-usage-budget.spec.ts`（17 例）
+- [x] 4.2 **既有三项权威不被覆盖**：对抗用例在用量为极大值时断言 `boundOutputToBudget` 与 `evaluateAttemptBudget` 的结论逐字不变；另断言默认预算**不含**任何用量上限字段——一个默认上限会让每一个既有运行都被一个没人选过的数字评判。验证：同上
+- [x] 4.3 用量走既有运行结果 payload 的可选结构化字段。守卫直接扫 `src/domain.ts`：任一版本词汇表中不得出现提及 usage/token/modelCalls/toolInvocation 的事件类型，且 `PACTFLOW_EVENT_PRODUCER_VERSION` 仍为 `0.7.0`。这比「断言既有会话可写」更强——**没有新增事件类型，写冻结就无从发生**。旧读端解析不失败亦有用例。`need-comment-threads` 已归档，当前版本号即 `0.7.0`。验证：同上
 
 ## 5. 镜像重建与钉版
 
-- [ ] 5.1 前置：确认 `manifest-producer-version-guard` 已归档、守卫为绿
+- [x] 5.1 前置已满足：`manifest-producer-version-guard` 已归档为 `archive/2026-09-15-manifest-producer-version-guard`；守卫 `release-manifest-accuracy.spec.ts` 与 `release-artifact.spec.ts` 共 17 例全绿
 - [ ] 5.2 镜像重建并按 digest 重新钉版；`adapterVersion` 按既有版本语义升级（倾向 `1.1.0 → 1.2.0`，实施时确认）；清单 `hostEventProducerVersion` 由守卫钉住
 - [ ] 5.3 `release-manifest` / `runtime-manifest` 一致性由既有 `pack:check` 继续钉住。验证：`release-artifact.spec.ts`
 
