@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   PACTFLOW_REVIEW_GATE_MAX_RECHECKS,
@@ -242,14 +242,26 @@ describe('PactFlow closing has exactly one merge-and-verify implementation', () 
   // The waiting path must not grow its own copy of the closing checks: the
   // unprotected path carries years of adversarial coverage (exact merge SHA,
   // ancestry, task set against this baseline, binding-sourced credentials).
-  const source = readFileSync(resolve(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8')
+  const hostRoot = resolve(import.meta.dirname, '..', 'src')
+  // Scan the whole host surface, not just index.ts: the narrow-port modules under
+  // src/host/ are exactly where a second copy would naturally be put.
+  const hostSources = [
+    readFileSync(resolve(hostRoot, 'index.ts'), 'utf8'),
+    ...readdirSync(resolve(hostRoot, 'host'))
+      .filter(name => name.endsWith('.ts'))
+      .map(name => readFileSync(resolve(hostRoot, 'host', name), 'utf8')),
+  ].join('\n')
+  const source = readFileSync(resolve(hostRoot, 'index.ts'), 'utf8')
 
-  it('calls the Gitea merge from exactly one place', () => {
-    expect([...source.matchAll(/this\.gitea\.mergePullRequest\(/g)]).toHaveLength(1)
+  it('mentions the Gitea merge exactly once across the whole host surface', () => {
+    // Count every mention rather than the `this.gitea.` spelling: aliasing it
+    // (`const gitea = this.gitea`) or destructuring would slip past a
+    // prefix-shaped match while adding a real second merge path.
+    expect([...hostSources.matchAll(/mergePullRequest\(/g)]).toHaveLength(1)
   })
 
-  it('verifies the merge commit from exactly one place', () => {
-    expect([...source.matchAll(/this\.git\.revalidateMergeCommit\(/g)]).toHaveLength(1)
+  it('mentions the merge-commit revalidation exactly once across the whole host surface', () => {
+    expect([...hostSources.matchAll(/revalidateMergeCommit\(/g)]).toHaveLength(1)
   })
 
   it('re-enters closing from the recheck instead of merging inside it', () => {

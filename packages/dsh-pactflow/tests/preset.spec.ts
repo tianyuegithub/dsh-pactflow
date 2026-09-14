@@ -78,6 +78,12 @@ describe('PactFlow packaged Agent Preset', () => {
       'skill',
     ])
     expect(ctx.tools.schemas()).toEqual([])
+
+    // The `skill` tool being present proves the loader mounted. That the six
+    // package-owned skills are actually DISCOVERABLE is proven separately, in
+    // agent-skill-composition.spec.ts, against the real provider with a real
+    // filesystem — this harness stubs `fs`, and the provider reads SKILL.md
+    // through `ctx.fs` when one is present.
     await handle.dispose()
   })
 })

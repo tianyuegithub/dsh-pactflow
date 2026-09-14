@@ -105,6 +105,13 @@ describe('PactFlow verification-script hygiene', () => {
     const source = readFileSync(join(scriptsRoot, 'typecheck.mjs'), 'utf8')
     const projects = [...source.matchAll(/'([^']*tsconfig\.[a-z]+\.json)'/g)].map(match => match[1]!)
     expect(projects.length, 'typecheck.mjs must name the projects it checks').toBeGreaterThan(0)
+    // Coverage, not just validity: dropping the client project would leave every
+    // listed project with sources (so the check below would still pass) while the
+    // whole client face silently stopped being type-checked.
+    expect(projects.some(project => project.includes('tsconfig.host.json')),
+      'typecheck must cover the host face').toBe(true)
+    expect(projects.some(project => project.includes('tsconfig.client.json')),
+      'typecheck must cover the client face').toBe(true)
     for (const project of projects) {
       const config = JSON.parse(readFileSync(resolve(scriptsRoot, '..', project), 'utf8')) as {
         files?: readonly string[]

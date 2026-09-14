@@ -308,6 +308,41 @@ describe('PactFlow rerun marks successors without cascading', () => {
     expect(runsOf('b')).toHaveLength(runsBefore)
   })
 
+  it('lets a successor that was running while its input moved still record its result', async () => {
+    // The dangerous shape: a Run pins the node revision it claimed
+    // (`settleRunInSession` refuses a result whose nodeRevision no longer
+    // matches). Marking a RUNNING successor immediately would bump its revision
+    // and make its own result impossible to record — the node stranded
+    // mid-flight by a marker that is only informational.
+    createNode('a')
+    createNode('b', { dependencies: ['a'], codeInputs: ['a'] })
+    await dispatch('a')
+    await dispatch('b')
+
+    // Put b back in flight: authorize a rerun, then claim it. It now has a
+    // prior Run carrying a's old commit as a code input, and a pinned revision.
+    rerun('b')
+    const claimed = ctx.pactflow.claimNode(session.id, {
+      nodeId: 'b', expectedRevision: node('b').revision, provider: 'spawn', leaseDurationMs: 60_000,
+    })
+    const pinned = node('b').revision
+    expect(node('b').state).toBe('claimed')
+
+    // The upstream moves while b is claimed.
+    rerun('a')
+    await dispatch('a')
+
+    // b's revision must be untouched, or its result can never land.
+    expect(node('b').revision).toBe(pinned)
+
+    // And the precondition its result depends on still holds: settleRunInSession
+    // refuses when `currentNode.revision !== currentRun.nodeRevision`, so this
+    // equality IS the difference between a recordable result and a node stranded
+    // mid-flight.
+    const pinnedRun = runsOf('b').find(run => run.id === claimed.run.id)!
+    expect((pinnedRun as { nodeRevision: number }).nodeRevision).toBe(node('b').revision)
+  })
+
   it('clears the marker when the successor is itself re-run', async () => {
     await chain()
     rerun('a')
@@ -325,15 +360,29 @@ describe('PactFlow rerun is not reachable from the model', () => {
     expect(agentSource).not.toContain('rerunPreview')
   })
 
-  it('refuses to let autopilot auto-select a plan containing a rerun', () => {
-    // The grant authorizes advancing toward delivery, not redoing finished work.
-    // Without this, the model could recommend a plan containing a rerun and
-    // autopilot would select it — no person anywhere in the loop, which is the
-    // one constraint reruns exist to keep.
-    const source = readFileSync(resolve(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8')
-    expect(source).toContain('planRerunsSucceededNode')
-    const start = source.indexOf('private planRerunsSucceededNode')
-    expect(start).toBeGreaterThan(-1)
-    expect(source.slice(start, start + 400)).toContain("state === 'succeeded'")
+  it('cannot re-run an existing node through plan confirmation, by construction', async () => {
+    // The structural argument, exercised rather than asserted from source text:
+    // `validateExecutionPlan` REQUIRES a plan to carry every existing node of the
+    // Need, and `materializePlanReview`'s `create` returns early for a node that
+    // already exists. So plan confirmation creates nodes and never re-runs one —
+    // which is why autopilot cannot authorize a rerun even though it may
+    // auto-select a plan.
+    //
+    // An earlier guard checked "does this plan mention a succeeded node" and
+    // refused. Because plans are REQUIRED to include existing nodes, it fired on
+    // every plan once anything had succeeded, stalling all multi-round planning
+    // to defend against something this path cannot do.
+    createNode('a')
+    await dispatch('a')
+    const before = node('a')
+    const runsBefore = runsOf('a').length
+
+    // Approving a plan that names the already-succeeded node leaves it untouched.
+    await approveExecutionPlanFixture(ctx, session.id, 'A', { kind: 'git', provider: 'spawn' }, 'a')
+
+    const after = node('a')
+    expect(after.state).toBe('succeeded')
+    expect(after.revision).toBe(before.revision)
+    expect(runsOf('a')).toHaveLength(runsBefore)
   })
 })

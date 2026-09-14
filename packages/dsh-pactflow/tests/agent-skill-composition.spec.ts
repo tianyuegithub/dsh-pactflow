@@ -1,3 +1,10 @@
+import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Include from '@deepseek-ai/cordis-plugin-include'
+import Group from '@deepseek-ai/cordis-plugin-group'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
+import { pathToFileURL } from 'node:url'
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -62,40 +69,53 @@ describe('PactFlow persona keeps every red line', () => {
     }
   })
 
-  it('fails when a red line is removed', () => {
-    // Proves the guard above is load-bearing rather than vacuous.
-    const withoutOne = personaText.replace(/never grant, forge or imply a human approval/i, 'is helpful')
-    const stillMatches = RED_LINES.every(line => line.elements.every(element => element.test(withoutOne)))
-    expect(stillMatches).toBe(false)
+  it.each(RED_LINES)('$id turns this guard red when its first element is removed', redLine => {
+    // Every red line is individually load-bearing. An earlier version only
+    // simulated removing ONE of the five, so weakening the other four's patterns
+    // to /./ would have gone unnoticed.
+    const first = redLine.elements[0]
+    expect(first.test(personaText)).toBe(true)
+    const weakened = personaText.replace(first, 'is helpful')
+    expect(first.test(weakened), `element ${String(first)} matches anything`).toBe(false)
   })
 
-  it('does not accept an empty persona', () => {
-    const elements = RED_LINES.flatMap(line => line.elements)
-    expect(elements.every(element => element.test(''))).toBe(false)
+  it('does not accept an empty or trivially-short persona', () => {
+    for (const line of RED_LINES) {
+      for (const element of line.elements) {
+        // A pattern that matches the empty string would make its red line vacuous.
+        expect(element.test(''), `element ${String(element)} is vacuous`).toBe(false)
+      }
+    }
     expect(personaText.length).toBeGreaterThan(200)
   })
 })
 
 describe('PactFlow red lines are never delegated to an on-demand skill', () => {
-  it.each(RED_LINES)('$id is not carried only by a skill', redLine => {
-    // A red line that lives in a skill is a hard constraint downgraded to
-    // "applies when the model remembers to load it".
+  it.each(RED_LINES)('$id is stated by the persona, not only by a skill', redLine => {
+    // The falsifiable form: for each element, if a skill states it, the persona
+    // must state it too. Moving a red line OUT of the persona and INTO a skill
+    // turns it red here — an earlier version wrapped the same assertion in an
+    // `if` that could never change the outcome, which looked like a check and
+    // was not one.
     for (const element of redLine.elements) {
-      expect(personaText).toMatch(element)
+      const statedBySkill = [...skillBodies.entries()].filter(([, body]) => element.test(body))
+      const statedByPersona = element.test(personaText)
+      expect(
+        statedByPersona,
+        statedBySkill.length > 0
+          ? `red line "${redLine.id}" is stated only by ${statedBySkill.map(([name]) => name).join(', ')}`
+          : `red line "${redLine.id}" is stated nowhere`,
+      ).toBe(true)
     }
   })
 
-  it('keeps self-approval and workspace-write prohibitions out of skill bodies as their only home', () => {
-    const personaOnly = [/never grant, forge or imply a human approval/i, /cannot modify the shared workspace/i]
-    for (const element of personaOnly) {
-      expect(personaText).toMatch(element)
-      for (const [name, body] of skillBodies) {
-        // A skill may reference a constraint, but must not be where it first appears.
-        if (element.test(body)) {
-          expect(personaText, `${name} states a red line the persona must own`).toMatch(element)
-        }
-      }
-    }
+  it('fails when a red line moves from the persona into a skill', () => {
+    // Prove the check above is load-bearing: simulate the move and confirm the
+    // same predicate flips.
+    const element = /never grant, forge or imply a human approval/i
+    expect(element.test(personaText)).toBe(true)
+    const movedOut = personaText.replace(element, 'follows the approval process')
+    expect(element.test(movedOut)).toBe(false)
   })
 })
 
@@ -161,5 +181,50 @@ describe('PactFlow skill content has a single source', () => {
     const start = businessLogic.indexOf(heading)
     expect(start, `${heading} must exist in the business-logic doc`).toBeGreaterThan(-1)
     expect(businessLogic.slice(start, start + 400), `${skill} must be pointed at, not duplicated`).toContain(skill)
+  })
+})
+
+describe('PactFlow skills are actually discoverable', () => {
+  it('resolves all six through the real provider from the package-owned directory', async () => {
+    // Asserting that agent.cordis.yml CONTAINS the right text proves nothing about
+    // whether the directory resolves or the files parse: pointing the mount at a
+    // directory that does not exist passes every textual check while leaving the
+    // persona instructing the model to load six skills that are not there — and
+    // the persona is the only route back to the 66% of instructions moved out of
+    // it. So drive the real registry and the real filesystem provider.
+    const ctx = new Context()
+    ctx.baseUrl = pathToFileURL(resolve('package.json')).href
+    await ctx.plugin(Loader)
+    ctx.loader.builtins.include = Include
+    ctx.loader.builtins.group = Group
+    try {
+      await ctx.plugin(SkillRegistry)
+      await ctx.plugin(SkillFilesystem, {
+        includeDefaultRoots: false,
+        customSkillDirs: [skillsRoot],
+        watch: false,
+      })
+      const catalog = await ctx.skills.list({})
+      expect((catalog as readonly { readonly name: string }[]).map(entry => entry.name).sort())
+        .toEqual(skillNames.sort())
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('gives every discovered skill a non-empty description the model can choose on', async () => {
+    const ctx = new Context()
+    ctx.baseUrl = pathToFileURL(resolve('package.json')).href
+    await ctx.plugin(Loader)
+    ctx.loader.builtins.include = Include
+    ctx.loader.builtins.group = Group
+    try {
+      await ctx.plugin(SkillRegistry)
+      await ctx.plugin(SkillFilesystem, {
+        includeDefaultRoots: false, customSkillDirs: [skillsRoot], watch: false,
+      })
+      const catalog = await ctx.skills.list({}) as readonly { readonly name: string; readonly description: string }[]
+      for (const entry of catalog) {
+        expect(entry.description.length, `${entry.name} has no usable catalog description`).toBeGreaterThan(20)
+      }
+    } finally { await ctx.fiber.dispose() }
   })
 })
