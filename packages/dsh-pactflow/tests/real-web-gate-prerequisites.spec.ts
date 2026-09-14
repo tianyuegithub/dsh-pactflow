@@ -56,19 +56,23 @@ describe('PactFlow real web gate prerequisites', () => {
     vi.stubEnv('DSH_SNAPSHOT', '')
     vi.stubEnv('DSH_REAL_CRASH', '')
     vi.stubEnv('DSH_REAL_APPROVAL', '')
-    const missing = checkWebGatePrerequisites()
+    // Injected probes: the live kubectl probe may block its full 10s timeout on
+    // an unreachable cluster, past this runner's 5s budget — the arming-shape
+    // assertion must not depend on the real cluster at all.
+    const missing = checkWebGatePrerequisites({ reachable: () => true, credential: () => undefined })
     expect(missing).not.toContain('DSH_SNAPSHOT=record (real worker suites must run in record mode)')
     expect(missing.join('\n')).not.toMatch(/DSH_REAL_CRASH/)
     expect(missing.join('\n')).not.toMatch(/DSH_REAL_APPROVAL/)
   })
 
   it('reports missing credentials by name, and the result is always a string array', () => {
-    vi.stubEnv('DEEPSEEK_API_KEY', '')
-    vi.stubEnv('DSH_CREDENTIAL_FILE', '/nonexistent/credentials.yaml')
-    const missing = checkWebGatePrerequisites()
+    // Injected probes keep the report deterministic offline: unreachable
+    // cluster + unresolvable refs must both be reported by name.
+    const missing = checkWebGatePrerequisites({ reachable: () => false, credential: () => undefined })
+    expect(missing).toContain('DSH_K3S_E2E environment (kubectl cannot reach namespace pactflow)')
     expect(missing).toContain('DEEPSEEK_API_KEY credential ref (record-mode model suites)')
     expect(missing).toContain('PACTFLOW_GITEA_API_TOKEN credential ref')
-    // Whatever the live cluster/creds outcome, the result is always an array of
+    // Whatever the reported entries, the result is always an array of
     // non-empty strings (never null/undefined).
     expect(Array.isArray(missing)).toBe(true)
     expect(missing.every(entry => typeof entry === 'string' && entry.length > 0)).toBe(true)

@@ -43,14 +43,17 @@ function kubectlReachable() {
  * prerequisites here — requiring the caller to arm what the gate arms itself
  * would be a false rejection. The arming set's completeness is instead enforced
  * offline by `tests/real-web-gate-prerequisites.spec.ts`, which derives the
- * required switches from the suites themselves.
+ * required switches from the suites themselves. The two live probes are
+ * injectable (`reachable`, `credential`) so that spec stays hermetic: the real
+ * kubectl probe may legitimately block for its full 10s timeout when the
+ * cluster is unreachable, which exceeds the spec runner's 5s test budget.
  */
-export function checkWebGatePrerequisites() {
+export function checkWebGatePrerequisites({ reachable = kubectlReachable, credential = resolveCredential } = {}) {
   const missing = []
   if (!/^.+@sha256:[a-f0-9]{64}$/.test(process.env.PACTFLOW_RELAY_IMAGE ?? '')) missing.push('PACTFLOW_RELAY_IMAGE immutable acceptance image')
-  if (!kubectlReachable()) missing.push('DSH_K3S_E2E environment (kubectl cannot reach namespace pactflow)')
-  if (resolveCredential('PACTFLOW_GITEA_API_TOKEN') === undefined) missing.push('PACTFLOW_GITEA_API_TOKEN credential ref')
-  if (resolveCredential('DEEPSEEK_API_KEY') === undefined) missing.push('DEEPSEEK_API_KEY credential ref (record-mode model suites)')
+  if (!reachable()) missing.push('DSH_K3S_E2E environment (kubectl cannot reach namespace pactflow)')
+  if (credential('PACTFLOW_GITEA_API_TOKEN') === undefined) missing.push('PACTFLOW_GITEA_API_TOKEN credential ref')
+  if (credential('DEEPSEEK_API_KEY') === undefined) missing.push('DEEPSEEK_API_KEY credential ref (record-mode model suites)')
   return missing
 }
 
