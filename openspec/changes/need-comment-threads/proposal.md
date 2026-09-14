@@ -32,7 +32,7 @@
 
 ## Impact
 
-- **Host**：`src/domain.ts`（两类新事件 + `PACTFLOW_EVENT_TYPES_V0_7` 字面词汇 + 独立 collaboration 投影的 fold 与 `stateVersion`）、`src/index.ts`（`EVENT_PRODUCER_VERSION` 0.7.0、只读注册补 0.6.0、评论追加/作废/分页读取的 `@Remote()` 入口）。
+- **Host**：`src/domain.ts`（两类新事件 + `PACTFLOW_EVENT_TYPES_V0_7` 字面词汇 + `PACTFLOW_EVENT_PRODUCER_VERSION` 升 0.7.0 + 独立 collaboration 投影的 fold 与 `stateVersion`）、`src/index.ts`（只读注册补 0.6.0、评论追加/作废/分页读取的 `@Remote()` 入口）、`src/run-budget.ts`（agent 评论计数预算维度）、`worker/dsh/release-manifest.json`（`hostEventProducerVersion` 同步，无需重建镜像——worker 从不写 Session Event）。
 - **Agent**：`src/agent/index.ts` 新增 `pactflow_add_comment`；`pactflow_view` 快照补带标记的评论摘要。
 - **Client**：`src/client/session-workbench-view.tsx` 新增讨论区；`src/client/locale.ts` 补词条。
 - **Session Event**：新增 2 类事件，生产者 `0.6.0 → 0.7.0`；旧读端剥离未知键即可读新日志。

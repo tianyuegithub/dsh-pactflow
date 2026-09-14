@@ -48,4 +48,6 @@
 
 ## 与其它活跃 change 的顺序
 
+**顺序已确定（2026-09-15 实施）**：本 change 先于 `need-attachments` 实施，因此占用 `0.7.0`，附件将升 `0.8.0`。spec 中写死的 `0.7.0` 自此是既成事实而非预设。
+
 本 change 升生产者版本到 `0.7.0`。其它三个「不升版」的 change（`gitea-review-gate-closure`、`node-rerun-authorization`、`dsh-harness-telemetry`）若在本 change 之后实施，其「老会话可写」断言在 `0.7.0` 上重跑即可；若在之前实施，则本 change 实施时须重跑它们的该项断言。任务 1.5 承载这一条。

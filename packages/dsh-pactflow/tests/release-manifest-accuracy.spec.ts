@@ -23,6 +23,14 @@ const pluginPackage = JSON.parse(readFileSync(
   'utf8',
 )) as { version: string }
 
+// The Host reports its own version from a literal in the decorated service file,
+// which unit tests read as text rather than import (no decorator transform in
+// the default vitest run). Binding it here closes the same drift the manifest
+// field had: shipping 0.3.0 while health() still answers 0.2.1 would leave the
+// manifest accurate against package.json and wrong against the running host.
+const hostSource = readFileSync(resolve(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8')
+const hostVersion = /^const VERSION = '([^']+)'$/m.exec(hostSource)?.[1]
+
 describe('PactFlow worker release manifest accuracy', () => {
   it('declares the host event producer version the code actually registers', () => {
     expect(
@@ -36,6 +44,15 @@ describe('PactFlow worker release manifest accuracy', () => {
     expect(
       manifest.hostPluginVersion,
       `release-manifest.json declares hostPluginVersion ${JSON.stringify(manifest.hostPluginVersion)}`
+      + ` but the package ships ${JSON.stringify(pluginPackage.version)}`,
+    ).toBe(pluginPackage.version)
+  })
+
+  it('reports the same plugin version from the host as the package declares', () => {
+    expect(hostVersion, 'src/index.ts must declare `const VERSION = \'…\'` for this guard to read').toBeDefined()
+    expect(
+      hostVersion,
+      `src/index.ts reports VERSION ${JSON.stringify(hostVersion)}`
       + ` but the package ships ${JSON.stringify(pluginPackage.version)}`,
     ).toBe(pluginPackage.version)
   })

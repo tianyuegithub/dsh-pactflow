@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import {
   PACTFLOW_ARTIFACT_OVERSIZE_CODE,
@@ -51,6 +51,12 @@ describe.skipIf(!ready)('PactFlow artifact ref handoff real-path storage chain',
   const objectKey = (seq: number, kind: string, sender: string) =>
     pactFlowArtifactObjectKey({ needId, runId, seq, kind, sender })
   const keyOf = (uri: string) => uri.slice(`s3://${bucket!}/`.length)
+
+  // Provision the bucket here rather than relying on artifact-store.real.spec.ts
+  // having run first: putObject never creates one, so against a fresh backend an
+  // ordering or parallelism change would turn this suite red for a reason that
+  // has nothing to do with what it asserts.
+  beforeAll(async () => { await client().createBucket() })
 
   it('carries a long execution log as tail plus ref within the result-document budget', async () => {
     const store = client()
@@ -115,10 +121,14 @@ describe.skipIf(!ready)('PactFlow artifact ref handoff real-path storage chain',
       key: objectKey(3, 'report', 'host'), content: 'retention subject\n', kind: 'report', summary: 'retained',
     })
     const now = Date.now()
-    const aged = artifactObjectRecord(ref, now - 20 * 24 * 60 * 60 * 1_000)
+    // State the window this case depends on instead of leaning on the default:
+    // retuning the default retention window must not turn this suite red for a
+    // reason unrelated to what it asserts.
+    const windowMs = 14 * 24 * 60 * 60 * 1_000
+    const aged = artifactObjectRecord(ref, now - 2 * windowMs)
 
-    expect(summarizeArtifactLedger([aged], now).overdue.map(record => record.uri)).toContain(ref.uri)
-    expect(summarizeArtifactLedger([aged], now, { maxBytes: 1 }).overBudget).toBe(true)
+    expect(summarizeArtifactLedger([aged], now, { windowMs }).overdue.map(record => record.uri)).toContain(ref.uri)
+    expect(summarizeArtifactLedger([aged], now, { windowMs, maxBytes: 1 }).overBudget).toBe(true)
 
     // Marking is not deleting: the object must still be readable afterwards.
     expect((await store.headObject(keyOf(ref.uri))).bytes).toBe(ref.bytes)

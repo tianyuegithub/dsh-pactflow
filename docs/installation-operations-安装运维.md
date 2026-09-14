@@ -102,6 +102,9 @@ pnpm run test:real-gitea          # 真实受保护仓库 PR 收口
 pnpm run test:real-todo           # dogfood：真实两节点依赖链产出可用待办网页
 pnpm run test:real-probe-ledger   # 真实集群探针账本对账（UID 前置删除 + 404 幂等）
 pnpm run test:real-crash-restart  # 真实跨进程崩溃重启恢复
+pnpm run test:real-artifact       # 真实对象存储：传址链路、通道门禁、孤儿对账、保留账本（需 PACTFLOW_REAL_ARTIFACT_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY}）
+pnpm run test:real-approval       # 真实原生审批/提问（需人在浏览器里真实点批准）
+pnpm run test:real-web-gate       # 完整真实网页零跳过门禁（汇总上列多项，0 跳过 0 失败才算通过）
 ```
 
 `test:real-worker` 会发生真实模型调用。`test:real-k3s` 会创建短期 Job/ConfigMap、调用四种 Harness/API，并在测试仓库创建随机任务分支；测试结束必须确认这些资源和分支均被删除。不要在生产仓库或收费模型线路上运行，除非已经明确授权。
@@ -150,7 +153,7 @@ sudo umount /mnt/pf-nfs-a /mnt/pf-nfs-b && sudo nfsd disable && sudo rm /etc/exp
 
 ## 7. 升级、卸载与恢复
 
-升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 远程交互增强版当前写入 **19** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_5`，生产者版本 0.5.0），同时以只读注册读取 0.1.0 的 12 类词汇、0.2.0 的 13 类词汇、0.3.0 的 17 类词汇和 0.4.0 的 18 类词汇；升级不重写历史日志。旧插件不支持新增挂机事件，使用新版写入会话后不能直接用旧包读取该会话。
+升级使用同一 Profile 的 `plugin add` 安装新 tarball，然后重启 Profile 并重跑 `dump-config`、浏览器 smoke 和冷 Session 读取。0.2.1 讨论增强版当前写入 **21** 类外部事件（`PACTFLOW_EVENT_TYPES_V0_7`，生产者版本 0.7.0），同时以只读注册读取 0.1.0 的 12 类词汇、0.2.0 的 13 类词汇、0.3.0 的 17 类词汇、0.4.0 的 18 类词汇、0.5.0 的 19 类词汇和 0.6.0 的 19 类词汇；升级不重写历史日志。旧插件不支持新增的讨论与挂机事件，使用新版写入会话后不能直接用旧包读取该会话。
 
 卸载——**先做 drain 检查**（`pactflow/drainStatus`）：
 

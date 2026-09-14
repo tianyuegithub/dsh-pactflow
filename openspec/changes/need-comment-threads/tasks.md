@@ -3,7 +3,8 @@
 ## 1. 事件词汇与老会话可写性（前置，先做）
 
 - [ ] 1.1 `src/domain.ts` 新增 `pactflow/comment-added` 与 `pactflow/comment-voided` 两类事件与 payload schema（携带 `v`）；`PACTFLOW_EVENT_TYPES_V0_7` **逐条字面列出**全部类型，不由 `V0_6` 推导。验证：`domain.spec.ts` 断言词汇为字面数组且长度正确
-- [ ] 1.2 `src/index.ts` `EVENT_PRODUCER_VERSION` 升 `0.7.0`，补 `0.6.0` 的 read-only 注册。验证：单测断言 0.1.0–0.6.0 六个只读注册齐备
+- [ ] 1.2 `src/domain.ts` 的 `PACTFLOW_EVENT_PRODUCER_VERSION` 升 `0.7.0`（该常量已由 change `manifest-producer-version-guard` 从 `src/index.ts` 迁出），`src/index.ts` 补 `0.6.0` 的 read-only 注册。验证：单测断言 0.1.0–0.6.0 六个只读注册齐备
+- [ ] 1.2a 同步 `worker/dsh/release-manifest.json` 的 `hostEventProducerVersion` 至 `0.7.0`——`release-manifest-accuracy` 守卫会强制这一步。**无需重建镜像**：worker 从不写 Session Event（架构 §4 不变量），生产者升版不改变镜像行为；该字段是宿主侧兼容性记录。验证：守卫转绿
 - [ ] 1.3 **老会话可写性**：以已持久化 `0.6.0` 声明的会话夹具写入 `0.7.0` 事件，断言写入成功且日志追加升级后声明、无 conflicting declaration。**先失败后通过**——先构造会重演写冻结的夹具证明测试有效。验证：单测。实施状态如实标注「对 fork 验证，上游 PR 未合并」
 - [ ] 1.4 旧读端兼容：以不识别两类新事件的读取路径解析新日志成功不抛错；`ops-doc-event-count.spec.ts` 与安装运维文档词汇计数同步更新至全绿。验证：单测
 - [ ] 1.5 **跨 change 重跑**：若 `gitea-review-gate-closure` / `node-rerun-authorization` / `dsh-harness-telemetry` 任一已在本 change 之前实施，重跑其「老会话可写」断言于 `0.7.0`。验证：对应单测全绿并记入实施状态
