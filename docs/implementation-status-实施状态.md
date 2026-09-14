@@ -38,6 +38,21 @@
 - monorepo 子包命中的验证敏感改动由「不报」变为「上报」；
 - `pnpm test` 在产物比源码旧时由「全绿」变为「红」。
 
+### spec 语料库与代码相反的四条（已立项 `spec-corpus-corrections` 更正正文）
+
+评审第四路逐条比对 51 份 spec 与代码，发现四处**spec 正文与已交付且经评审的代码相反**。每条都先判定哪一侧承载错误，判据是「哪一侧被真实执行时会造成损害」，结论四条全是 spec 错：
+
+1. `gitea-review-gate` 要求复查节奏「取既有运行时合同」——但 `run-time-contracts` 管的是 K3s 租约与 Job 墙钟，与 API 轮询节奏无关，没有可继承的合同。归档 change 的 `tasks.md` 2.3 当时已记录前提有误，正文未回写。
+2. 同一能力的「Agent 面与 Worker MUST NOT 触发合并」比它**自己的 Scenario** 宽（Scenario 限定在等待态期间），无条件表述会把有人工批准背书的正常收口也判为违规。
+3. `node-rerun-authorization` 要求 attempt 上限耗尽时进入持久 `paused`。重跑的前态是 `succeeded`，写 `paused` 等于为拒绝一次操作而摧毁交付终态且不可逆——这正是上一轮评审抓出的高危缺陷，代码已改为只拒绝不改状态。`retryNode` 能这么做是因为其前态是 `failed`；旧表述是照搬。
+4. `failure-scene-retention-policy` 内部两条 Requirement 互斥（一条要求查询报告三项容量字段，另一条要求「只返回保留总数与超期清单」），现网实现必然违反其一。
+
+### 需用户裁决（未单方面处置）
+
+`node-rerun-authorization` 要求以 **Git 祖先链查询**判定「该节点提交是否已合并入受保护默认分支」，并在查询不可得时失败关闭并指名「无法判定是否已合并」。代码实际只查本地投影 `delivery.releases[needId]` 是否存在，无祖先链查询、无「无法判定」分支——投影缺失（冷恢复、跨需求分支、release 事件未落账）即**放行**。
+
+两侧各有理据：按 spec 实现要在同步只读 Remote 路径里引入远端 Git 查询，是实打实的设计变更；按代码改 spec 则是降级一条已写下的失败关闭要求，且残余风险真实（一个已合并的节点可能被重跑）。**属目标本身的裁决，已在 `spec-corpus-corrections` 的 proposal 中提请，未在本批处置。**
+
 ### 评审提出但未在本批处置的（如实记录）
 
 - **文档与合同一致性一路**交回的 7 条高危、13 条中危绝大多数尚未处置：`CURRENT_STATUS` 把三个已归档 change 仍标为活跃、§1 与 §3/§4 三处自相矛盾、`development-plan` 保留了已被架构 §6 推翻的「决策 1 选 B」、`dsh-harness-telemetry` 的 delta spec 只有 `ADDED` 却与既有 `harness-capability-levels` 硬冲突（**归档前必须处置**）、`node-rerun-authorization` 与 `gitea-review-gate` 各有两条 spec 与代码相反、`README` 11 条失效链接、三份状态文档基线数字两两不一致、`verification-label` 是死代码但两处文档称已接线、`openspec-spec-hygiene` 守卫能力远低于其宣称。
