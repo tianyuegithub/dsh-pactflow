@@ -1,6 +1,7 @@
 import { applyWorkerInteraction, workerInteractionRecordSchema } from './worker-interactions.ts'
 import { isAbsolute } from 'node:path'
 import { z } from 'zod'
+import type { PactFlowArtifactRef } from './artifact-store.ts'
 import { executionPlanAuthorizationSchema } from './execution-plan.ts'
 import { autopilotRecordSchema } from './autopilot.ts'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
@@ -16,6 +17,7 @@ import type {
   PactFlowDagState,
   PactFlowDeliveryProjection,
   PactFlowDeliveryState,
+  PactFlowAttachment,
   PactFlowDocument,
   PactFlowGitBinding,
   PactFlowGitAuth,
@@ -154,7 +156,37 @@ export const PACTFLOW_EVENT_TYPES_V0_7 = [
   'pactflow/worker-interaction',
 ] as const
 
-export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_7
+/**
+ * 0.8.0 adds `pactflow/attachment-linked`. Spelled out in full, like every
+ * version before it: deriving one vocabulary from another turns a future edit of
+ * the base into a silent rewrite of history.
+ */
+export const PACTFLOW_EVENT_TYPES_V0_8 = [
+  'pactflow/attachment-linked',
+  'pactflow/autopilot-updated',
+  'pactflow/cleanup-recorded',
+  'pactflow/comment-added',
+  'pactflow/comment-voided',
+  'pactflow/document-linked',
+  'pactflow/need-created',
+  'pactflow/need-updated',
+  'pactflow/node-created',
+  'pactflow/node-updated',
+  'pactflow/phase-transitioned',
+  'pactflow/project-configured',
+  'pactflow/project-initialized',
+  'pactflow/release-recorded',
+  'pactflow/review-recorded',
+  'pactflow/run-bound',
+  'pactflow/run-claimed',
+  'pactflow/run-queue-cancelled',
+  'pactflow/run-queued',
+  'pactflow/run-renewed',
+  'pactflow/run-settled',
+  'pactflow/worker-interaction',
+] as const
+
+export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_8
 
 /**
  * The external producer version this build declares when it writes. It travels
@@ -163,7 +195,7 @@ export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_7
  * than inside the decorated service class: unit tests never import `index.ts` as
  * a module, and a number nothing can read is a number nothing can guard.
  */
-export const PACTFLOW_EVENT_PRODUCER_VERSION = '0.7.0'
+export const PACTFLOW_EVENT_PRODUCER_VERSION = '0.8.0'
 
 const gitAuthSchema = pactFlowSchema<PactFlowGitAuth>(z.object({
   kind: z.literal('https-token'), username: z.string().min(1), credentialRef: z.string().min(1),
@@ -362,6 +394,32 @@ const documentSchema = pactFlowSchema<PactFlowDocument>(z.object({
   uri: z.string().min(1), title: z.string().min(1), linkedAt: z.number().int().nonnegative(),
 }))
 
+/**
+ * Structured artifact address. Declared here so the ref survives the event fold —
+ * an undeclared field is stripped on parse, which for an attachment would mean a
+ * durable record naming content it can no longer fetch or verify.
+ */
+const artifactRefSchema = pactFlowSchema<PactFlowArtifactRef>(z.object({
+  uri: z.string().min(1),
+  etag: z.string().min(1),
+  bytes: z.number().int().nonnegative(),
+  hash: z.string().regex(/^[0-9a-f]{64}$/),
+  kind: z.string().min(1),
+  summary: z.string(),
+  versionId: z.string().min(1).optional(),
+}))
+
+const attachmentSchema = pactFlowSchema<PactFlowAttachment>(z.object({
+  id: pactFlowIdSchema<'attachment'>(), needId: pactFlowIdSchema<'need'>(),
+  fileName: z.string().min(1), mediaType: z.string().min(1), summary: z.string(),
+  ref: artifactRefSchema,
+  linkedAt: z.number().int().nonnegative(),
+  // Only a person links an attachment; the Agent face is read-only. This is a
+  // field rather than a parameter for the same reason comment authorship is:
+  // a model that can write "user" here can forge a human trace.
+  linkedBy: z.literal('user'),
+}))
+
 const releaseSchema = pactFlowSchema<PactFlowRelease>(z.object({
   needId: pactFlowIdSchema<'need'>(), commit: z.string().min(1), branch: z.string().min(1),
   serviceUrl: z.string().optional(), recordedAt: z.number().int().nonnegative(),
@@ -423,6 +481,7 @@ const deliveryProjectionSchema = pactFlowSchema<PactFlowDeliveryProjection>(z.ob
   autopilots: z.record(z.string(), autopilotRecordSchema).optional(),
   reviews: z.record(z.string(), reviewSchema),
   documents: z.record(z.string(), documentSchema),
+  attachments: z.record(z.string(), attachmentSchema).default({}),
   releases: z.record(z.string(), releaseSchema),
   cleanups: z.record(z.string(), cleanupSchema).default({}),
 }))
@@ -430,12 +489,14 @@ const deliveryStateSchema = pactFlowSchema<PactFlowDeliveryState>(z.object({
   workerInteractions: z.record(z.string(), workerInteractionRecordSchema).optional(),
   autopilots: z.record(z.string(), autopilotRecordSchema).optional(),
   reviews: z.record(z.string(), reviewSchema), documents: z.record(z.string(), documentSchema),
+  attachments: z.record(z.string(), attachmentSchema).default({}),
   releases: z.record(z.string(), releaseSchema), cleanups: z.record(z.string(), cleanupSchema),
   needIds: z.array(pactFlowIdSchema<'need'>()), runNeeds: z.record(z.string(), pactFlowIdSchema<'need'>()),
 }))
 
 export function pactFlowDeliveryView(state: PactFlowDeliveryProjection): PactFlowDeliveryProjection {
-  return { reviews: state.reviews, documents: state.documents, releases: state.releases, cleanups: state.cleanups,
+  return { reviews: state.reviews, documents: state.documents, attachments: state.attachments,
+    releases: state.releases, cleanups: state.cleanups,
     ...(state.workerInteractions === undefined ? {} : { workerInteractions: state.workerInteractions }),
     ...(state.autopilots === undefined ? {} : { autopilots: state.autopilots }) }
 }
@@ -470,6 +531,7 @@ const eventPayloadSchemas: { readonly [Type in PactFlowEventType]: z.ZodType<Ses
     voidedAt: z.number().int().nonnegative(),
   }),
   'pactflow/document-linked': z.object({ v: z.literal(1), document: documentSchema }),
+  'pactflow/attachment-linked': z.object({ v: z.literal(1), attachment: attachmentSchema }),
   'pactflow/review-recorded': z.object({ v: z.literal(1), review: reviewSchema }),
   'pactflow/release-recorded': z.object({ v: z.literal(1), release: releaseSchema }),
   'pactflow/cleanup-recorded': z.object({ v: z.literal(1), record: cleanupSchema }),
@@ -722,7 +784,7 @@ export const pactflowRunsProjection: ProjectionDefinition<'pactflowRuns'> = {
 
 export const pactflowDeliveryProjection: ProjectionDefinition<'pactflowDelivery'> = {
   key: 'pactflowDelivery', stateVersion: 8, stateSchema: deliveryStateSchema,
-  init: () => ({ reviews: {}, documents: {}, releases: {}, cleanups: {}, needIds: [], runNeeds: {} }),
+  init: () => ({ reviews: {}, documents: {}, attachments: {}, releases: {}, cleanups: {}, needIds: [], runNeeds: {} }),
   apply: (state, event) => {
     event = parseEventPayload(event)
     if (event.type === 'pactflow/worker-interaction') {
@@ -757,6 +819,7 @@ export const pactflowDeliveryProjection: ProjectionDefinition<'pactflowDelivery'
     }
     const needId = event.type === 'pactflow/review-recorded' ? event.data.review.needId
       : event.type === 'pactflow/document-linked' ? event.data.document.needId
+      : event.type === 'pactflow/attachment-linked' ? event.data.attachment.needId
       : event.type === 'pactflow/release-recorded' ? event.data.release.needId
       : event.type === 'pactflow/cleanup-recorded' ? event.data.record.needId : undefined
     if (needId !== undefined && !state.needIds.includes(needId)) throw new Error('PactFlow delivery record refers to a missing Need')
@@ -782,6 +845,19 @@ export const pactflowDeliveryProjection: ProjectionDefinition<'pactflowDelivery'
         throw new Error(`PactFlow document "${next.id}" changed after linking`)
       }
       return previous === undefined ? { ...state, documents: { ...state.documents, [next.id]: next } } : state
+    }
+    if (event.type === 'pactflow/attachment-linked') {
+      versioned(event)
+      const next = event.data.attachment
+      const previous = state.attachments[next.id]
+      // Linking is idempotent on id: replaying the log must not duplicate an
+      // attachment, and a second link of the same id must not silently rewrite
+      // the ref it points at — that would let a durable record change what it
+      // names without any trace.
+      if (previous !== undefined && previous.ref.uri !== next.ref.uri) {
+        throw new Error(`PactFlow attachment "${next.id}" cannot be relinked to a different object`)
+      }
+      return previous === undefined ? { ...state, attachments: { ...state.attachments, [next.id]: next } } : state
     }
     if (event.type === 'pactflow/release-recorded') {
       versioned(event)

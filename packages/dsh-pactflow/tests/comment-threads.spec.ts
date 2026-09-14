@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   PACTFLOW_COMMENT_RECENT_LIMIT,
-  PACTFLOW_EVENT_PRODUCER_VERSION,
   PACTFLOW_EVENT_TYPES,
   PACTFLOW_EVENT_TYPES_V0_6,
   PACTFLOW_EVENT_TYPES_V0_7,
@@ -58,12 +57,15 @@ const fold = (events: readonly SessionEvent[]): PactFlowCollaborationState =>
   )
 
 describe('PactFlow comment vocabulary', () => {
-  it('spells 0.7.0 out in full rather than deriving it from the prior tuple', () => {
+  it('spells the 0.7.0 vocabulary out in full rather than deriving it from the prior tuple', () => {
     // A derived tuple turns a future edit of the base into a silent rewrite of
     // history, which is exactly what the read-compatibility contract forbids.
     expect(PACTFLOW_EVENT_TYPES_V0_7).not.toBe(PACTFLOW_EVENT_TYPES_V0_6)
-    expect(PACTFLOW_EVENT_TYPES).toBe(PACTFLOW_EVENT_TYPES_V0_7)
-    expect(PACTFLOW_EVENT_PRODUCER_VERSION).toBe('0.7.0')
+    // Deliberately not asserting that V0_7 is the CURRENT vocabulary: that part
+    // drifts with every later version and says nothing about this one's literal
+    // completeness, which is what this case is for. `need-attachments` moved the
+    // current tuple to V0_8, and V0_7 must stay exactly as it was written then —
+    // it is now a read-compatibility record, not the writer.
     expect(PACTFLOW_EVENT_TYPES_V0_7).toContain('pactflow/comment-added')
     expect(PACTFLOW_EVENT_TYPES_V0_7).toContain('pactflow/comment-voided')
     // The new vocabulary is a strict superset of the one before it.

@@ -41,10 +41,10 @@
 
 ## 1. 事件词汇（可与任务 0 并行）
 
-- [ ] 1.1 `src/domain.ts` 新增 `pactflow/attachment-linked`；新词汇表按实施时实际版本号（`0.7.0` 或 `0.8.0`）**逐条字面列出**。验证：`domain.spec.ts`
-- [ ] 1.2 生产者版本升级 + 前一版 read-only 注册。验证：单测
-- [ ] 1.3 老会话可写性：先失败后通过。验证：单测。实施状态标注「对 fork 验证」
-- [ ] 1.4 旧读端兼容 + `ops-doc-event-count` 与运维文档计数同步。验证：单测
+- [x] 1.1 `PACTFLOW_EVENT_TYPES_V0_8` 逐条字面列出 22 类（21 + `pactflow/attachment-linked`），不由 V0_7 推导。实施时的实际版本号是 `0.8.0`（`need-comment-threads` 归档时已占用 0.7.0）。验证：`attachment-vocabulary.spec.ts`
+- [x] 1.2 `PACTFLOW_EVENT_PRODUCER_VERSION` 升至 `0.8.0`，并新增 `0.7.0` 的 read-only 注册（此前最高只注册到 0.6.0）。验证：同上，用「重复注册 0.7.0 被拒」反证该只读通道确实已被占用
+- [x] 1.3 老会话可写性：用例在升版后的服务上创建会话、写入事件，再次写入不得出现声明冲突。这是本任务唯一的真实风险——升版的代价由既有项目承担，而不是由这次改动承担。验证：同上
+- [x] 1.4 三处连带同步，且**三条既有守卫都先红后绿**（它们正确抓住了升版的连带影响，这正是它们存在的意义）：`release-manifest.json` 的 `hostEventProducerVersion` → 0.8.0；运维手册计数 21→22 类并补记 0.7.0 一档；`ops-doc-event-count` 与 `producer-upgrade` 守卫扩展到 0.7.0/0.8.0。另修两条**过度绑定当前版**的守卫——`comment-threads` 断言 V0_7 是当前词汇、`run-usage-budget` 断言版本号字面为 0.7.0；二者要守的分别是「V0_7 自身字面完整」与「用量维度不新增事件类型」，都不该随他人升版而红，已解绑并写明理由
 
 ## 2. 上传与外置（依赖任务 0 选定）
 

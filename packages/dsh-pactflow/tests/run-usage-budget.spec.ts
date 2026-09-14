@@ -102,7 +102,11 @@ describe('PactFlow usage rides existing payloads, not a new event type', () => {
       const declared = new RegExp(`PACTFLOW_EVENT_TYPES_V0_\\d+[^]*?pactflow/[a-z-]*${name}`, 'i')
       expect(declared.test(domain), `an event type mentioning "${name}" was declared`).toBe(false)
     }
-    expect(domain).toContain("PACTFLOW_EVENT_PRODUCER_VERSION = '0.7.0'")
+    // Deliberately not pinned to a literal version: this guard is about the usage
+    // dimension not adding an event type, not about freezing the vocabulary against
+    // every other change. `need-attachments` legitimately moved it to 0.8.0 by
+    // adding `pactflow/attachment-linked`, and that must not read as a failure here.
+    expect(domain).toMatch(/PACTFLOW_EVENT_PRODUCER_VERSION = '\d+\.\d+\.\d+'/)
   })
 
   it('keeps the usage type optional so an older reader parses without it', () => {

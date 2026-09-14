@@ -39,6 +39,7 @@ import {
   PACTFLOW_EVENT_TYPES_V0_5,
   PACTFLOW_EVENT_TYPES_V0_6,
   PACTFLOW_EVENT_TYPES_V0_7,
+  PACTFLOW_EVENT_TYPES_V0_8,
   PACTFLOW_PROJECTIONS,
   pactFlowCommentSubjectKey,
   PACTFLOW_NEXT_PHASE as NEXT_PHASE,
@@ -480,10 +481,11 @@ export class PactFlowService extends TypertRemoteService {
     ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.4.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_4, mode: 'read-only' })
     ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.5.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_5, mode: 'read-only' })
     ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.6.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_6, mode: 'read-only' })
+    ctx.sessions.externalEventProducers.register({ producer: 'dsh-pactflow', version: '0.7.0', eventTypes: PACTFLOW_EVENT_TYPES_V0_7, mode: 'read-only' })
     this.events = ctx.sessions.externalEventProducers.register({
       producer: 'dsh-pactflow',
       version: EVENT_PRODUCER_VERSION,
-      eventTypes: PACTFLOW_EVENT_TYPES_V0_7,
+      eventTypes: PACTFLOW_EVENT_TYPES_V0_8,
     })
     for (const projection of PACTFLOW_PROJECTIONS) ctx.sessionProjections.register(projection as never)
     this.interactionSigner = new WorkerInteractionSigner(() => ctx.get('credentials') as CredentialProvider | undefined)
@@ -2271,7 +2273,7 @@ export class PactFlowService extends TypertRemoteService {
       needs: values.pactflowNeeds ?? { byId: {} },
       dag: values.pactflowDag ?? { byId: {} },
       runs: values.pactflowRuns ?? { byId: {} },
-      delivery: values.pactflowDelivery ?? { reviews: {}, documents: {}, releases: {}, cleanups: {} },
+      delivery: values.pactflowDelivery ?? { reviews: {}, documents: {}, attachments: {}, releases: {}, cleanups: {} },
       discussion: pactFlowDiscussionView(values.pactflowCollaboration),
     }
   }
@@ -2284,7 +2286,7 @@ export class PactFlowService extends TypertRemoteService {
       dag: { byId: this.dagState(session) },
       runs: this.ctx.sessionProjections.stateOf(session, 'pactflowRuns') ?? { byId: {} },
       delivery: pactFlowDeliveryView(this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')
-        ?? { reviews: {}, documents: {}, releases: {}, cleanups: {} }),
+        ?? { reviews: {}, documents: {}, attachments: {}, releases: {}, cleanups: {} }),
       discussion: pactFlowDiscussionView(this.ctx.sessionProjections.stateOf(session, 'pactflowCollaboration')),
     }
   }

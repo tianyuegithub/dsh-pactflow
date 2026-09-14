@@ -41,7 +41,7 @@ describe('PactFlow persisted projection schemas', () => {
       const view = { byId: { [node.id]: node } }
       expect(ctx.pactflow.dag(session.id)).toEqual(view)
       expect((await ctx.pactflow.snapshot(session.id)).dag).toEqual(view)
-      expect((await ctx.pactflow.snapshot(session.id)).delivery).toEqual({ reviews: {}, documents: {}, releases: {}, cleanups: {} })
+      expect((await ctx.pactflow.snapshot(session.id)).delivery).toEqual({ reviews: {}, documents: {}, attachments: {}, releases: {}, cleanups: {} })
       const checkpoint = ctx.sessionProjections.checkpoint(session)
       expect(checkpoint.pactflowDag?.val).toMatchObject({ needIds: [need.id] })
       checkpoint.pactflowDag = { ...checkpoint.pactflowDag!, ver: 2, val: view }
@@ -49,7 +49,7 @@ describe('PactFlow persisted projection schemas', () => {
       const restored = ctx.sessionProjections.restore(checkpoint, session.events, 0, session.header)
       expect(restored.checkpoint.pactflowDag?.val).toMatchObject({ needIds: [need.id] })
       expect(restored.snapshot.values.pactflowDag).toEqual(view)
-      expect(restored.snapshot.values.pactflowDelivery).toEqual({ reviews: {}, documents: {}, releases: {}, cleanups: {} })
+      expect(restored.snapshot.values.pactflowDelivery).toEqual({ reviews: {}, documents: {}, attachments: {}, releases: {}, cleanups: {} })
     } finally { await ctx.fiber.dispose() }
   })
 

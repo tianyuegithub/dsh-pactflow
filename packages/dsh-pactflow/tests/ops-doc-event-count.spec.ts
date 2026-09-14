@@ -10,6 +10,7 @@ import {
   PACTFLOW_EVENT_TYPES_V0_5,
   PACTFLOW_EVENT_TYPES_V0_6,
   PACTFLOW_EVENT_TYPES_V0_7,
+  PACTFLOW_EVENT_TYPES_V0_8,
 } from '../src/domain.ts'
 
 // The operator manual states how many external event types each release writes and
@@ -24,8 +25,8 @@ const opsDoc = readFileSync(
 describe('PactFlow operator manual event-count accuracy', () => {
   it('documents the current writer count matching the shipped tuple', () => {
     // The current producer adds durable discussion events.
-    expect(PACTFLOW_EVENT_TYPES).toBe(PACTFLOW_EVENT_TYPES_V0_7)
-    expect(opsDoc).toContain(`当前写入 **${String(PACTFLOW_EVENT_TYPES_V0_7.length)}** 类外部事件`)
+    expect(PACTFLOW_EVENT_TYPES).toBe(PACTFLOW_EVENT_TYPES_V0_8)
+    expect(opsDoc).toContain(`当前写入 **${String(PACTFLOW_EVENT_TYPES_V0_8.length)}** 类外部事件`)
   })
 
   it('documents the read-only legacy reader counts matching their tuples', () => {
@@ -35,6 +36,7 @@ describe('PactFlow operator manual event-count accuracy', () => {
     expect(opsDoc).toContain(`0.4.0 的 ${String(PACTFLOW_EVENT_TYPES_V0_4.length)} 类词汇`)
     expect(opsDoc).toContain(`0.5.0 的 ${String(PACTFLOW_EVENT_TYPES_V0_5.length)} 类词汇`)
     expect(opsDoc).toContain(`0.6.0 的 ${String(PACTFLOW_EVENT_TYPES_V0_6.length)} 类词汇`)
+    expect(opsDoc).toContain(`0.7.0 的 ${String(PACTFLOW_EVENT_TYPES_V0_7.length)} 类词汇`)
   })
 
   it('keeps all documented event counts mutually consistent with the tuples', () => {
@@ -46,6 +48,7 @@ describe('PactFlow operator manual event-count accuracy', () => {
     for (const legacy of [
       PACTFLOW_EVENT_TYPES_V0_1, PACTFLOW_EVENT_TYPES_V0_2, PACTFLOW_EVENT_TYPES_V0_3,
       PACTFLOW_EVENT_TYPES_V0_4, PACTFLOW_EVENT_TYPES_V0_5, PACTFLOW_EVENT_TYPES_V0_6,
+      PACTFLOW_EVENT_TYPES_V0_7,
     ]) {
       for (const type of legacy) expect(PACTFLOW_EVENT_TYPES).toContain(type)
     }

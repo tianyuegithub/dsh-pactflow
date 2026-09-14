@@ -5,6 +5,7 @@ import {
   PACTFLOW_EVENT_PRODUCER_VERSION,
   PACTFLOW_EVENT_TYPES_V0_6,
   PACTFLOW_EVENT_TYPES_V0_7,
+  PACTFLOW_EVENT_TYPES_V0_8,
 } from '../src/domain.ts'
 
 /**
@@ -58,7 +59,7 @@ describe('PactFlow external producer upgrade', () => {
 
       // This release's handle writes one of the new event types into it.
       const current = ctx.sessions.externalEventProducers.register({
-        producer: PRODUCER, version: PACTFLOW_EVENT_PRODUCER_VERSION, eventTypes: PACTFLOW_EVENT_TYPES_V0_7,
+        producer: PRODUCER, version: PACTFLOW_EVENT_PRODUCER_VERSION, eventTypes: PACTFLOW_EVENT_TYPES_V0_8,
       })
       expect(() => current.append(session, 'pactflow/comment-added', {
         v: 1,
@@ -90,7 +91,7 @@ describe('PactFlow external producer upgrade', () => {
         need: { id: 'need-legacy' as never, title: 'Legacy', description: '', phase: 'backlog', revision: 1, createdAt: 1, updatedAt: 1 },
       })
 
-      const narrowed = PACTFLOW_EVENT_TYPES_V0_7.filter(type => type !== 'pactflow/document-linked')
+      const narrowed = PACTFLOW_EVENT_TYPES_V0_8.filter(type => type !== 'pactflow/document-linked')
       const broken = ctx.sessions.externalEventProducers.register({
         producer: PRODUCER, version: '0.7.0', eventTypes: narrowed as never,
       })
@@ -112,7 +113,7 @@ describe('PactFlow external producer upgrade', () => {
     try {
       const session = await bootSession(ctx, 'producer-upgrade-not-advancing')
       const current = ctx.sessions.externalEventProducers.register({
-        producer: PRODUCER, version: PACTFLOW_EVENT_PRODUCER_VERSION, eventTypes: PACTFLOW_EVENT_TYPES_V0_7,
+        producer: PRODUCER, version: PACTFLOW_EVENT_PRODUCER_VERSION, eventTypes: PACTFLOW_EVENT_TYPES_V0_8,
       })
       current.append(session, 'pactflow/need-created', {
         v: 1,
@@ -133,5 +134,6 @@ describe('PactFlow external producer upgrade', () => {
     // The superset condition above is what makes an upgrade possible at all;
     // breaking it silently would re-freeze old sessions.
     for (const type of PACTFLOW_EVENT_TYPES_V0_6) expect(PACTFLOW_EVENT_TYPES_V0_7).toContain(type)
+    for (const type of PACTFLOW_EVENT_TYPES_V0_7) expect(PACTFLOW_EVENT_TYPES_V0_8).toContain(type)
   })
 })

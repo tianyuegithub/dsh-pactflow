@@ -64,7 +64,7 @@ describe('PactFlow domain foundation', () => {
     ])
     expect(session.events[0]?.data).toMatchObject({
       producer: 'dsh-pactflow',
-      version: '0.7.0',
+      version: '0.8.0',
     })
     expect(ctx.pactflow.project(session.id)).toEqual({ project })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowProject).toEqual({ project })

@@ -633,6 +633,26 @@ export interface PactFlowGitResult {
   readonly validationSensitiveScanFailed?: boolean
 }
 
+/**
+ * One attachment linked to a Need: its address and digest, never its bytes.
+ *
+ * The content lives in the project's artifact store; the event carries only what
+ * is needed to fetch and verify it. Putting the bytes here would put them in the
+ * single durable source of truth, where they would be replayed on every cold
+ * restore and could never be removed.
+ */
+export interface PactFlowAttachment {
+  readonly id: PactFlowId<'attachment'>
+  readonly needId: PactFlowId<'need'>
+  readonly fileName: string
+  readonly mediaType: string
+  readonly summary: string
+  /** Structured address + digest. Never a signed URL: those are not generated at all. */
+  readonly ref: PactFlowArtifactRef
+  readonly linkedAt: number
+  readonly linkedBy: 'user'
+}
+
 export interface PactFlowNeed {
   readonly id: PactFlowNeedId
   readonly title: string
@@ -1293,6 +1313,7 @@ export interface PactFlowDeliveryProjection {
   readonly autopilots?: Readonly<Record<string, PactFlowAutopilotRecord>> | undefined
   readonly reviews: Readonly<Record<string, PactFlowReview>>
   readonly documents: Readonly<Record<string, PactFlowDocument>>
+  readonly attachments: Readonly<Record<string, PactFlowAttachment>>
   readonly releases: Readonly<Record<string, PactFlowRelease>>
   readonly cleanups: Readonly<Record<string, PactFlowCleanupRecord>>
 }
@@ -1328,6 +1349,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     'pactflow/comment-added': { readonly v: 1; readonly comment: PactFlowComment }
     'pactflow/comment-voided': { readonly v: 1; readonly commentId: PactFlowCommentId; readonly needId: PactFlowNeedId; readonly voidedAt: number }
     'pactflow/document-linked': { readonly v: 1; readonly document: PactFlowDocument }
+    'pactflow/attachment-linked': { readonly v: 1; readonly attachment: PactFlowAttachment }
     'pactflow/need-created': { readonly v: 1; readonly need: PactFlowNeed }
     'pactflow/need-updated': { readonly v: 1; readonly need: PactFlowNeed }
     'pactflow/node-created': { readonly v: 1; readonly node: PactFlowNode }
