@@ -182,6 +182,20 @@ ref 解析与绑定约束），Worker 侧「作业结束落盘并上传、结果
 
 副作用：0.4 解除后 **need-attachments 第 2 节不再被任务 0 阻塞**。
 
+### 把这条教训做成可执行的：`pnpm run probe:readiness`
+
+光写下教训不够——前几次误判正是因为「本机不可执行」是写在文档里的一句话，没有任何东西
+会去复查它。`scripts/probe-acceptance-readiness.mjs` 把它变成每次都真跑的探测：
+
+- 逐个**实测**前置（Node 22、DSH 源码 checkout、Docker、公共 registry、S3 端点、kubectl、
+  集群、Harbor 基础层、两个凭据、`~/.dsh`），不读任何人工维护的结论；
+- 每条验收通道只列**它自己**缺的东西，并在末尾明写「不要由此推断同一 change 的其它任务
+  也做不了」——那正是五次误判的错法。
+
+本机当前输出：**1/8 通道可跑**（`verify:profile:dev`），缺口收敛为三样：`DEEPSEEK_API_KEY`、
+`PACTFLOW_GITEA_API_TOKEN`、Harbor/K3s 可达。注意脚本刻意标注了两处最容易误判的地方：
+`verify:profile:dev` **不需要** `~/.dsh`，真实对象存储验收 **不需要**集群。
+
 ### 五次误判的共同形态（本轮最值得记下来的一件事）
 
 本轮把「没有官方发行版宿主 / 没有集群 / 没有镜像」**五次**错当成「这件事做不了」：
