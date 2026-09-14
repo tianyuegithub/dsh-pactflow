@@ -49,6 +49,7 @@ describe('PactFlow packaged Agent Preset', () => {
     expect(names).toEqual([
       'glob',
       'grep',
+      'pactflow_add_comment',
       'pactflow_bind_git',
       'pactflow_block_autopilot',
       'pactflow_close_git_need',

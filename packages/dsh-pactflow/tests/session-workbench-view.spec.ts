@@ -186,14 +186,42 @@ function snapshot({
   }
 }
 
-function render(tab: 'progress' | 'runs' | 'delivery', value = snapshot()): string {
+function render(
+  tab: 'progress' | 'runs' | 'delivery',
+  value = snapshot(),
+  extra: Partial<Parameters<typeof WorkbenchEvidenceView>[0]> = {},
+): string {
   return renderToStaticMarkup(createElement(WorkbenchEvidenceView, {
     snapshot: value,
     needId: selectedNeedId,
     tab,
     onResume: vi.fn(),
     resumingNodeId: null,
+    ...extra,
   }))
+}
+
+/** One discussion tail as the Host would project it for this Need. */
+function withDiscussion(
+  entries: readonly { id: string; author: 'human' | 'agent'; excerpt: string }[],
+): PactFlowSnapshot {
+  return {
+    ...snapshot(),
+    discussion: {
+      counters: {},
+      recent: {
+        [selectedNeedId]: entries.map(entry => ({
+          id: entry.id as never,
+          needId: selectedNeedId as never,
+          author: entry.author,
+          excerpt: entry.excerpt,
+          createdAt: 1,
+          voided: false,
+          source: 'pactflow-comment' as const,
+        })),
+      },
+    },
+  }
 }
 
 const foreignMarkers = [
@@ -297,5 +325,51 @@ describe('WorkbenchEvidenceView', () => {
   it('短文本完整显示且不增加折叠', () => {
     expect(render('progress')).not.toContain('<details')
     expect(render('delivery')).not.toContain('<details')
+  })
+})
+
+describe('WorkbenchEvidenceView 讨论区', () => {
+  it('无讨论时说明讨论会随需求持久保留', () => {
+    const markup = render('progress')
+    expect(markup).toContain('该需求尚无讨论')
+  })
+
+  it('逐条标出作者是人还是执行代理', () => {
+    // 看讨论的人必须一眼分清哪条是模型自己写的：模型上一轮的结论
+    // 若与人的判断混在一起，会被当成独立佐证。
+    const markup = render('progress', withDiscussion([
+      { id: 'comment-1', author: 'human', excerpt: '这里的取舍我倾向 B' },
+      { id: 'comment-2', author: 'agent', excerpt: '调研结论：A 与 B 差异在缓存' },
+    ]))
+    expect(markup).toContain('这里的取舍我倾向 B')
+    expect(markup).toContain('调研结论：A 与 B 差异在缓存')
+    expect(markup).toContain('人 ·')
+    expect(markup).toContain('执行代理 ·')
+  })
+
+  it('只在宿主提供写入入口时呈现发表与作废', () => {
+    const entries = withDiscussion([{ id: 'comment-1', author: 'human', excerpt: '一条讨论' }])
+    const readOnly = render('progress', entries)
+    expect(readOnly).not.toContain('发表讨论')
+    expect(readOnly).not.toContain('作废')
+
+    const writable = render('progress', entries, {
+      onAddComment: vi.fn(async () => {}),
+      onVoidComment: vi.fn(async () => {}),
+    })
+    expect(writable).toContain('发表讨论')
+    expect(writable).toContain('作废')
+  })
+
+  it('讨论只出现在进展页', () => {
+    const entries = withDiscussion([{ id: 'comment-1', author: 'human', excerpt: '一条讨论' }])
+    expect(render('runs', entries)).not.toContain('一条讨论')
+    expect(render('delivery', entries)).not.toContain('一条讨论')
+  })
+
+  it('旧宿主未提供讨论字段时进展页照常渲染', () => {
+    // discussion 是增量字段：升级期间客户端可能配到尚未写过评论的宿主。
+    const legacy = { ...snapshot(), discussion: undefined } as PactFlowSnapshot
+    expect(() => render('progress', legacy)).not.toThrow()
   })
 })

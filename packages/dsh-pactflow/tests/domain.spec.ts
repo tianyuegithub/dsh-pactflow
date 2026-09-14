@@ -64,7 +64,7 @@ describe('PactFlow domain foundation', () => {
     ])
     expect(session.events[0]?.data).toMatchObject({
       producer: 'dsh-pactflow',
-      version: '0.6.0',
+      version: '0.7.0',
     })
     expect(ctx.pactflow.project(session.id)).toEqual({ project })
     expect(ctx.sessionProjections.snapshot(session).values.pactflowProject).toEqual({ project })
@@ -805,6 +805,7 @@ describe('PactFlow domain foundation', () => {
     await scoped.ctx.plugin(PactFlowAgentTools)
 
     expect(ctx.tools.schemas(agent).map(schema => schema.name).sort()).toEqual([
+      'pactflow_add_comment',
       'pactflow_bind_git',
       'pactflow_block_autopilot',
       'pactflow_close_git_need',
