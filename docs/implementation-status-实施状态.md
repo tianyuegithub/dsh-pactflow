@@ -2,6 +2,47 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-15 全仓四路评审与失败关闭收口（fail-open-closure）
+
+上一批评审只覆盖本轮改动；这一批把范围放到 `packages/dsh-pactflow` **全部现有代码**，分四路独立跑：安全与不变量、正确性与边界、测试套件真实强度、文档与合同一致性。交回的高危项形态高度一致——**合同写了失败关闭，实现留了一个放行的口子**，以及**宿主把自己的失败报告成别人的失败**。
+
+对应 OpenSpec change：`fail-open-closure`（Modified: `credential-safe-display`、`git-credential-binding`、`k3s-resource-identity`、`validation-integrity-signals`、`run-budgets`、`gitea-review-gate`）。
+
+**基线：`pnpm run check` 全绿，121 文件 / 953 通过 / 7 跳过 / 25 产物；`openspec validate --all --strict` 56/56。**
+
+### 本机实证的缺陷（逐条，非转述）
+
+1. **脱敏对多行整体放行**。`redactUrlCredentials` 首行 `if (/[\r\n]/.test(value)) return value`。直接 import 真实模块实测：`Command failed: git clone https://user:secret-token@…\nfatal: Authentication failed for '…'` 原样返回，明文凭证保留。而 `boundedOutcome` 是宿主写入事实源的唯一错误文本通道，git/execFile 的 stderr 几乎总是多行——**最常见的一种带凭证文本恰好是唯一不被脱敏的那一种**。既有 `display-redaction.spec.ts` 五条样本全是单行。
+2. **向人工审批做出虚假的肯定陈述**。敏感改动 diff 范围 `commit~1..commit` 只看尖端提交；任何计算失败被 `catch { sensitive = [] }`；审批文案随即打印「验证敏感文件改动：无」。同一函数上方的注释原本明写「`none` 是显式陈述，所以列表缺失不会被误认为没有改动」。判定还是整路径全等匹配，实测 `validationSensitiveChanges('packages/dsh-pactflow/package.json\napps/web/vitest.config.ts\npackage.json')` 只返回 `['package.json']`——**本仓自己的子包就在盲区**。
+3. **崩溃重启销毁在途执行**。全仓 `phase: 'cleaned'` 只出现在探针路径三处，Run 路径零处；`runLedger.remove` 唯一调用点在启动对账内部、且在按 UID 删除之后。宿主崩溃重启时集群里仍在跑的 Job 被 `gracePeriodSeconds: 0` + Background 强删，并发的 `waitExisting` 随即观测到 missing 判 Run 失败。`probe-recovery.spec.ts` 原有用例只覆盖「有 UID 就删 / 无 UID 不删」，**无一条断言在途不得删**。
+4. **清理责任被静默删除**。三个账本单条记录不合法走 `continue`，而 `persist()` 是全量覆盖——跳过即永久删除，日志零提示；`load()` 用 `loaded ??=` 永久缓存 + 全量覆盖，两进程共用同一 `DSH_HOME` 时后写者抹掉前者记录且任何对账都发现不了；`withWorkspaceFileLock` 全仓只保护 `workspace-projects.json` 一个文件；`this.writes.then(cb)` 在一次写失败后永久毒化整条链。
+5. **模型可指名任意 Secret 与任意凭证**。`k3s_git_secret_name` 与 `credential_ref` 都是模型可调工具上的自由字符串；前者只校验 K8s 名称形状（`pactflow-git-` 前缀只是列举端点的 UI 过滤），后者只校验 `configured`。
+6. **凭证绑定失败关闭被无关条件把门**。`gitProviders.length > 0` 才检查——空 registry 正是升级后的常见初始态。实测：清空 registry 后 `verifyGitea` 不再拒绝，直接去连服务端。
+7. **宿主算术错误被报成别人的故障**。`boundOutputToBudget` 实测中文 1500–1699 字、预算 4096：**200/200 全部越限，恒为 4098 字节**；`git rev-list` 与验证命令的 1 MiB 上限实测双双溢出（4 MiB 输出下 `git show` 报「Git command failed」、`node -e` 打印 4 MiB 后被报成「validation command failed (exit unavailable)」）；`HARNESS_TIMEOUT_SECONDS` 对 15 秒探针得到 `max(1, -15)` = 1 秒。
+8. **拒绝结论被吞掉**。挂机驱动不检查 `recheckReviewGate` 返回值，而拒绝时 `recordReviewGateObservation` 保留的是旧 `lastGap`。
+9. **按名删除的潜伏分支**。`cancel()` 的 `jobUid === undefined` 分支按可重用名删三个子资源（无 `preconditions`）且以 `!isNotFound && !isTimeout` 吞掉删除超时。当前三个调用点都带 UID 使其不可达。
+10. **日常内循环对 `src/index.ts` 完全空转**。50 个 spec 导入 `lib/` 产物而 `pnpm test` 不构建、无新鲜度守卫。**探针实证**：在 `initialize()` 首行注入 `throw new Error("SABOTAGE")` 后，`domain.spec.ts` 19 例仍 19 passed。
+
+### 处置
+
+全部修复，每条先写复现用例确认红再改实现。新增测试文件八个：`validation-sensitive-scan`、`git-secret-ownership`、`k3s-artifact-secret`、`ledger-durability`、`git-output-budget`、`k3s-budget-arithmetic`、`build-freshness`，以及 `display-redaction` 的三条多行反例。
+
+两处**既有用例断言的正是缺陷本身**，按「不得削弱断言换绿」的相反方向处理——改写并在注释中写明它此前断言了什么、为什么那是错的：
+- `probe-ledger.spec.ts` 的「skips structurally invalid rows」→ 拒绝加载（其中「不为缺 UID 的记录编造 secretUid」那半保留）；
+- `domain.spec.ts` 中在无 infrastructure 下绑定显式 Gitea 端点的用例 → 登记其所指名的 Provider，其余覆盖不变。
+
+### 行为可见变化（升级需知）
+
+- 空 registry 下的历史 Gitea 绑定由「放行」变为「拒绝并要求重新确认 Provider」；
+- 不在 `pactflow-git-` 前缀内的 Git Secret 名由「接受」变为「拒绝」；
+- monorepo 子包命中的验证敏感改动由「不报」变为「上报」；
+- `pnpm test` 在产物比源码旧时由「全绿」变为「红」。
+
+### 评审提出但未在本批处置的（如实记录）
+
+- **文档与合同一致性一路**交回的 7 条高危、13 条中危绝大多数尚未处置：`CURRENT_STATUS` 把三个已归档 change 仍标为活跃、§1 与 §3/§4 三处自相矛盾、`development-plan` 保留了已被架构 §6 推翻的「决策 1 选 B」、`dsh-harness-telemetry` 的 delta spec 只有 `ADDED` 却与既有 `harness-capability-levels` 硬冲突（**归档前必须处置**）、`node-rerun-authorization` 与 `gitea-review-gate` 各有两条 spec 与代码相反、`README` 11 条失效链接、三份状态文档基线数字两两不一致、`verification-label` 是死代码但两处文档称已接线、`openspec-spec-hygiene` 守卫能力远低于其宣称。
+- 代码侧未处置：`comment-added` 去重只覆盖最近 20 条、`readComments` 全量扫描性能、`pullRequestGateState` 评审列表不翻页、`cancelReviewGate` 无客户端入口、`pactflowDelivery` 未升 `stateVersion`、`observe()`/`terminalObservation()` 无请求超时、租约过期时 `settleRunInSession` 抛错而非结算、`worker-interactions` 单条消息异常即永久关链、logTail 按字符截断按字节校验。
+
 ## 2026-09-15 四路独立评审与处置（本轮收尾）
 
 对本轮 24 个提交、86 文件、6602 行做了四路独立评审（领域与 fold / 宿主服务 / 测试与守卫强度 / 客户端与合同一致性）。**评审真的跑了 canary**，抓出的问题比我自查多得多，其中三条守卫被证明是零防护。

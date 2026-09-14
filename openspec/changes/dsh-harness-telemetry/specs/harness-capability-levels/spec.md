@@ -1,10 +1,19 @@
-## ADDED Requirements
+# harness-capability-levels (delta)
 
-### Requirement: 可证级别集合必须按 Harness 分别声明
+## MODIFIED Requirements
 
-插件 SHALL 为每个受支持的 Harness 分别声明其可由观测证据证明的能力级别集合与「成功阶段 → 级别」映射，MUST NOT 使用单一全局集合覆盖全部 Harness。某个 Harness 可证的级别 MUST NOT 被推断到其它 Harness。
+### Requirement: 只有可被探针证据证明的级别才能被声称
 
-既有的「未映射阶段名 MUST 被忽略、MUST NOT 被推断为级别」守卫 SHALL 继续有效，并 MUST 按 Harness 分别判定。
+插件 SHALL **为每个受支持的 Harness 分别**声明哪些能力级别可由本仓探针的观测证据证明，并从该 Harness 自己的集合取探针报告的级别上限。MUST NOT 使用单一全局集合覆盖全部 Harness；某个 Harness 可证的级别 MUST NOT 被推断到其它 Harness。
+
+实际达到的级别 MUST 只由该 Harness 的「成功阶段 → 级别」显式映射推导。不在**该 Harness**映射中的阶段名（包括任何未来新增名）MUST 被忽略，MUST NOT 被推断为级别。因此缺乏证据的级别 MUST NOT 被声称。
+
+> 本条替代原先的全局表述。原表述把 `tool-invocation` 与 `verification` 写死为「不出现在可证级别集合中」——那在只有第三方 Harness 时是对的，但它把「当前没有任何 Harness 能证明」固化成了「永远不可证」。本仓维护的 `dsh` 执行器按镜像 digest 分发，可以真实上报这两项；判定因此下沉到 Harness 粒度，而「不可证即不得声称」这一保证逐字保留，只是按 Harness 分别判定。
+
+#### Scenario: 不可证级别永不虚报
+
+- **WHEN** 以某第三方 Harness（如 `codex`）含 `tool-invocation` 或 `verification` 成功阶段（或任何未知阶段名）的观测推导实际级别
+- **THEN** 结果为 `connection`（这些阶段被忽略），且 `tool-invocation`/`verification` 不出现在**该 Harness** 的可证级别集合与阶段映射中
 
 #### Scenario: 一个 Harness 可证不推断其它 Harness
 
@@ -15,6 +24,18 @@
 
 - **WHEN** 某 Harness 的观测含不在**该 Harness**阶段映射中的成功阶段名
 - **THEN** 该阶段被忽略，MUST NOT 被推断为任何级别
+
+#### Scenario: 级别随成功阶段取最高
+
+- **WHEN** 观测到多个成功阶段（例如 cleanup 与 cli-response 均成功）
+- **THEN** 报告的级别为其中最高者，且不因阶段出现顺序而降低
+
+#### Scenario: 探针上限取自可证集合
+
+- **WHEN** 查询某 Harness 的探针报告级别上限
+- **THEN** 其值等于**该 Harness** 可证级别集合中的最高级别，且不低于 `artifact`
+
+## ADDED Requirements
 
 ### Requirement: verification 级必须有区别于 artifact 级的独立观测
 

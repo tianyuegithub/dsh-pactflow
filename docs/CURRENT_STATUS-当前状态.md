@@ -7,8 +7,10 @@
 
 > **历史固化快照（2026-09-11，`36d9057`）**：该提交当时的终态记录，**已不再描述当前基线**（当前基线见下方「基线」段，距此快照 36 个提交）。用户指令「把当前成果固化收尾」。终态：`check` 72 文件 / 561 测试 / 13 包产物全绿；`openspec validate --all --strict` 37/37；46 change 归档 / 37 spec；`origin` 与主目录 `/Users/ty/Codes/dsh-pactflow`（`main`）三方一致；工作树干净。发布物 `dist/dsh-pactflow-0.2.1.tgz` SHA256 `ce9b3537f58fdbd3eb145789b1f191dd2ff512775456c3427574ca1c92edfae0`（构建确定性由「build 前后产物哈希相同 + 测试直接导入产物」保证）。密封扫描收据两份（`…93cb38201725` / `…0178b1d09938`，后者覆盖全部当日代码；结论 `inconclusive`，三族处置见 `docs/security-scan-20260911.md`）。**无待用户裁决事项**；此后启动新工作即属新目标立项（见 §4 与待办清单）。
 
-**基线（2026-09-15 收尾实测）**：分支 `main`（距 2026-09-11 固化快照 59 个提交）；`pnpm run check` = **114 文件 / 893 用例（886 通过 / 7 按环境门控跳过 / 0 失败）/ 25 个必需包产物**，全绿；
-`openspec validate --all --strict` **56/56** 通过（**48 个 spec / 61 个已归档 change / 8 个活跃 change**）。7 个跳过全部来自未武装的真实存储套件（`artifact-store.real` 2、`artifact-handoff.real` 4）与 1 项平台相关预检，**按规则不计为通过**。
+**基线（2026-09-15 全仓评审收尾实测）**：分支 `main`；`pnpm run check` = **121 文件 / 960 用例（953 通过 / 7 按环境门控跳过 / 0 失败）/ 25 个必需包产物**，全绿；
+`openspec validate --all --strict` **56/56** 通过（**51 个 spec / 65 个已归档 change / 5 个活跃 change**）。7 个跳过全部来自未武装的真实存储套件（`artifact-store.real` 2、`artifact-handoff.real` 4）与 1 项平台相关预检，**按规则不计为通过**。
+
+> 上一版基线段把 `need-comment-threads`、`gitea-review-gate-closure`、`node-rerun-authorization` 三个 change 记为「活跃、未归档」，而它们已在 `openspec/changes/archive/2026-09-15-*` 下、对应 spec 已并入 `openspec/specs/`。下表已更正。
 
 ## 1. 隔离层能力（A 类，已有证据）
 
@@ -59,9 +61,9 @@
 | 出网目标来源约束 | passed | `egress-url-origin`；`egress-url-origin.spec.ts`（4）。Agent 面只能以注册 id 引用出网目标，不接受任意 URL |
 | 大内容外置传址（第七类资源） | **partial** | `artifact-ref-handoff`（**活跃 change，未归档**）；隔离级全绿：`artifact-store`（11）、`artifact-store-binding`（7）、`artifact-upload-gate`（6）、`artifact-retention`（5）、`artifact-channels`（8）、`k3s-artifact-store`（7）、`worker-log-upload`（6）。真实 RustFS 连通已验（SigV4 PUT/GET/HEAD/LIST、后端不返回 versionId）；**5.1/7.1 全链真实验收 not-run**——见 §4 |
 | 分发清单版本准确 | passed | `operator-doc-accuracy`（扩展）；`release-manifest-accuracy.spec.ts`（3）。清单 `hostEventProducerVersion` / `hostPluginVersion` 与代码事实绑定，`src/index.ts` 的 `VERSION` 也绑到包版本；任一漂移即失败并指名两侧取值。**修复了一处自引入即存在的漂移**（清单写 0.5.0 而宿主注册 0.6.0，全仓库无人校验） |
-| 需求级评论 | **partial** | `need-comment-threads`（**活跃 change，未归档**）；`comment-threads`（19，fold 与有界投影）、`comment-host`（17，真实服务集成）、`producer-upgrade`（4，老会话可写性真实验证）。作者身份由入口决定（参数里无 author 字段）；评论零授权；agent 评论受 `maxAgentCommentsPerSubject` 预算；作废不删除；已作废不进模型上下文。**剩真实会话验证（5.1）未跑** |
-| 受保护分支收口等待态 | **partial** | `gitea-review-gate-closure`（**活跃 change，未归档**）；`review-gate`（27）、`review-gate-boundary`（8）、`review-gate-persistence`（7）、`autopilot-review-gate`（8）。补上了「仓库一开分支保护、架构 §4 最强保证就自动失效」的洞：收口不再放弃而是持久等待，复查齐备后**重新调用 `closeGitNeed`** 故核验实现唯一是结构性的。**剩真实受保护仓库端到端（6.1–6.3）与宿主级外部合并三条（3.3）未跑** |
-| 已成功节点重跑 | **partial** | `node-rerun-authorization`（**活跃 change，未归档**）；`node-rerun.spec.ts`（19，全程真实 Git 与真实派发）。架构 §3.4 措辞经用户裁决修订为「未经所有者显式授权的终态复活」；fold 层此前并无该判定（拒绝只在服务层），现下沉并要求事件内持久授权证据；下游只标记不级联；挂机不得自动选中含重跑的方案。**剩真实端到端（7.1/7.2）与收口漂移序列（5.1）未跑** |
+| 需求级评论 | **partial** | `need-comment-threads`（**已归档** `archive/2026-09-15-need-comment-threads`）；`comment-threads`（19，fold 与有界投影）、`comment-host`（17，真实服务集成）、`producer-upgrade`（4，老会话可写性真实验证）。作者身份由入口决定（参数里无 author 字段）；评论零授权；agent 评论受 `maxAgentCommentsPerSubject` 预算；作废不删除；已作废不进模型上下文。**剩真实会话验证（5.1）未跑** |
+| 受保护分支收口等待态 | **partial** | `gitea-review-gate-closure`（**已归档** `archive/2026-09-15-gitea-review-gate-closure`）；`review-gate`（27）、`review-gate-boundary`（8）、`review-gate-persistence`（7）、`autopilot-review-gate`（8）。补上了「仓库一开分支保护、架构 §4 最强保证就自动失效」的洞：收口不再放弃而是持久等待，复查齐备后**重新调用 `closeGitNeed`** 故核验实现唯一是结构性的。**剩真实受保护仓库端到端（6.1–6.3）与宿主级外部合并三条（3.3）未跑** |
+| 已成功节点重跑 | **partial** | `node-rerun-authorization`（**已归档** `archive/2026-09-15-node-rerun-authorization`）；`node-rerun.spec.ts`（19，全程真实 Git 与真实派发）。架构 §3.4 措辞经用户裁决修订为「未经所有者显式授权的终态复活」；fold 层此前并无该判定（拒绝只在服务层），现下沉并要求事件内持久授权证据；下游只标记不级联；挂机不得自动选中含重跑的方案。**剩真实端到端（7.1/7.2）与收口漂移序列（5.1）未跑** |
 | Agent Skill 组合 | **blocked（合入门未过）** | `agent-skill-composition`（**活跃 change，未归档**）；`agent-skill-composition.spec.ts`（21，红线守卫双向检查）+ `preset.spec.ts` **真实挂载审计通过**。六个随包 skill 挂载成功，persona **4676 → 1603 字节（-66%）**。但本 change 自己写死的合入条件是「收缩后三个真实模型套件（`test:real-worker` / `test:autopilot` / `test:worker-interactions`）重跑全部通过」——**本机不可达故未跑，因此收缩不得视为完成，该 change 不得归档** |
 
 ## 1.5 仓库纪律守卫（元能力）
@@ -108,16 +110,16 @@
 | --- | --- | --- |
 | 官方 DSH 安装/启动/升级/卸载验收 | C（上游，**已实证缺口**） | 2026-09-11 装入官方 `@deepseek-ai/dsh` 两个发行版实测（隔离临时目录，未改本仓）：`0.1.5-rc.1`（`latest`）与 `0.1.5-rc.2`（`next`）均可安装、`--version` 正常，但 **`verify:profile` 在其上真实失败**：`PactFlow requires DSH external Session event producers; this DSH runtime is unsupported`。已确认 `sessions.externalEventProducers` 只存在于开发源码（`packages/core/session/src/external-event-producers.ts`），两个官方发行版均无 → **确为上游能力缺口，非本仓检测 bug**。开发通道 `verify:profile:dev` 已真实跑通（install→boot→upgrade→remove→clean boot）。**2026-09-15 复查 npm registry：`latest` 仍为 `0.1.5-rc.1`、`next` 仍为 `0.1.5-rc.2`，与实证缺口的两个版本完全相同，四天来无新发行版 → 阻断依旧成立**。本仓插件侧已就绪（`src/index.ts:368` 硬要求该能力，0.1.0–0.5.0 只读注册已具备），上游发版后**插件无需改动**。上游实现已在 fork 完成并经验收（`06d3202146`：声明序列化 + 严格 semver 比较 + 按段准入；core/session 81 项、persistence 372 项通过），已按上游惯例作双语 Agent Note 提交 PR |
 | 远程企业平台（kubeconfig 托管/多租户/中心服务端） | D（已裁决非目标） | 目标架构 §5 永久非目标 |
-| 节点准入时机、严格全局 FIFO | D（已裁决） | 决策 1B / §15-A6；不得收紧/静默更改 |
+| 节点准入时机、严格全局 FIFO | D（**裁决已更替** 2026-09-12） | 2026-09-06 的「就绪即可派发、无方案确认」（决策 1B）已被 `docs/architecture-目标架构.md` §6 决策 1 的用户裁决**替代**：所有实际执行代理调度须先通过原生选择确认具体方案。代码已按新裁决收紧（`src/host/execution-plan-choice.ts` + `host/dispatch.ts` 派发两侧重核方案批准）。此处此前仍写「决策 1B；不得收紧」，与架构与代码均相反 |
 | `deployed` 枚举语义（merged vs deployed） | D（**已裁决：保持现状** 2026-09-11） | 仍表示「已合并/已交付」；不擅改领域枚举 |
 | 不可信代码的强隔离（沙箱/出网策略） | D（**已裁决：保持现状** 2026-09-11） | 维持「本机信任执行 + 容器受限执行」的现有声明，不扩大安全承诺 |
-| F03 触发前置「已成功节点重跑」能力 | D（**已裁决：保持现状** 2026-09-11） | `code-input-staleness` 检测器已交付但不触发；不新增该能力 |
+| F03 触发前置「已成功节点重跑」能力 | **已推翻并交付**（2026-09-15） | 2026-09-11 曾裁决「保持现状、不新增该能力」，用户其后选择「推翻，立项做重跑」。`node-rerun-authorization` 已归档；`rerunPreview` 是 `code-input-staleness` 检测器的首个生产消费者。本行此前仍写「已裁决：保持现状」，与 §1 同表的结论相反 |
 
 ## 4. 明确未实现（诚实清单）
 
 > 2026-09-15 复核补记：以下 A03/A05/A10/A11/A12/R12 各条的结论维持不变（多数已裁决「保持现状」或已全部交付）。本轮**新增四条**，列在本节末尾的「2026-09-15 新增」。
 
-- **A11 完整形态**：token/模型调用数用量统计（Harness termination document 无 token 字段，需先扩展 Harness 能力）、「预算耗尽进入 paused/needs-decision」（当前以**显式拒绝**表达，改为持久 paused 属领域状态机变更）。**输出/日志容量上限已交付**（预算单一权威，实际生效）。
+- **A11 完整形态**：token/模型调用数用量统计（Harness termination document 无 token 字段，需先扩展 Harness 能力）、「预算耗尽进入 paused/needs-decision」——**重试预算已按持久 `paused` 落账**（`retryNode`），而**重跑**预算是显式拒绝且不改动任何状态（改动已成功节点的状态会摧毁交付终态，见 `node-rerun-authorization`）。此处此前整条记为「未实现」，与 §1 的 passed 结论相反。**输出/日志容量上限已交付**（预算单一权威，实际生效）。
 - **A10 完整形态**：为 `tool-invocation`/`verification` **增设专门探针阶段并做真实六级实证**——当前二者无可证证据（前者需 Harness runner 上报工具调用，不在本仓所有权内；后者需专门验证阶段），故诚实性上**不虚报**（已显式入合同与测试）；跨 Harness 能力协商未做。
 - **A12 完整形态**：**已全部交付**——卸载前 drain 检查（`uninstall-drain-safety` + 手册 §7 前置）、版本可追溯（`packageVersion`/`eventProducerVersion`）、**前端移交入口**（浮层「导出移交摘要」只读 JSON + 复制）。
 - **A03 完整形态**：**零验证可识别与验证基础设施改动可见均已贯通到人眼前**（界面「无自动验证」标注 + 审批理由携带验证敏感清单，并修复字段被剥除的缺陷）；**剩**宿主侧独立验收基线、按任务类型的最小验证策略——二者引入新的基线资产所有权/策略语义，属新目标，未做。
