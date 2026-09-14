@@ -424,3 +424,56 @@ describe('WorkbenchEvidenceView 等待外部评审', () => {
     expect(render('delivery')).not.toContain('等待外部评审')
   })
 })
+
+describe('WorkbenchEvidenceView 重跑授权', () => {
+  const succeededSnapshot = () => {
+    const base = snapshot({ nodeState: 'succeeded' })
+    return base
+  }
+
+  it('无写入入口时不出现该区块', () => {
+    expect(render('progress', succeededSnapshot())).not.toContain('重跑已成功节点')
+  })
+
+  it('说明这是所有者的决定且下游只标记不级联', () => {
+    const markup = render('progress', succeededSnapshot(), {
+      onPreviewRerun: vi.fn(async () => ({ staleInputs: [], unresolved: [] })),
+      onRerun: vi.fn(async () => {}),
+    })
+    expect(markup).toContain('重跑已成功节点')
+    expect(markup).toContain('所有者的决定')
+    expect(markup).toContain('不会自动跟着重跑')
+  })
+
+  it('授权是显式按钮而不是默认勾选', () => {
+    const markup = render('progress', succeededSnapshot(), {
+      onPreviewRerun: vi.fn(async () => ({ staleInputs: [], unresolved: [] })),
+      onRerun: vi.fn(async () => {}),
+    })
+    // 首屏只给「查看重跑影响」；「授权重跑」要先看过影响才出现。
+    expect(markup).toContain('查看重跑影响')
+    expect(markup).not.toContain('授权重跑')
+    expect(markup).not.toContain('checked')
+  })
+
+  it('标出输入已过期的节点', () => {
+    const base = succeededSnapshot()
+    const withStale = {
+      ...base,
+      dag: {
+        byId: Object.fromEntries(Object.entries(base.dag.byId).map(([id, node]) => [id, {
+          ...node,
+          ...(node.needId === selectedNeedId && node.state === 'succeeded'
+            ? { staleCodeInputs: [{ dependency: 'node-a', branch: 'refs/heads/x', recorded: 'a'.repeat(40), latest: 'b'.repeat(40) }] }
+            : {}),
+        }])),
+      },
+    } as typeof base
+    const markup = render('progress', withStale, {
+      onPreviewRerun: vi.fn(async () => ({ staleInputs: [], unresolved: [] })),
+      onRerun: vi.fn(async () => {}),
+    })
+    expect(markup).toContain('输入已过期')
+    expect(markup).toContain('node-a')
+  })
+})
