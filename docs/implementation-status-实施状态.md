@@ -2,6 +2,45 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-15 功能对照 → 七个 change 立项（经独立架构评审修订）+ 架构 §3.4 措辞裁决
+
+当前阶段：按用户要求以功能维度对照计划 §4–§10 七个里程碑与代码，列出未完成功能后立项；经一轮以独立架构师视角的自评审，按评审意见修订后全部通过 `openspec validate --all --strict`（56/56：48 spec + 8 change）。**本批只新增 `openspec/changes/` 与文档，`src/`、`scripts/` 零改动。**
+
+- 功能对照结论（已验证）：主链路（需求→十阶段→DAG→派发→真实提交→验证→受保护分支合并）完整且真实跑通过；未完成功能集中在协作层与 Agent 组合富度。核对中撤回一条误判——移动端适配**已完成**（`pactflow-overlay.e2e.spec.ts:535` 在 390×844 下覆盖浮层/工作台/项目面板/验证编辑器），此前沿用了 2026-09-11 待办清单的过时表述。
+- 用户裁决（2026-09-15）：① 推翻 2026-09-11「成功节点不重跑」裁决，立项做重跑；② token 用量与 Harness 两级探针按 `dsh` 镜像可证范围立项；③ 评论+附件 / Gitea 待审闭环 / Agent Skill 三项一起立。
+- 立项七个 change（首版五个，评审后拆一合零砍一增一）：`need-comment-threads`（评论）、`need-attachments`（附件，等 `artifact-ref-handoff` 5.1/7.1）、`gitea-review-gate-closure`（受保护分支等待态，Modified `git-closing-integrity` + `need-autopilot`）、`node-rerun-authorization`（所有者授权重跑，Modified `code-input-staleness` + `need-autopilot`）、`agent-skill-composition`（Skill 随包分发，**Workflow Consumer 经评审砍掉**——与宿主持久的 `need-autopilot` 是两个编排器且 DSH 自认不是安全边界，等具体用例）、`dsh-harness-telemetry`（按 Harness 分裂可证集合，任务 0 为可行性 spike）、`manifest-producer-version-guard`（`hostEventProducerVersion` 漂移修复从 telemetry 拆出，半小时可归档）。合计 139 条任务，8 个活跃 change。
+- 评审修订要点：附件先评估 DSH 原生 `attachment`（图片专用，不承载通用附件，但浏览器→宿主传输层原生现成）；挂机不得自动授权重跑（排除而非纳入）；等待态对挂机是「等待外部人与 CI」不计无效进展；`verification` 级定义为多步顺序敏感绑定 Profile 的逐步报告，补「往下冒充」守卫；persona 收缩以三个真实模型套件为合入门；评论带作者标记进模型上下文、agent 评论计数预算、只作废不删除。
+- **架构 §3 终局能力 4 措辞修订（用户裁决 2026-09-15）**：「终态复活」→「未经所有者显式授权的终态复活」。这是有意削弱不变量，补偿为所有者显式授权（排除一切自动路径含挂机）、历史 Run 全保留、下游只标记不级联；`node-rerun-authorization` 任务 0.1 据此解锁。
+- 未决：架构 §6 决策 1 的「`confirm-execution-granularity` 当前尚未归档」表述已过时（2026-09-13 已归档），修订提案已出，待用户确认后修改。
+- 验证：`openspec validate --all --strict` 56/56；`openspec-spec-hygiene` / `ops-doc-event-count` 守卫全绿；旧 change 名残留 0 处。
+
+## 2026-09-15 目标↔实现三方对账 + 当前状态视图同步（文档批次，无代码改动）
+
+当前阶段：按用户要求通读目标架构（§3 十条终局能力 / §4 四类不变量 / §7 完成的定义）、48 份 spec、61 个归档 change、活跃 change 与实施状态，并与代码、npm registry 实测对账。**本批只改文档，`src/`、`scripts/`、`openspec/` 零改动。**
+
+- 实测基线（本批重新采集，非引用历史）：分支 `main`，HEAD `f8fddaf`；`pnpm exec vitest run packages/dsh-pactflow/tests --maxWorkers=1` = **104 文件 / 745 用例 / 229 套件，738 通过 / 7 环境门控跳过 / 0 失败**；`openspec validate --all --strict` **49/49**（48 spec / 61 归档 change / 1 活跃 change）。7 个跳过全部来自未武装的真实存储套件（`artifact-store.real` 2、`artifact-handoff.real` 4）与 1 项平台门控预检，**按规则不计为通过**。
+- **上游阻断复查（新证据）**：npm registry 查 `@deepseek-ai/dsh` —— `latest = 0.1.5-rc.1`、`next = 0.1.5-rc.2`，与 2026-09-11 实证缺 `sessions.externalEventProducers` 的两个版本**完全相同，四天来无新发行版**。`src/index.ts:368` 硬要求该能力，故终局能力 1（官方生命周期）与计划 §1 完成条件 1/2 **仍阻断**，且 `check:release` 首个真实步骤 `verify:profile` 结构上跑不通 → 架构 §7 的终止条件在上游发版前不可达。插件侧已就绪（0.1.0–0.5.0 只读注册齐备），上游发版后无需改动。
+- **`docs/CURRENT_STATUS-当前状态.md` 同步**（此前停留在 2026-09-11 固化点 `36d9057`，落后 36 个提交 / 8 个 spec / 11 个 change / 180 个用例，整张能力表缺 2026-09-12 起交付的全部能力）：① 固化快照段显式标为历史、不再冒充当前基线；② 基线段换成本批实测数字；③ §1 补 **16 条**能力行（最小验证策略、宿主自有基线、预算暂停、卡片草稿隔离、探针新鲜度、模型探针认证/路径、本地执行仓库隔离、远程审批中继、按需求挂机、原生方案选择、会话工作台、项目面板按需加载、收口认证来源、Web 原生组成、出网来源约束、大内容外置传址）；④ 新增 **§1.5 仓库纪律守卫（元能力）** 8 行——此前 `b-class-*`、`evidence-*`、`openspec-spec-hygiene`、`operator-doc-accuracy`、`release-gate-*` 从未在本视图出现；⑤ §2 补 5 行真实环境（远程交互、需求全流程闭环 dogfood、RustFS 连通、集群内 Pod 上传、artifact 全链 **not-run**）；⑥ §3 上游行补今日 npm 复查；⑦ §4 新增四条。
+- **`docs/remaining-work-priorities-待办优先级.md` 同步**：基线由「46 change / 37 spec / 561 测试」更新为实测值；P0–P3 历史表保留并标注为当时记录；追加「2026-09-15 复核」把待办面收敛为四类（唯一上游阻断 / 需真实环境 / 本轮新发现 / 已裁决为终态）；修正已过时的「当前状态：无待裁决项」小标题。
+- **本批新发现（未处置，已登记待裁决）**：
+  - `worker/dsh/release-manifest.json` 的 `hostEventProducerVersion` 写 `0.5.0`，而 `src/index.ts:228` 的 `EVENT_PRODUCER_VERSION` 是 `0.6.0`。该字段自引入提交 `1594fa5` 起即为旧值（同一提交把常量从 `0.3.0` 改为 `0.6.0`），`3146903` 更新镜像摘要与 `adapterVersion` 时也未连带更新；**全仓库仅该 JSON 自身出现该键，无任何测试或脚本校验**。与 `operator-doc-accuracy` 守卫的运维文档事件计数属同一类缺陷，但镜像分发清单侧无对应守卫。不影响运行时（无消费者），影响镜像兼容性对账的准确性。**未擅自修改**——改数字等于声称「该镜像已按 0.6.0 验证」，属证据主张，须用户裁决；补守卫属 `operator-doc-accuracy` 的 spec 扩展，须走 OpenSpec。
+  - 两处门禁设计张力（此前已识别，本批正式登记）：`REQUIRED_NOT_RUN` 桶与 `check:release` 零跳过要求互斥；`real-web-gate-prerequisites` 靠正则 `^const (enabled|record|realDescribe)\b` 反推必需开关，改门控变量名即可绕过。
+  - `docs/architecture-目标架构.md` §6 决策 1 写着 `confirm-execution-granularity`「当前尚未归档」，实际已于 2026-09-13 归档为 `openspec/changes/archive/2026-09-13-confirm-execution-granularity/`。**架构文档变更权仅用户，本批未改**，已出最小化修订提案待裁决。
+  - 观察（非缺陷）：终局能力 2（项目身份）与 4（DAG 编排）无专属 capability spec，行为由单元测试与开发计划 §2.3 承载。按架构 §7 判定二者「有证据」，不构成隐性未完成。
+- 结论（区分事实与判断）：**已验证事实**——目标与实现无方向性偏离，§3 十条终局能力中九条已有相称证据，第十条为上游发版阻断且插件侧已就绪；`artifact-ref-handoff` 28 项任务已勾 26 项，代码全部已提交。**工作假设**——`hostEventProducerVersion` 的正确值应为 `0.6.0`（依据：清单写入与常量改值同属提交 `1594fa5`，当前镜像推送于其后的 `3146903`），但未经镜像内实证。**未知项**——上游发行版纳入 `externalEventProducers` 的时间。
+- 验证：文档改动后复跑 `pnpm exec vitest run packages/dsh-pactflow/tests` 全绿（结果见本条上方基线）；`ops-doc-event-count`（唯一读文档的门禁，读的是 `installation-operations-安装运维.md`）未被本批触及。
+
+## 2026-09-15 5.1/7.1 验收承载补齐 + 本机构建环境重建（change `artifact-ref-handoff`，两项仍未勾选）
+
+当前阶段：本机此前无法构建（Node v20.20.2 低于 `^22.19.0 || >=24`、两个 DSH fork 兄弟目录缺失），5.1/7.1 在本机既跑不了也无脚本承载。本批重建构建环境并补齐验收承载的**存储侧**；**5.1 与 7.1 如实保持未勾选**——集群侧需真实 K3s 与人工参与，本机不可达，无 mock 可以冒充。
+
+- 环境重建：Node 22.20.0 装入 `~/.local/node22`（SHA256 与 nodejs.org 官方 SHASUMS256 逐字节一致），corepack 激活 pnpm 11.7.0；两个 DSH fork 取自 `tianyuegithub/deepseek-harness`——`deepseek-harness-pactflow-p0` ← 分支 `codex/external-producer-declaration-upgrade`（含 external producer 声明升级实现），`deepseek-harness-pactflow-upstream-pr` ← 分支 `codex/external-session-event-producers-clean`；`package.json` 的 46 个 `link:` 目标零缺失，两 fork 各自 `pnpm install` + `build:lib` 通过。**两 fork 真身置于 `~/dsh-forks/`（同步范围外），仓库同级位置留符号链接**——实测 Synology Drive 不跟随符号链接（链接以 `type: symlink` 同步，链接内 canary 文件零上传），既避免约 2G / 14.6 万文件进入云同步，又保持 `link:` 相对路径可解析（`readlink -f` 已穿透、`pnpm run build` 全链通过），`pnpm run build` 全链通过（host→typert→agent→client）。**分支到目录的映射是工作假设**：两分支全仓库仅 9 处差异且全部位于 `packages/core/session`，upstream-pr 侧引用的 6 个包字节相同，故映射方向不影响产物。
+- 验收承载（本批新增）：`tests/artifact-handoff.real.spec.ts` 覆盖存储侧真实链路——长日志 put→ref→resolve 的 bytes/sha256 校验、结果文档尾部+ref 落在 `result-document` 3 KiB 预算内、`result-document` 与 `interaction-request` 双通道 oversize 拒绝码与外置指引、ListObjectsV2 孤儿对账、保留账本超龄/超量标记且标记后对象仍可读（mark-never-delete）；key 经 `pactFlowArtifactObjectKey` 生成（含随机段）。入口 `scripts/run-real-artifact.mjs` 与 `test:real-artifact`——**未武装时显式失败并声明"跳过不是通过"**，不静默跳过。
+- 落点裁决：该套件**刻意不放 `e2e/`**。`run-real-web-gate.mjs` 动态发现 `e2e/` 下每个 spec 并经 `assertReleaseWebReport` 要求 `numPendingTestSuites` 为 0 且逐 suite 全通过，因此 env 门控套件放进 `e2e/` 会使该门禁结构上不可满足。**发现的设计张力（未改动，供裁决）**：`real-suite-inventory.spec.ts` 的 `REQUIRED_NOT_RUN` 桶专为"等待真实环境的 `expect.fail` 骨架"而设，但任何进入该桶的 e2e 骨架都会让 web gate 永不通过——该桶当前为空，冲突尚未暴露。另：`real-web-gate-prerequisites.spec.ts` 只扫描 `^const (enabled|record|realDescribe)` 开头行提取 `process.env`，门控若拆成其它变量名即可绕过武装集完整性检查。
+- 实现侧复核（未改动）：5.1 的实现链路完整——`runner.mjs` 落盘 `/tmp/pactflow-log-{ref.json,tail.txt}` → `WORKER_SCRIPT` python 段并入结果文档 `logArtifact`/`logTail` → `k3s-worker.ts` 以 `parsePactFlowArtifactRef` 解析，解析失败返回 `failed` 并给出明确 outcome（fail-closed，非静默吞错）。故 5.1/7.1 的缺口确为验收未跑，不是实现缺失。
+- 验证：`pnpm run check` 全绿（exit 0；build→test→pack:check，19 个必需产物齐全）；`pnpm test` = **102 文件通过 / 2 跳过（104），738 测试通过 / 7 跳过（745）**——本批新增套件贡献其中 1 个跳过文件与 4 个跳过测试（未武装即跳过），通过数与基线持平；`openspec validate --all --strict` 49/49。新套件另经独立 tsc 类型检查（`typecheck` 只覆盖两个 tsconfig 的显式 files，不含 `tests/`），并在内存版 S3 stand-in 上实跑 4/4——**后者只验证测试代码自身可运行，不是真实路径验收，不得计入 5.1/7.1**。
+- 未完成（如实保留未勾选）：5.1 与 7.1 的**集群侧**——dispatch 内 worker put、ref 经结果文档回传、per-run artifact Secret 随 children 清理账本回收、UI 绑定存储后派发消耗真实模型额度的长任务。需真实 K3s + 真实 RustFS + 人工参与，一并见 `test:real-artifact` 与 tasks 5.1/7.1。
+
 ## 2026-09-14 大内容外置与传址协议（change `artifact-ref-handoff`，实施主体完成、未全部完成、未提交）
 
 当前阶段：OpenSpec 规划四件套（DS 评审迭代版）+ 存储客户端/绑定/门禁/脱敏/保留账本/凭据注入/日志外置的宿主与 worker 侧实现完成并通过定向与全量测试；**真实 RustFS 连通验收通过**（宿主→NodePort 32571，SigV4 PUT/HEAD/LIST/GET/建桶/不可覆写全链实测，凭据仅经 env 注入未进日志）。**关键后端观测：该 RustFS 不返回 versionId**（合同按"有则必存、etag+hash 钉版"设计即为此情形，合同无需收窄）；ListObjectsV2 前缀列举可用。代码未提交、未推送，规格未归档；worker 镜像未推送 Harbor。

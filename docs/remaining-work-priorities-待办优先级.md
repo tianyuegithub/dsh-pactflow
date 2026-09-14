@@ -1,8 +1,10 @@
 # DSH 零脉 待办优先级清单
 
-**日期**：2026-09-11
+**日期**：2026-09-11（**2026-09-15 复核并更新基线与结论**，见文末）
 **性质**：派生视图（非计划 owner）。计划与顺序的正文 owner 是 OpenSpec（`openspec/changes/`、`openspec/specs/`）；本清单只做跨 change 的三方汇总与优先级排序，供决策使用。
-**当前事实基线**：46 个 change 已归档、37 个 spec 有效、`pnpm run check` 72 文件 / 561 测试全绿；分支**已推送**到 `origin`（`local==remote`）。
+**当前事实基线（2026-09-15 实测）**：**61 个 change 已归档、48 个 spec 有效、1 个活跃 change（`artifact-ref-handoff`）**；`pnpm run check` **104 文件 / 745 用例（738 通过 / 7 环境门控跳过 / 0 失败）/ 19 必需产物**，全绿；`openspec validate --all --strict` **49/49**；分支 `main`，HEAD `f8fddaf`。
+
+> 下表 P0–P3 各行的「为什么现在做」与证据均为 **2026-09-11/12 当时**的记录，保留作历史；各项的**当前结论**以文末「2026-09-15 复核」为准。
 
 排序原则：先消除**错误或冗余信息**（成本极低）→ 再补**行为已改但未经真实环境验证**的项（正确性风险最高）→ 再做**结构性/新能力**（工作量大）→ 最后是与目标/上游绑定的项。
 
@@ -64,7 +66,9 @@
 
 ---
 
-## 当前状态：无待裁决项
+## 当前状态（2026-09-11 当时）：无待裁决项
+
+> **已过时**：2026-09-15 复核新增三项待裁决（21 / 22 / 23），见文末。
 
 E-19 主目录同步**已执行**（`/Users/ty/Codes/dsh-pactflow` 的 `main` 已 fast-forward 到本分支）。P2-6 的 A03-a 与 A12-a/b **已按授权实现并归档**（change `harden-drain-and-verification-visibility`）。
 
@@ -80,3 +84,37 @@ E-19 主目录同步**已执行**（`/Users/ty/Codes/dsh-pactflow` 的 `main` �
 
 **已裁决无需动作**：`deployed` 语义、强隔离承诺、F03 触发前置——均「保持现状」。
 **上游阻断（不需你现在动作）**：官方 DSH 发行版兼容复核（`externalEventProducers` 缺口，见第 18 行）——`check:release` 的最后一个真实步骤（`verify:profile`）依赖它，故 `check:release` 目前仅剩此上游阻断；本仓侧的门禁不可满足性已修复。
+
+---
+
+## 2026-09-15 复核
+
+三方核对（目标架构 §3/§4/§7 ↔ OpenSpec ↔ 代码与实测）后，待办面收敛为四类：
+
+### 唯一卡住「完成」的项 —— C 类上游，本仓不可控
+
+| # | 事项 | 当前结论 |
+| --- | --- | --- |
+| 18 | 官方 DSH 发行版缺 `sessions.externalEventProducers` | **仍阻断**。2026-09-15 复查 npm：`latest=0.1.5-rc.1`、`next=0.1.5-rc.2`，与 2026-09-11 实证缺口的两个版本**完全相同，无新发行版**。连锁后果：`verify:profile` 在官方发行版上必失败 → `check:release` 第一个真实步骤过不去 → **架构 §7 的终止条件在上游发版前结构上不可达**。上游实现已在 fork 完成并经验收（`06d3202146`），PR 已按上游惯例提交；插件侧已就绪，发版后**无需改动** |
+
+### 需真实环境才能推进的项
+
+| # | 事项 | 当前结论 |
+| --- | --- | --- |
+| 20 | `artifact-ref-handoff` 任务 5.1 / 7.1 | **not-run**，如实未勾选。实现链完整且 fail-closed，缺的是真实 K3s + 真实 RustFS + UI 绑定后派发 + 真实模型额度。承载已铺好（`tests/artifact-handoff.real.spec.ts` + `pnpm run test:real-artifact`，未武装即显式失败）。**该 change 因此不得归档** |
+| 6 | A03 剩项 | **已交付**：最小验证策略（`validation-policy`）与宿主自有基线（`host-owned-baseline`）均已落地并归档。本行关闭 |
+| 14 | A8 剩余：跨卡片未保存草稿并存 | **已交付**（`card-draft-isolation`，`card-drafts.spec.ts` 4 项 + overlay e2e）。剩**移动端形态**未做，需资源卡夹具 |
+
+### 本轮新发现（低成本，尚未处置）
+
+| # | 事项 | 说明 |
+| --- | --- | --- |
+| 21 | `release-manifest.json` 的 `hostEventProducerVersion` 漂移 | 清单写 `0.5.0`，代码 `EVENT_PRODUCER_VERSION` 是 `0.6.0`；**无任何测试校验此字段**。不影响运行时，影响镜像兼容性对账准确性。改数字是分钟级；补守卫属 `operator-doc-accuracy` 的 spec 扩展，须走 OpenSpec。**待裁决** |
+| 22 | 两处门禁设计张力 | ① `REQUIRED_NOT_RUN` 桶与 `check:release` 零跳过要求互斥（该桶当前为空，暂未触发）；② `real-web-gate-prerequisites` 靠正则反推必需开关，**改门控变量名即可绕过**。**待裁决是否加固** |
+| 23 | 架构文档 §6 决策 1 表述过时 | 写着 `confirm-execution-granularity`「当前尚未归档」，实际已于 2026-09-13 归档。**架构文档变更权仅用户**，已出提案待裁决 |
+
+### 已裁决为终态、不再是待办
+
+`deployed` 语义 / 不可信代码强隔离 / F03 触发前置 / 跨主机双客户端部署 / A10 的 `tool-invocation` 与 `verification` 两级不可证 / A11 的 token 用量统计 —— 六项均已裁决「保持现状」或「非目标」，按规则**不应再计入待办面**。
+
+A04（Gitea `waiting-review/waiting-checks` 协作闭环）仍是真实环境前置，非实现缺口。
