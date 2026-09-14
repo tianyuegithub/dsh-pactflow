@@ -51,13 +51,32 @@ export const PACTFLOW_ARTIFACT_OVERSIZE_CODE = 'pactflow.artifact.oversize'
  * is governed by the run budget's single authority (`maxOutputBytes`).
  */
 export type PactFlowBoundedChannel =
-  | 'result-document' | 'bridge-frame' | 'interaction-request' | 'event-payload'
+  | 'result-document' | 'bridge-frame' | 'interaction-request' | 'event-payload' | 'attachment'
 
 export const PACTFLOW_CHANNEL_LIMITS: Readonly<Record<PactFlowBoundedChannel, number>> = {
   'result-document': 3 * 1024,
   'bridge-frame': 32 * 1024,
   'interaction-request': 8_000,
   'event-payload': 4_096,
+  /**
+   * Attachment bytes travel as a Remote parameter, the same lane DSH itself uses
+   * for encoded image attachments. The transport was measured rather than assumed
+   * (`scripts/measure-remote-payload-ceiling.mjs`): 256 MiB went through in 3.1s
+   * with no refusal, and the next rung fails inside V8 string construction, not in
+   * the channel. So the transport is not the binding constraint and this number is
+   * a policy choice.
+   *
+   * 32 MiB, for three reasons. Latency: 432ms round-trip, still interactive, while
+   * the next rung up already feels stalled. Memory: the whole payload is resident
+   * on both client and host at once, so the real cost is several times this.
+   * And failure shape — the one that decides it: 32 MiB sits an order of magnitude
+   * below every measured or structural limit, so exceeding it is always OUR refusal
+   * with our own message, never V8's `Invalid string length` or an opaque transport
+   * error. The contract promises a local pre-send refusal carrying an oversize code
+   * and guidance; that promise only holds while the threshold stays far from the
+   * hard limits.
+   */
+  attachment: 32 * 1024 * 1024,
 }
 
 export function pactFlowArtifactOversizeError(channel: PactFlowBoundedChannel, bytes: number, limit?: number): Error {
@@ -280,6 +299,9 @@ export class PactFlowArtifactStoreClient {
     } while (continuation !== undefined)
     return entries
   }
+
+  /** The bucket this client is bound to; needed to turn listed keys into refs. */
+  get bucket(): string { return this.config.bucket }
 
   /** Resolve a ref inside this binding and verify integrity; never a generic URL fetch. */
   async resolveArtifact(ref: PactFlowArtifactRef): Promise<Uint8Array> {

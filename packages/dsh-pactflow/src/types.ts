@@ -1389,6 +1389,32 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
 }
 
 /** Retained failure-scene status (A05 extension); read-only, never triggers deletion. */
+/**
+ * One known stored object, from a host record or a list reconciliation.
+ *
+ * Lives here rather than beside the reconciliation logic because it crosses the
+ * Remote boundary, and the boundary only accepts types from a public non-root
+ * type subpath.
+ */
+export interface PactFlowArtifactObjectRecord {
+  readonly uri: string
+  readonly bytes: number
+  /** Epoch ms the host recorded the upload, or the reconciliation observed it. */
+  readonly recordedAt: number
+  /** True when a list reconciliation found no host record for this object. */
+  readonly orphan?: boolean
+}
+
+export interface PactFlowArtifactLedger {
+  readonly total: number
+  readonly totalBytes: number
+  readonly overBudget: boolean
+  readonly maxBytes: number
+  readonly windowMs: number
+  readonly overdue: readonly PactFlowArtifactObjectRecord[]
+  readonly orphans: readonly PactFlowArtifactObjectRecord[]
+}
+
 export interface PactFlowRetentionSummary {
   readonly total: number
   readonly overdue: readonly { readonly id: string; readonly target: string; readonly retainUntil?: number }[]

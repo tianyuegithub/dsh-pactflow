@@ -130,14 +130,17 @@ import { PactFlowProjectCapacity } from './project-capacity.ts'
 import { PactFlowExecutionCapacity } from './execution-capacity.ts'
 import { pactFlowDeliverySubjectDigest, pactFlowReviewEvidenceDigest, pactFlowReviewNote } from './review-authorization.ts'
 import { PACTFLOW_DEFAULT_RUN_BUDGET, boundOutputToBudget, evaluateAgentCommentBudget, evaluateAttemptBudget } from './run-budget.ts'
-import { assertWithinChannelLimit, PactFlowArtifactStoreClient } from './artifact-store.ts'
+import { assertWithinChannelLimit, PactFlowArtifactStoreClient, type PactFlowArtifactRef } from './artifact-store.ts'
+import { assertArtifactUploadSafe } from './worker/redact.ts'
 import { harnessCapabilityProfile } from './harness-capabilities.ts'
 import { projectHandoverSummary, type PactFlowHandoverSummary } from './project-handover.ts'
 import { staleCodeInputs } from './input-staleness.ts'
-import { PACTFLOW_DEFAULT_RETENTION_BYTES, PACTFLOW_DEFAULT_RETENTION_MS, measureRetainedSceneBytes, summarizeRetentionCapacity } from './retention-policy.ts'
+import { PACTFLOW_DEFAULT_RETENTION_BYTES, PACTFLOW_DEFAULT_RETENTION_MS, artifactObjectRecord, measureRetainedSceneBytes, reconcileArtifactObjects, summarizeArtifactLedger, summarizeRetentionCapacity } from './retention-policy.ts'
 import type { PactFlowRetentionSummary } from './types.ts'
 import { PactFlowCommentId, PactFlowNeedId, PactFlowNodeId, PactFlowProjectId, PactFlowRunId } from './types.ts'
 import type {
+  PactFlowArtifactLedger,
+  PactFlowAttachment,
   PactFlowAddCommentRequest,
   PactFlowCollaborationState,
   PactFlowComment,
@@ -702,6 +705,36 @@ export class PactFlowService extends TypertRemoteService {
    * A05 extension: read-only status of retained failure scenes, flagging overdue
    * ones for review. Never deletes anything — a human decides.
    */
+  /**
+   * The artifact object ledger for this session's bound store.
+   *
+   * Recorded objects come from the durable log — attachment refs and externalized
+   * run logs — and the listing comes from the store itself. A key the store holds
+   * that the log never recorded is an ORPHAN: it is what an upload that succeeded
+   * followed by a failed append leaves behind, and it is exactly the case the
+   * contract refuses to resolve automatically. Nothing here deletes anything; the
+   * ledger surfaces the discrepancy for a person to judge.
+   */
+  @Remote('artifactLedger')
+  async artifactLedger(sessionId: string, signal?: AbortSignal): Promise<PactFlowArtifactLedger> {
+    signal?.throwIfAborted()
+    const session = this.livePactFlowSession(sessionId)
+    const now = Date.now()
+    const snapshot = await this.snapshot(String(session.id))
+    const recorded = [
+      ...Object.values(snapshot.delivery.attachments).map(attachment => artifactObjectRecord(attachment.ref, attachment.linkedAt)),
+      ...Object.values(snapshot.runs.byId)
+        .map(run => run.k3sResult?.logArtifact)
+        .filter((ref): ref is PactFlowArtifactRef => ref !== undefined)
+        .map(ref => artifactObjectRecord(ref, now)),
+    ]
+    const client = await this.artifactStoreClient(session)
+    const listed = await client.listObjects('')
+    return summarizeArtifactLedger(
+      reconcileArtifactObjects(recorded, listed, client.bucket, now), now,
+    )
+  }
+
   @Remote('retentionStatus')
   retentionStatus(sessionId: string): PactFlowRetentionSummary {
     const session = this.liveSession(sessionId)
@@ -3078,6 +3111,25 @@ export class PactFlowService extends TypertRemoteService {
    * execution log through the project's bound store. Resolution obeys the same
    * binding constraint as every consumer — no signature URLs, no new endpoint.
    */
+  /**
+   * Resolve the session's bound artifact store into a client.
+   *
+   * Every artifact path goes through here, so "no binding" is one refusal with one
+   * wording rather than three drifting copies — and there is no branch in which a
+   * missing binding degrades into writing somewhere else.
+   */
+  private async artifactStoreClient(session: Session): Promise<PactFlowArtifactStoreClient> {
+    const storeId = (await this.workspaceProjectForSession(session))?.artifact?.artifactStoreId
+    if (storeId === undefined) throw new Error('PactFlow project has no artifact store binding')
+    const store = this.infrastructure?.artifactStore(storeId)
+    if (store === undefined) throw new Error(`PactFlow artifact store "${storeId}" is not configured`)
+    return new PactFlowArtifactStoreClient({
+      endpoint: store.endpoint, bucket: store.bucket, region: store.region ?? 'us-east-1',
+      accessKeyId: await this.resolveCredential(store.accessKeyCredentialRef, 'artifact store access key id'),
+      secretAccessKey: await this.resolveCredential(store.secretKeyCredentialRef, 'artifact store secret access key'),
+    })
+  }
+
   @Remote('artifactLog')
   async artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{
     readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string
@@ -3087,17 +3139,104 @@ export class PactFlowService extends TypertRemoteService {
     const run = (await this.snapshot(String(session.id))).runs.byId[runId]
     const ref = run?.k3sResult?.logArtifact
     if (ref === undefined) throw new Error(`PactFlow Run "${runId}" has no externalized log artifact`)
-    const storeId = (await this.workspaceProjectForSession(session))?.artifact?.artifactStoreId
-    if (storeId === undefined) throw new Error('PactFlow project has no artifact store binding')
-    const store = this.infrastructure?.artifactStore(storeId)
-    if (store === undefined) throw new Error(`PactFlow artifact store "${storeId}" is not configured`)
-    const client = new PactFlowArtifactStoreClient({
-      endpoint: store.endpoint, bucket: store.bucket, region: store.region ?? 'us-east-1',
-      accessKeyId: await this.resolveCredential(store.accessKeyCredentialRef, 'artifact store access key id'),
-      secretAccessKey: await this.resolveCredential(store.secretKeyCredentialRef, 'artifact store secret access key'),
-    })
+    const client = await this.artifactStoreClient(session)
     const content = await client.resolveArtifact(ref)
     return { uri: ref.uri, summary: ref.summary, bytes: ref.bytes, content: new TextDecoder().decode(content) }
+  }
+
+  /**
+   * Link one attachment to a Need: upload the bytes, record the address.
+   *
+   * Ordering is the contract. The size check comes first and before any network
+   * traffic, so an oversize attachment never becomes a partial object. The
+   * redaction gate runs inside `putArtifact` before the request is sent, and a
+   * scanner failure refuses just like a hit does — an upload that could not be
+   * scanned is not an upload that may proceed. Only after the object exists does
+   * the event get appended, and it carries the address and digest, never the bytes.
+   */
+  @Remote('linkAttachment')
+  async linkAttachment(sessionId: string, request: {
+    readonly needId: string
+    readonly fileName: string
+    readonly mediaType: string
+    /**
+     * Base64 of the file bytes.
+     *
+     * Not a `Uint8Array`: it carries `Symbol.toStringTag`, and the Remote boundary
+     * refuses symbol-keyed properties. Base64 is also exactly the shape the channel
+     * ceiling was measured with (`scripts/measure-remote-payload-ceiling.mjs`), so
+     * the 32 MiB attachment threshold applies to this field directly rather than to
+     * a differently-encoded stand-in.
+     */
+    readonly contentBase64: string
+    readonly summary?: string
+  }, signal?: AbortSignal): Promise<PactFlowAttachment> {
+    signal?.throwIfAborted()
+    const session = this.livePactFlowSession(sessionId)
+    const need = this.need(session, request.needId)
+    const fileName = request.fileName.trim()
+    if (fileName === '' || fileName.includes('/') || fileName.includes('\\') || fileName.startsWith('.')) {
+      throw new Error('PactFlow attachment file name must be a plain name without path separators')
+    }
+    const mediaType = request.mediaType.trim()
+    if (!/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(mediaType)) {
+      throw new Error('PactFlow attachment media type is invalid')
+    }
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(request.contentBase64)) {
+      throw new Error('PactFlow attachment content must be base64')
+    }
+    const content = Buffer.from(request.contentBase64, 'base64')
+    // Before anything else and before any request: an oversize attachment must be
+    // refused whole, never uploaded in part. Measured on the decoded bytes, which
+    // is what actually lands in the store.
+    assertWithinChannelLimit('attachment', content.byteLength)
+
+    const client = await this.artifactStoreClient(session)
+    const id = `attachment-${randomUUID()}`
+    const summary = (request.summary ?? fileName).slice(0, 200)
+    const ref = await client.putArtifact({
+      key: `pactflow-attachments/${String(session.id)}/${need.id}/${id}/${fileName}`,
+      content: new Uint8Array(content),
+      kind: 'attachment',
+      summary,
+      // Fail-closed on both a hit and a scanner failure; see assertArtifactUploadSafe.
+      //
+      // No known-value list is passed: building one would mean resolving every
+      // configured credential into Host memory on every upload, which creates the
+      // exposure the gate exists to prevent. The pattern scan (private key blocks,
+      // Bearer/Basic tokens, URL userinfo, credential-style assignments) does not
+      // need them, and the module is explicit that this is not arbitrary-secret
+      // detection — a limit already stated in the architecture, not widened here.
+      uploadGate: text => { assertArtifactUploadSafe(text) },
+    })
+
+    const attachment: PactFlowAttachment = {
+      id: id as PactFlowAttachment['id'], needId: need.id,
+      fileName, mediaType, summary, ref, linkedAt: Date.now(), linkedBy: 'user',
+    }
+    // The object exists whether or not this succeeds; a failure here leaves it
+    // discoverable as an orphan by the listing reconciliation, which is the
+    // designed outcome — nothing is auto-deleted.
+    this.events.append(session, 'pactflow/attachment-linked', { v: 1, attachment })
+    return attachment
+  }
+
+  /** Read one linked attachment's content, verified against its recorded digest. */
+  @Remote('readAttachment')
+  async readAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<{
+    readonly attachment: PactFlowAttachment
+    /** Base64, for the same boundary reason as the upload side. */
+    readonly contentBase64: string
+  }> {
+    signal?.throwIfAborted()
+    const session = this.livePactFlowSession(sessionId)
+    const attachment = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.attachments[attachmentId]
+    if (attachment === undefined) throw new Error(`PactFlow attachment "${attachmentId}" does not exist`)
+    const client = await this.artifactStoreClient(session)
+    // resolveArtifact verifies bytes and sha256 and throws `corrupt` otherwise, so
+    // a consumer never receives content that does not match what was recorded.
+    const content = await client.resolveArtifact(attachment.ref)
+    return { attachment, contentBase64: Buffer.from(content).toString('base64') }
   }
 
   /** Run one real, read-only infrastructure connection probe with bounded stage evidence. */

@@ -135,29 +135,14 @@ export function summarizeRetentionCapacity(
 
 import type { PactFlowArtifactRef } from './artifact-store.ts'
 
-/** One known stored object, from a host record or a list reconciliation. */
-export interface PactFlowArtifactObjectRecord {
-  readonly uri: string
-  readonly bytes: number
-  /** Epoch ms the host recorded the upload, or the reconciliation observed it. */
-  readonly recordedAt: number
-  /** True when a list reconciliation found no host record for this object. */
-  readonly orphan?: boolean
-}
+// Both record types now live in `types.ts`: they cross the Remote boundary, which
+// only accepts types from a public non-root type subpath.
+export type { PactFlowArtifactLedger, PactFlowArtifactObjectRecord } from './types.ts'
+import type { PactFlowArtifactLedger, PactFlowArtifactObjectRecord } from './types.ts'
 
 export interface PactFlowArtifactLedgerOptions {
   readonly maxBytes?: number
   readonly windowMs?: number
-}
-
-export interface PactFlowArtifactLedger {
-  readonly total: number
-  readonly totalBytes: number
-  readonly overBudget: boolean
-  readonly maxBytes: number
-  readonly windowMs: number
-  readonly overdue: readonly PactFlowArtifactObjectRecord[]
-  readonly orphans: readonly PactFlowArtifactObjectRecord[]
 }
 
 /** Host record derived from a settled artifactRef event entry. */
