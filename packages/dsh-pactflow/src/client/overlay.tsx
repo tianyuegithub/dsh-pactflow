@@ -77,6 +77,12 @@ export interface OverlayInjected {
   /** A11: explicit human resume for a paused node. */
   resumeNode(sessionId: string, nodeId: string, expectedRevision: number, signal: AbortSignal): Promise<unknown>
   artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{ readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string }>
+  rerunPreview(sessionId: string, request: { readonly nodeId: string }, signal?: AbortSignal): Promise<{
+    readonly staleInputs: readonly { readonly dependency: string; readonly branch: string; readonly recorded: string; readonly latest: string }[]
+    readonly unresolved: readonly string[]
+    readonly refusal?: string
+  }>
+  rerunNode(sessionId: string, request: { readonly nodeId: string; readonly expectedRevision: number }, signal?: AbortSignal): Promise<unknown>
   recheckReviewGate(sessionId: string, request: { readonly needId: string; readonly expectedRevision: number }, signal?: AbortSignal): Promise<unknown>
   addComment(sessionId: string, request: { readonly needId: string; readonly body: string }, signal?: AbortSignal): Promise<unknown>
   voidComment(sessionId: string, request: { readonly commentId: string }, signal?: AbortSignal): Promise<unknown>
@@ -113,7 +119,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, recheckReviewGate, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, rerunPreview, rerunNode, recheckReviewGate, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const sessionCwd = useSessions(sessions => state.sessionId === null ? undefined : sessions.byId[state.sessionId]?.cwd)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
@@ -407,6 +413,10 @@ export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover
                 ...(record.externallyMerged === undefined ? {} : { externallyMerged: record.externallyMerged }),
               }
             })()}
+            onPreviewRerun={nodeId => rerunPreview(String(state.sessionId), { nodeId })}
+            onRerun={async (nodeId, revision) => {
+              await rerunNode(String(state.sessionId), { nodeId, expectedRevision: revision })
+            }}
             onRecheckReviewGate={async () => {
               await recheckReviewGate(String(state.sessionId), {
                 needId: selectedNeed.id, expectedRevision: selectedNeed.revision,

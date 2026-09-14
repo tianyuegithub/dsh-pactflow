@@ -32,6 +32,7 @@ import type {
   PactFlowProject,
   PactFlowProjectProjection,
   PactFlowRelease,
+  PactFlowRerunAuthorization,
   PactFlowReview,
   PactFlowRun,
   PactFlowRunsProjection,
@@ -268,6 +269,20 @@ const nodeSchema = pactFlowSchema<PactFlowNode>(z.object({
   state: z.enum(['pending', 'ready', 'claimed', 'running', 'blocked', 'review', 'paused', 'succeeded', 'failed', 'cancelled', 'archived']),
   revision: z.number().int().positive(), dependencies: z.array(pactFlowIdSchema<'node'>()), updatedAt: z.number().int().nonnegative(),
   codeInputs: z.array(pactFlowIdSchema<'node'>()).optional(),
+  staleCodeInputs: z.array(z.object({
+    dependency: z.string().min(1), branch: z.string().min(1),
+    recorded: z.string().min(1), latest: z.string().min(1),
+  })).optional(),
+}))
+
+const rerunAuthorizationSchema = pactFlowSchema<PactFlowRerunAuthorization>(z.object({
+  authorizedAt: z.number().int().nonnegative(),
+  fromRevision: z.number().int().positive(),
+  priorState: z.enum(['pending', 'ready', 'claimed', 'running', 'blocked', 'review', 'paused', 'succeeded', 'failed', 'cancelled', 'archived']),
+  staleInputs: z.array(z.object({
+    dependency: z.string().min(1), branch: z.string().min(1),
+    recorded: z.string().min(1), latest: z.string().min(1),
+  })),
 }))
 
 const runSchema = pactFlowSchema<PactFlowRun>(z.object({
@@ -432,7 +447,13 @@ const eventPayloadSchemas: { readonly [Type in PactFlowEventType]: z.ZodType<Ses
     from: z.enum(['backlog', 'discussion', 'confirmed', 'design', 'planning', 'executing', 'code_review', 'verification', 'closing', 'deployed']),
   }),
   'pactflow/node-created': z.object({ v: z.literal(1), node: nodeSchema }),
-  'pactflow/node-updated': z.object({ v: z.literal(1), node: nodeSchema }),
+  'pactflow/node-updated': z.object({
+    v: z.literal(1), node: nodeSchema,
+    // node-rerun-authorization: present only when an owner authorized re-running
+    // a node that had already succeeded. The fold requires it for that
+    // transition, so it must live in the event rather than in the caller.
+    rerunAuthorization: rerunAuthorizationSchema.optional(),
+  }),
   'pactflow/run-claimed': z.object({ v: z.literal(1), run: runSchema, node: nodeSchema }),
   'pactflow/run-bound': z.object({ v: z.literal(1), run: runSchema, node: nodeSchema }),
   'pactflow/run-renewed': z.object({ v: z.literal(1), run: runSchema, node: nodeSchema }),
@@ -538,7 +559,7 @@ export const pactflowNeedsProjection: ProjectionDefinition<'pactflowNeeds'> = {
 }
 
 export const pactflowDagProjection: ProjectionDefinition<'pactflowDag'> = {
-  key: 'pactflowDag', stateVersion: 4, stateSchema: dagStateSchema,
+  key: 'pactflowDag', stateVersion: 5, stateSchema: dagStateSchema,
   init: () => ({ byId: {}, needIds: [] }),
   apply: (state, event) => {
     event = parseEventPayload(event)
@@ -562,6 +583,22 @@ export const pactflowDagProjection: ProjectionDefinition<'pactflowDag'> = {
     } else {
       if (previous === undefined) throw new Error(`PactFlow node "${next.id}" has no prior state`)
       if (next.needId !== previous.needId) throw new Error(`PactFlow node "${next.id}" changed Need ownership`)
+      // Architecture §3.4: reviving a terminal node without the owner's explicit
+      // authorization is rejected here, in the fold, so replaying the log reaches
+      // the same verdict as the live write. `archived` is the one ordinary exit
+      // from success; anything else needs the authorization carried in the event.
+      if (previous.state === 'succeeded' && next.state !== 'succeeded' && next.state !== 'archived') {
+        const authorization = event.type === 'pactflow/node-updated' ? event.data.rerunAuthorization : undefined
+        if (authorization === undefined) {
+          throw new Error(`PactFlow node "${next.id}" cannot leave the succeeded state without owner authorization`)
+        }
+        if (authorization.fromRevision !== previous.revision || authorization.priorState !== previous.state) {
+          throw new Error(`PactFlow node "${next.id}" rerun authorization does not match the state it authorized`)
+        }
+      }
+      if (previous.state === 'archived' && next.state !== 'archived') {
+        throw new Error(`PactFlow node "${next.id}" cannot leave the archived state`)
+      }
       if (JSON.stringify(previous) === JSON.stringify(next)) return state
       const unchangedRevision = (event.type === 'pactflow/run-bound')
         || (event.type === 'pactflow/run-renewed' && previous.state === next.state)

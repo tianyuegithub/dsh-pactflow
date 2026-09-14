@@ -35,6 +35,13 @@ export interface WorkbenchEvidenceViewProps {
     readonly externallyMerged?: boolean | undefined
   } | undefined
   readonly onRecheckReviewGate?: () => Promise<void>
+  /** node-rerun-authorization: preview and authorize re-running a succeeded node. */
+  readonly onPreviewRerun?: (nodeId: string) => Promise<{
+    readonly staleInputs: readonly { readonly dependency: string; readonly branch: string; readonly recorded: string; readonly latest: string }[]
+    readonly unresolved: readonly string[]
+    readonly refusal?: string
+  }>
+  readonly onRerun?: (nodeId: string, revision: number) => Promise<void>
   /** Paged history, including voided entries the live tail leaves out. */
   readonly onLoadComments?: (signal?: AbortSignal) => Promise<{
     readonly total: number
@@ -417,6 +424,82 @@ const CHECK_STATE_LABEL: Readonly<Record<string, string>> = {
   unknown: '状态不明',
 }
 
+const shortCommit = (value: string) => value.slice(0, 12)
+
+function RerunAuthorization({
+  nodes,
+  onPreview,
+  onRerun,
+}: {
+  readonly nodes: readonly PactFlowNode[]
+  readonly onPreview: NonNullable<WorkbenchEvidenceViewProps['onPreviewRerun']>
+  readonly onRerun: NonNullable<WorkbenchEvidenceViewProps['onRerun']>
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  const [preview, setPreview] = useState<Awaited<ReturnType<typeof onPreview>> | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const succeeded = nodes.filter(node => node.state === 'succeeded')
+  if (succeeded.length === 0) return null
+
+  const open = (nodeId: string) => {
+    setSelected(nodeId); setPreview(null); setError(null); setBusy(true)
+    void onPreview(nodeId)
+      .then(setPreview)
+      .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : String(cause)) })
+      .finally(() => { setBusy(false) })
+  }
+
+  return <Section title="重跑已成功节点">
+    <p style={mutedStyle}>
+      上游改动后可以让已成功的节点按新输入重做。这是所有者的决定——先看清哪些依赖变了，再显式授权；
+      下游只会被标记，不会自动跟着重跑。
+    </p>
+    <ul style={listStyle}>{succeeded.map(node => <li key={node.id} style={rowStyle}>
+      <div style={rowCopyStyle}>
+        <strong>{node.title}</strong>
+        {(node.staleCodeInputs?.length ?? 0) > 0
+          ? <span style={detailStyle}>输入已过期：{node.staleCodeInputs!.map(input => input.dependency).join('、')}</span>
+          : <span style={detailStyle}>输入未发现变化</span>}
+      </div>
+      <Button size="sm" variant="outline" disabled={busy}
+        onClick={() => { open(node.id) }}>查看重跑影响</Button>
+    </li>)}</ul>
+
+    {selected === null ? null : <div style={stackStyle}>
+      {busy ? <p style={mutedStyle}>正在重新解析依赖的当前提交…</p> : null}
+      {preview?.refusal !== undefined
+        ? <p role="alert" style={mutedStyle}>无法重跑：{preview.refusal}</p>
+        : preview === null ? null : <>
+          {preview.staleInputs.length === 0
+            ? <p style={mutedStyle}>依赖的提交都没有变化，重跑不会引入新的上游输入。</p>
+            : <ul style={listStyle}>{preview.staleInputs.map(input => <li key={input.dependency} style={rowStyle}>
+              <div style={rowCopyStyle}>
+                <strong>{input.dependency}</strong>
+                <span style={detailStyle}>{input.branch}</span>
+                <span>{shortCommit(input.recorded)} → {shortCommit(input.latest)}</span>
+              </div>
+            </li>)}</ul>}
+          {preview.unresolved.length === 0 ? null : <p role="alert" style={mutedStyle}>
+            以下依赖的当前提交解析不出来，未按「未过期」处理：{preview.unresolved.join('、')}
+          </p>}
+          <Button size="sm" disabled={busy}
+            onClick={() => {
+              const target = nodes.find(node => node.id === selected)
+              if (target === undefined) return
+              setBusy(true); setError(null)
+              void onRerun(target.id, target.revision)
+                .then(() => { setSelected(null); setPreview(null) })
+                .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : String(cause)) })
+                .finally(() => { setBusy(false) })
+            }}>授权重跑</Button>
+        </>}
+      {error === null ? null : <p role="alert" style={mutedStyle}>{error}</p>}
+    </div>}
+  </Section>
+}
+
 function ReviewGate({
   gate,
   onRecheck,
@@ -553,7 +636,7 @@ export function WorkbenchEvidenceView({
   tab,
   onResume,
   resumingNodeId, onLoadArtifactLog, onAddComment, onVoidComment, onLoadComments,
-  reviewGate, onRecheckReviewGate }: WorkbenchEvidenceViewProps) {
+  reviewGate, onRecheckReviewGate, onPreviewRerun, onRerun }: WorkbenchEvidenceViewProps) {
   const need = snapshot.needs.byId[needId]
   if (need === undefined) {
     return <div style={rootStyle}><Section title="需求内容"><p style={mutedStyle}>所选需求已不在当前会话快照中，请重新选择需求。</p></Section></div>
@@ -569,6 +652,8 @@ export function WorkbenchEvidenceView({
   return <div style={rootStyle}>
     {tab === 'progress'
       ? <><ProgressView need={need} nodes={nodes} runs={runs} onResume={onResume} resumingNodeId={resumingNodeId} />
+        {onPreviewRerun === undefined || onRerun === undefined ? null
+          : <RerunAuthorization nodes={nodes} onPreview={onPreviewRerun} onRerun={onRerun} />}
         <Discussion entries={snapshot.discussion?.recent[needId] ?? []}
           onAddComment={onAddComment} onVoidComment={onVoidComment} onLoadComments={onLoadComments} /></>
       : tab === 'runs'

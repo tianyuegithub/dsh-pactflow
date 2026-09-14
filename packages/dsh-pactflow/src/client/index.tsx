@@ -237,6 +237,16 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     order: 30,
     locale: NS,
     inject: (): OverlayInjected => ({
+      rerunPreview: async (sessionId, request, signal) => {
+        const result = await pactflow.rerunPreview(sessionId, request, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
+      rerunNode: async (sessionId, request, signal) => {
+        const result = await pactflow.rerunNode(sessionId, request, signal)
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+      },
       recheckReviewGate: async (sessionId, request, signal) => {
         const result = await pactflow.recheckReviewGate(sessionId, request, signal)
         if (!result.ok) throw new Error(result.error.message)

@@ -144,6 +144,7 @@ import type {
   PactFlowCommentPage,
   PactFlowListCommentsRequest,
   PactFlowRecordedComment,
+  PactFlowStaleCodeInputView,
 } from './types.ts'
 import type {
   BindPactFlowGitRequest,
@@ -1683,7 +1684,17 @@ export class PactFlowService extends TypertRemoteService {
         : `资源池：${route.workerPoolId ?? '宿主已配置的默认集群'}；模型：${route.modelConnectionId ?? template?.model ?? '由所选模板指定'}；执行规格：${route.agentProfileId ?? route.templateId}`
     }
     const autopilot = this.activeAutopilot(session, needId)
-    if (autopilot !== undefined) {
+    if (autopilot !== undefined && this.planRerunsSucceededNode(session, request)) {
+      // node-rerun-authorization: re-running work that already succeeded is not
+      // "advance toward delivery", which is what the grant authorizes. Left in,
+      // the model could recommend a plan containing a rerun, autopilot would
+      // select it, and the node would be re-run with no person anywhere in the
+      // loop — which is exactly the constraint reruns exist to keep. It would
+      // also open a budget hole: rerun -> downstream stale -> rerun downstream.
+      this.updateAutopilot(session, autopilot, {
+        reason: '推荐方案包含已成功节点的重跑，需人显式选择；挂机不代为授权',
+      })
+    } else if (autopilot !== undefined) {
       await this.assertAutopilotScope(session, autopilot)
       const plan = request.plans.find(item => item.id === request.recommendedId)!
       const permitted = await this.autopilotOptions(String(session.id))
@@ -2180,7 +2191,15 @@ export class PactFlowService extends TypertRemoteService {
     // authority; oversized content must be externalized before settlement.
     assertWithinChannelLimit('event-payload', Buffer.byteLength(request.outcome ?? '', 'utf8'), this.runBudget.maxOutputBytes)
     this.events.append(session, 'pactflow/run-settled', { v: 1, run, node })
-    if (request.state === 'succeeded') this.readyDependents(session, node.needId)
+    if (request.state === 'succeeded') {
+      this.readyDependents(session, node.needId)
+      // node-rerun-authorization: a fresh commit here may invalidate what every
+      // successor consumed. Mark them; never dispatch them — whether a moved
+      // upstream matters is a judgement only a person can make.
+      if (gitResult !== undefined) {
+        this.markStaleSuccessors(session, node.id, gitResult.commit, gitResult.remoteRef)
+      }
+    }
     return { node, run }
   }
 
@@ -4095,6 +4114,189 @@ export class PactFlowService extends TypertRemoteService {
       return closed
     }
     return { state: 'merged', closing: closed }
+  }
+
+  /** Whether a proposed plan would re-run a node that already succeeded. */
+  private planRerunsSucceededNode(session: Session, request: { readonly plans: readonly { readonly nodes: readonly { readonly id: string }[] }[] }): boolean {
+    const dag = this.dagState(session)
+    return request.plans.some(plan => plan.nodes.some(node => dag[node.id]?.state === 'succeeded'))
+  }
+
+  /**
+   * Preview what re-running an already-succeeded node would be deciding on.
+   *
+   * This is the only production caller of the staleness detector. Before, the
+   * detector shipped behind a Remote nothing consumed, and the situation it
+   * reports — a successor still marked succeeded against an upstream that has
+   * moved — had no action available anyway, so it could never change an outcome.
+   */
+  @Remote('rerunPreview')
+  rerunPreview(sessionId: string, request: { readonly nodeId: string }): {
+    readonly nodeId: string
+    readonly staleInputs: readonly PactFlowStaleCodeInputView[]
+    readonly unresolved: readonly string[]
+    readonly refusal?: string
+  } {
+    const session = this.livePactFlowSession(sessionId)
+    const node = this.node(session, request.nodeId)
+    const refusal = this.rerunRefusal(session, node)
+    const { stale, unresolved } = this.rerunStaleInputs(session, node)
+    return {
+      nodeId: node.id,
+      staleInputs: stale,
+      unresolved,
+      ...(refusal === undefined ? {} : { refusal }),
+    }
+  }
+
+  /**
+   * Re-run a node that already succeeded, on the owner's explicit authorization.
+   *
+   * Separate from `retryNode` on purpose. Retry means failure recovery: something
+   * went wrong, do the same thing again, and its budget, wording and pause logic
+   * all assume that. A rerun means the inputs moved and the output should catch
+   * up — it needs authorization evidence, a re-resolved baseline and downstream
+   * marking, none of which belong in retry. One entry point carrying both would
+   * need a caller-supplied flag to tell them apart, which is two entry points
+   * wearing one name.
+   */
+  @Remote('rerunNode')
+  rerunNode(
+    sessionId: string,
+    request: { readonly nodeId: string; readonly expectedRevision: number },
+  ): PactFlowNode {
+    const session = this.livePactFlowSession(sessionId)
+    this.reconcileLocalSession(session)
+    const current = this.node(session, request.nodeId)
+    this.requireRevision('node', current.id, current.revision, request.expectedRevision)
+    if (current.state !== 'succeeded') {
+      throw new Error(`PactFlow node "${current.id}" is not succeeded; use retryNode for a failed or cancelled node`)
+    }
+    const refusal = this.rerunRefusal(session, current)
+    if (refusal !== undefined) throw new Error(refusal)
+
+    // Budget: a rerun is an attempt like any other, counted against the same
+    // ceiling rather than a second one, and exhaustion lands in the existing
+    // durable pause instead of a fresh error shape.
+    const nextAttempt = Object.values(this.runState(session))
+      .filter(run => run.nodeId === current.id)
+      .reduce((maximum, candidate) => Math.max(maximum, candidate.attempt), 0) + 1
+    const verdict = evaluateAttemptBudget(this.runBudget.maxAttempts, nextAttempt)
+    if (verdict.exhausted) {
+      const paused: PactFlowNode = { ...current, state: 'paused', revision: current.revision + 1, updatedAt: Date.now() }
+      this.events.append(session, 'pactflow/node-updated', {
+        v: 1, node: paused,
+        rerunAuthorization: {
+          authorizedAt: Date.now(), fromRevision: current.revision, priorState: current.state, staleInputs: [],
+        },
+      })
+      return paused
+    }
+
+    const { stale } = this.rerunStaleInputs(session, current)
+    const { staleCodeInputs: _cleared, ...withoutMarker } = current
+    const node: PactFlowNode = {
+      ...withoutMarker,
+      state: this.dependenciesSucceeded(this.dagState(session), current.dependencies) ? 'ready' : 'pending',
+      revision: current.revision + 1,
+      updatedAt: Date.now(),
+    }
+    this.events.append(session, 'pactflow/node-updated', {
+      v: 1, node,
+      rerunAuthorization: {
+        authorizedAt: Date.now(), fromRevision: current.revision, priorState: current.state, staleInputs: stale,
+      },
+    })
+    return node
+  }
+
+  /**
+   * The five conditions that refuse a rerun, each naming what it found.
+   *
+   * Returns the reason rather than throwing so the preview can show it without
+   * the caller having to provoke an error.
+   */
+  private rerunRefusal(session: Session, node: PactFlowNode): string | undefined {
+    const active = Object.values(this.runState(session)).find(run => run.nodeId === node.id && !this.isTerminalRun(run))
+    if (active !== undefined) return `PactFlow node "${node.id}" still owns an active Run "${active.id}"`
+    if (node.state === 'archived') return `PactFlow node "${node.id}" is archived and cannot be re-run`
+    if (node.state === 'paused') return `PactFlow node "${node.id}" is paused; resume it explicitly before re-running`
+    const need = this.need(session, node.needId)
+    if (need.phase === 'closing' || need.phase === 'deployed') {
+      return `PactFlow need "${need.id}" is in ${need.phase}; re-running would change an object already under closing`
+    }
+    const release = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.releases[node.needId]
+    if (release !== undefined) {
+      // Re-running something already on the protected default branch would mean
+      // rollback, which needs a revert, its own approval chain and handling of
+      // the release record — a different capability wearing this one's name.
+      return `PactFlow node "${node.id}" is part of a delivered release; re-running cannot express a rollback`
+    }
+    return undefined
+  }
+
+  /**
+   * Re-resolve every dependency's current commit and compare it with what this
+   * node actually consumed. A dependency whose current commit cannot be resolved
+   * is reported as unresolved — never silently as "not stale".
+   */
+  private rerunStaleInputs(session: Session, node: PactFlowNode): {
+    readonly stale: readonly PactFlowStaleCodeInputView[]
+    readonly unresolved: readonly string[]
+  } {
+    const runs = Object.values(this.runState(session))
+    const lastRun = runs.filter(candidate => candidate.nodeId === node.id && candidate.git !== undefined)
+      .sort((left, right) => right.attempt - left.attempt)[0]
+    const recorded = (lastRun?.git?.codeInputs ?? [])
+      .filter((input): input is { readonly dependency: string; readonly branch: string; readonly commit: string } =>
+        input.dependency !== undefined)
+      .map(input => ({ dependency: input.dependency, branch: input.branch, commit: input.commit }))
+    if (recorded.length === 0) return { stale: [], unresolved: [] }
+
+    const latest = new Map<string, string>()
+    const unresolved: string[] = []
+    for (const dependency of new Set(recorded.map(input => input.dependency))) {
+      const latestRun = runs.filter(candidate => candidate.nodeId === dependency
+        && candidate.state === 'succeeded' && candidate.gitResult !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]
+      if (latestRun?.gitResult === undefined) unresolved.push(dependency)
+      else latest.set(dependency, latestRun.gitResult.commit)
+    }
+    return { stale: staleCodeInputs(recorded, latest), unresolved: unresolved.sort() }
+  }
+
+  /**
+   * Mark every successor that consumed this node as having a stale input.
+   *
+   * Marking only: the successor keeps its state and nothing is dispatched.
+   * Successors still running consumed the old input too, so they are marked when
+   * their own result lands rather than being left silently current.
+   */
+  private markStaleSuccessors(session: Session, nodeId: PactFlowNode['id'], commit: string, branch: string): void {
+    const dag = this.dagState(session)
+    for (const successor of Object.values(dag)) {
+      if (!(successor.codeInputs ?? []).includes(nodeId)) continue
+      if (successor.state !== 'succeeded' && successor.state !== 'running' && successor.state !== 'claimed') continue
+      const runs = Object.values(this.runState(session))
+      const lastRun = runs.filter(run => run.nodeId === successor.id && run.git !== undefined)
+        .sort((left, right) => right.attempt - left.attempt)[0]
+      const consumed = (lastRun?.git?.codeInputs ?? []).find(input => input.dependency === nodeId)
+      if (consumed === undefined || consumed.commit === commit) continue
+      const marker: PactFlowStaleCodeInputView = {
+        dependency: String(nodeId), branch, recorded: consumed.commit, latest: commit,
+      }
+      const existing = successor.staleCodeInputs ?? []
+      if (existing.some(entry => entry.dependency === marker.dependency && entry.latest === marker.latest)) continue
+      this.events.append(session, 'pactflow/node-updated', {
+        v: 1,
+        node: {
+          ...successor,
+          staleCodeInputs: [...existing.filter(entry => entry.dependency !== marker.dependency), marker],
+          revision: successor.revision + 1,
+          updatedAt: Date.now(),
+        },
+      })
+    }
   }
 
   /**

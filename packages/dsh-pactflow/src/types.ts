@@ -647,6 +647,16 @@ export interface PactFlowNode {
   readonly dependencies: readonly PactFlowNodeId[]
   /** Dependencies whose successful commits must be part of this node's execution baseline. */
   readonly codeInputs?: readonly PactFlowNodeId[]
+  /**
+   * Dependencies whose commits moved after this node succeeded with them.
+   *
+   * A marker only: the node stays `succeeded` and nothing is dispatched. Whether
+   * a moved upstream actually matters — a comment edit and an interface change
+   * look identical here — is a judgement only a person can make, so cascading
+   * would turn one decision into N unattended runs each spending real model
+   * quota.
+   */
+  readonly staleCodeInputs?: readonly PactFlowStaleCodeInputView[]
   readonly updatedAt: number
 }
 
@@ -1066,6 +1076,31 @@ export interface ClosePactFlowNeedResult {
   readonly cleanupFailures: readonly string[]
 }
 
+/**
+ * Owner authorization for re-running a node that already succeeded.
+ *
+ * It is persisted inside the event, not held as a flag on the call: the fold has
+ * to reach the same verdict when the log is replayed during cold recovery, and a
+ * projection that depends on in-memory state at write time is no longer a pure
+ * fold.
+ */
+export interface PactFlowRerunAuthorization {
+  readonly authorizedAt: number
+  /** The node revision the owner authorized against. */
+  readonly fromRevision: number
+  readonly priorState: PactFlowNodeState
+  /** What the owner was shown when deciding; empty when nothing was stale. */
+  readonly staleInputs: readonly PactFlowStaleCodeInputView[]
+}
+
+/** One dependency whose commit moved since this node last consumed it. */
+export interface PactFlowStaleCodeInputView {
+  readonly dependency: string
+  readonly branch: string
+  readonly recorded: string
+  readonly latest: string
+}
+
 export type PactFlowGiteaCheckState = 'pending' | 'running' | 'success' | 'failure' | 'unknown'
 
 /** One required status check as the review gate currently sees it. */
@@ -1291,7 +1326,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     'pactflow/need-created': { readonly v: 1; readonly need: PactFlowNeed }
     'pactflow/need-updated': { readonly v: 1; readonly need: PactFlowNeed }
     'pactflow/node-created': { readonly v: 1; readonly node: PactFlowNode }
-    'pactflow/node-updated': { readonly v: 1; readonly node: PactFlowNode }
+    'pactflow/node-updated': { readonly v: 1; readonly node: PactFlowNode; readonly rerunAuthorization?: PactFlowRerunAuthorization | undefined }
     'pactflow/phase-transitioned': { readonly v: 1; readonly need: PactFlowNeed; readonly from: PactFlowPhase }
     'pactflow/project-initialized': { readonly v: 1; readonly project: PactFlowProject }
     'pactflow/project-configured': { readonly v: 1; readonly project: PactFlowProject }
