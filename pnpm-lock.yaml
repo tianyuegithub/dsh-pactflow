@@ -110,6 +110,12 @@ importers:
       '@deepseek-ai/dsh-settings':
         specifier: link:../deepseek-harness-pactflow-p0/packages/settings/settings
         version: link:../deepseek-harness-pactflow-p0/packages/settings/settings
+      '@deepseek-ai/dsh-skill':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/skill/skill
+        version: link:../deepseek-harness-pactflow-p0/packages/skill/skill
+      '@deepseek-ai/dsh-skill-filesystem':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/skill/skill-filesystem
+        version: link:../deepseek-harness-pactflow-p0/packages/skill/skill-filesystem
       '@deepseek-ai/dsh-subagent':
         specifier: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
         version: link:../deepseek-harness-pactflow-p0/packages/subagent/subagent
@@ -128,6 +134,9 @@ importers:
       '@deepseek-ai/dsh-tool-pwsh':
         specifier: link:../deepseek-harness-pactflow-p0/packages/shell/tool-pwsh
         version: link:../deepseek-harness-pactflow-p0/packages/shell/tool-pwsh
+      '@deepseek-ai/dsh-tool-skill':
+        specifier: link:../deepseek-harness-pactflow-p0/packages/skill/tool-skill
+        version: link:../deepseek-harness-pactflow-p0/packages/skill/tool-skill
       '@deepseek-ai/dsh-tools':
         specifier: link:../deepseek-harness-pactflow-p0/packages/core/tools
         version: link:../deepseek-harness-pactflow-p0/packages/core/tools

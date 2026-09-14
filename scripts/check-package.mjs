@@ -92,6 +92,15 @@ const required = [
   'presets/pactflow/preset.yml',
   'presets/pactflow/plugin/index.js',
   'presets/pactflow/plugin/package.json',
+  // agent-skill-composition: the skills are package-owned and mounted from the
+  // preset's own directory. A tarball without them ships a persona that points
+  // at instructions nothing can load.
+  'presets/pactflow/skills/pactflow-execution-planning/SKILL.md',
+  'presets/pactflow/skills/pactflow-local-recovery/SKILL.md',
+  'presets/pactflow/skills/pactflow-autopilot-scope/SKILL.md',
+  'presets/pactflow/skills/pactflow-closing-gates/SKILL.md',
+  'presets/pactflow/skills/pactflow-infrastructure-resources/SKILL.md',
+  'presets/pactflow/skills/pactflow-troubleshooting/SKILL.md',
   'LICENSE',
   'bin/generate-service.mjs',
 ]
