@@ -14,3 +14,10 @@ packages/dsh-pactflow/presets/pactflow/plugin/index.js
 .mimosa/
 .zcode/
 .playwright-mcp/
+
+# macOS 归档解压残留（全部为 ._ 资源分叉元数据，无源码价值）
+__MACOSX/
+._*
+
+# CodeArts Doer 工具状态（与 .arts/.mimosa/.zcode 同类）
+.codeartsdoer/
