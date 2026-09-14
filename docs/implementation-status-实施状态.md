@@ -62,6 +62,69 @@ Requirement 名在现 spec 中不存在却写成了 MODIFIED；已按校验器�
 边界如实记录：这是**开发通道**证据（脚本自己打印 `not release evidence`），不等于官方发行版
 上的安装验收——后者仍受上游 external event producer 能力缺口阻断。
 
+### 又一处误判纠正：真实对象存储验收本机可跑，6 例首次真正执行
+
+`artifact-store.real.spec.ts`（2）与 `artifact-handoff.real.spec.ts`（4）长期计入
+「7 个按环境门控跳过」。我先前把它们归为「需真实 RustFS，本机无」——**再次是前提有误**。
+Docker 已安装，且实测 Docker Hub 与 quay.io 均可达（不可达的只有私有 Harbor
+`192.168.31.200:8080`）。本机起 MinIO 即得到一个真实的 S3 兼容对象存储：
+
+```
+docker run -d --name pactflow-minio -p 19000:9000 \
+  -e MINIO_ROOT_USER=… -e MINIO_ROOT_PASSWORD=… quay.io/minio/minio:latest server /data
+PACTFLOW_REAL_ARTIFACT_ENDPOINT=http://127.0.0.1:19000 \
+PACTFLOW_REAL_ARTIFACT_BUCKET=pactflow-acceptance \
+PACTFLOW_REAL_ARTIFACT_ACCESS_KEY=… PACTFLOW_REAL_ARTIFACT_SECRET_KEY=… \
+pnpm run test:real-artifact
+```
+
+走仓库自己的门禁入口（`scripts/run-real-artifact.mjs`，它带 `--passWithNoTests=false`
+且对「执行零例」显式报错）：**`6 case(s) executed and passed, 0 skipped`**。观测记录：
+`backend versionId present = false`、`ListObjectsV2 prefix listing works, entries=2`。
+
+证据不是"测试说绿"：在容器内直接查 `/data/pactflow-acceptance`，真实对象确实落盘，
+层级为 `handoff-<uuid>/<uuid>/{0-execution-log-runner,1-report-host,2-execution-log-worker,
+3-report-host}-<hash>/`——手写 SigV4 的 PUT/GET/HEAD/LIST 全程走真实 HTTP 路径。
+
+**但 `artifact-ref-handoff` 的 5.1 与 7.1 仍不勾**：两条都明写「真实 K3s」，而本机
+`kubectl`/`k3s` 均未安装。现在真实的是对象存储那一半（SigV4 往返、前缀列举、hash 校验、
+ref 解析与绑定约束），Worker 侧「作业结束落盘并上传、结果文档回传尾部+ref」与
+「另一 worker/宿主 resolve+校验、Secret 回收、孤儿对账」仍需集群。半条不算一条。
+
+### 第三处误判纠正：附件通道阈值已实测（need-attachments 0.4）
+
+同一形态第三次出现。0.4 记的是「Remote 参数的实际字节天花板需对真实宿主实测，本机无
+已安装宿主」——而 `verify:profile:dev` 用兄弟 fork **源码**就能起真实 DSH web profile
+并发真实 Remote 调用。新增 `scripts/measure-remote-payload-ceiling.mjs` 复用同一条链路。
+
+方法上两点刻意：载荷是不可压缩随机字节（否则任何一层压缩都会美化结果）；探针骑在
+`pactflow/health` 上，该 Remote 忽略参数，**所以任何拒绝都是通道的而非参数校验的**。
+
+实测：1 MiB / 17ms、16 MiB / 193ms、32 MiB / 432ms、64 MiB / 795ms、128 MiB / 1617ms、
+**256 MiB / 3110ms，全部通过，零拒绝**。再往上（512 MiB）撞的是 Node 自己的最大字符串
+长度 `0x1fffffe8` 字符——V8 对 JSON 序列化的限制，不是通道的字节上限；再探即是在测
+探针自己，故阶梯到此为止。
+
+**结论：传输层不构成瓶颈，阈值是策略选择而非传输上限的转述。** 定 32 MiB，三条理由：
+延迟（432ms 仍属交互可接受，再高一级已像卡住）；内存（整个载荷在两侧同时驻留，实际
+占用是数倍）；**失败形态**——32 MiB 比任何实测到的或结构性的极限低一个数量级，故越限
+一定是我们自己带明确文案的策略拒绝，而不是 V8 的 `Invalid string length`。最后一条最
+重要：任务 2.1 承诺「越限在发送前本地拒绝，返回 oversize 码与指引」，只有阈值远离硬
+极限时该承诺才成立。
+
+副作用：0.4 解除后 **need-attachments 第 2 节不再被任务 0 阻塞**。
+
+### 三次误判的共同形态（值得记下来）
+
+本轮把「没有官方发行版宿主 / 没有集群」三次错当成「这件事做不了」：
+`verify:profile:dev`（用源码即可）、真实对象存储验收（任意 S3 兼容端点即可，Docker 在）、
+附件通道阈值（同 `verify:profile:dev` 链路）。三条都不需要被阻断的那个资源。
+
+教训不是「要更乐观」，而是**「不可执行」本身是一个需要证据的断言**，和「已通过」同样
+需要。后两次是在复查前一次误判时才发现的。凡记「本机不可执行」的条目，应同时记下**是
+什么具体缺失使它不可执行**（哪个二进制、哪个端点、哪个凭据），否则那句话会变成不会被
+复查的传闻——这正是它前两次存活下来的方式。
+
 ### 本机确证不可执行的（未勾选，按规则不得计为通过）
 
 逐项实测而非假设：`~/.dsh` 不存在；`kubectl` / `k3s` / `podman` / `minikube` / `kind`

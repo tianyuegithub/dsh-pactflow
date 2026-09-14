@@ -26,6 +26,21 @@ const missing = REQUIRED.filter(name => process.env[name] === undefined || proce
 if (missing.length > 0) {
   process.stderr.write(`PactFlow real artifact acceptance is not armed; missing: ${missing.join(', ')}\n`)
   process.stderr.write('A skipped suite is not a pass. Export every variable above, then re-run.\n')
+  // Arming this needs a real S3-compatible endpoint, not the cluster's. Any
+  // local one does — the suite provisions its own bucket and cleans up after
+  // itself. Spelled out because "no cluster" was twice mistaken for "cannot
+  // run this", leaving six real-path cases permanently reported as skipped:
+  //
+  //   docker run -d --name pactflow-minio -p 19000:9000 \
+  //     -e MINIO_ROOT_USER=<user> -e MINIO_ROOT_PASSWORD=<secret> \
+  //     quay.io/minio/minio:latest server /data
+  //   PACTFLOW_REAL_ARTIFACT_ENDPOINT=http://127.0.0.1:19000 \
+  //   PACTFLOW_REAL_ARTIFACT_BUCKET=pactflow-acceptance \
+  //   PACTFLOW_REAL_ARTIFACT_ACCESS_KEY=<user> \
+  //   PACTFLOW_REAL_ARTIFACT_SECRET_KEY=<secret> pnpm run test:real-artifact
+  //
+  // Credentials come from the environment only — never argv, never committed.
+  process.stderr.write('A local S3-compatible endpoint is enough to arm it; see the comment above this message in scripts/run-real-artifact.mjs.\n')
   process.exitCode = 1
 } else {
   const root = resolve(import.meta.dirname, '..')
