@@ -47,6 +47,46 @@ async function fixture() {
   return { workspace, spec, commit }
 }
 
+describe('PactFlow "Worker produced no commit" guard', () => {
+  it('still fires when code inputs were folded into the task baseline', async () => {
+    // The guard compared HEAD against `spec.baseCommit`. But every declared code
+    // input is merged with `--no-ff` into the task branch BEFORE the Worker starts,
+    // so HEAD already differs from the baseline and the comparison could never be
+    // true for a dependent task. A Worker that did nothing then passed every check,
+    // its branch (carrying only the predecessor's code) was pushed, and the Run was
+    // recorded as succeeded with a commit representing no work at all.
+    const { workspace, spec, commit } = await fixture()
+    const base = spec()
+
+    // A predecessor's delivery, on its own branch.
+    execFileSync('git', ['-C', workspace, 'switch', '-c', 'pactflow/need/dep/x', base.baseCommit], { stdio: 'ignore' })
+    await commit('dep.txt', 'predecessor work\n', 'predecessor delivery')
+    const inputCommit = git(['-C', workspace, 'rev-parse', 'HEAD^{commit}'])
+
+    // The dependent task's branch, with that input folded in and nothing else.
+    execFileSync('git', ['-C', workspace, 'switch', base.branch], { stdio: 'ignore' })
+    execFileSync('git', ['-C', workspace, 'merge', '--no-ff', '--no-edit', inputCommit], { stdio: 'ignore' })
+
+    const withInput = { ...base, codeInputs: [{ dependency: 'dep', branch: 'pactflow/need/dep/x', commit: inputCommit }] }
+    await expect(new PactFlowGitWorkspace().validateResult(withInput)).rejects.toThrow(/produced no commit/)
+  })
+
+  it('accepts a dependent task that did commit on top of its inputs', async () => {
+    const { workspace, spec, commit } = await fixture()
+    const base = spec()
+    execFileSync('git', ['-C', workspace, 'switch', '-c', 'pactflow/need/dep/y', base.baseCommit], { stdio: 'ignore' })
+    await commit('dep.txt', 'predecessor work\n', 'predecessor delivery')
+    const inputCommit = git(['-C', workspace, 'rev-parse', 'HEAD^{commit}'])
+    execFileSync('git', ['-C', workspace, 'switch', base.branch], { stdio: 'ignore' })
+    execFileSync('git', ['-C', workspace, 'merge', '--no-ff', '--no-edit', inputCommit], { stdio: 'ignore' })
+    await commit('own.txt', 'the dependent task did its own work\n', 'dependent delivery')
+
+    const withInput = { ...base, codeInputs: [{ dependency: 'dep', branch: 'pactflow/need/dep/y', commit: inputCommit }] }
+    const evidence = await new PactFlowGitWorkspace().validateResult(withInput)
+    expect(evidence.branch).toBe(base.branch)
+  })
+})
+
 describe('PactFlow validation-sensitive scan', () => {
   it('covers every task commit, not only the tip', async () => {
     const { spec, commit } = await fixture()

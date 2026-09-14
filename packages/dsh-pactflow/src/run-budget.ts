@@ -78,7 +78,12 @@ export function boundOutputToBudget(value: string, maxOutputBytes: number): Pact
   if (bytes.length <= maxOutputBytes) return { text: value, truncated: false, originalBytes: bytes.length }
   const marker = `\n[truncated: kept budget bytes of ${String(bytes.length)} total]`
   const markerBytes = new TextEncoder().encode(marker).length
-  const keep = Math.max(0, maxOutputBytes - markerBytes)
+  // Back the cut off to a UTF-8 character boundary. Slicing mid-character and
+  // decoding yields U+FFFD — three bytes where the fragment was one or two — so
+  // the "bounded" result came back OVER the budget it was meant to enforce, and
+  // the channel assertion downstream then refused the payload entirely.
+  let keep = Math.max(0, maxOutputBytes - markerBytes)
+  while (keep > 0 && (bytes[keep]! & 0b1100_0000) === 0b1000_0000) keep -= 1
   const text = `${new TextDecoder().decode(bytes.slice(0, keep))}${marker}`
   return { text, truncated: true, originalBytes: bytes.length }
 }

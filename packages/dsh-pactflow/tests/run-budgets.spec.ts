@@ -38,6 +38,33 @@ describe('PactFlow run budgets', () => {
     expect(big.text).toContain('truncated')
   })
 
+  it('stays within budget when the cut lands inside a multi-byte character', () => {
+    // Slicing bytes and decoding replaces a split character with U+FFFD, which is
+    // three bytes where the fragment was one or two — so the result came back
+    // OVER budget. Downstream, `assertWithinChannelLimit('event-payload', …)` then
+    // throws inside settleRunInSession, replacing the original failure and leaving
+    // the Run unable to reach a terminal state at all. Nearly every error message
+    // in this repository is Chinese, so this was the common case, not the edge.
+    for (let characters = 1_500; characters < 1_700; characters += 1) {
+      const bounded = boundOutputToBudget('中'.repeat(characters), 4_096)
+      expect(new TextEncoder().encode(bounded.text).length, `${String(characters)} characters`)
+        .toBeLessThanOrEqual(4_096)
+    }
+  })
+
+  it('never emits a replacement character in place of a character it cut', () => {
+    const bounded = boundOutputToBudget(`${'中'.repeat(40)}尾`, 64)
+    expect(bounded.truncated).toBe(true)
+    expect(bounded.text).not.toContain('\uFFFD')
+    expect(new TextEncoder().encode(bounded.text).length).toBeLessThanOrEqual(64)
+  })
+
+  it('keeps the marker even when the budget leaves room for nothing else', () => {
+    const bounded = boundOutputToBudget('中'.repeat(100), 8)
+    expect(bounded.truncated).toBe(true)
+    expect(bounded.text).toContain('truncated')
+  })
+
   it('exposes a bounded default budget', () => {
     expect(PACTFLOW_DEFAULT_RUN_BUDGET.maxAttempts).toBeGreaterThan(0)
     expect(PACTFLOW_DEFAULT_RUN_BUDGET.maxAttempts).toBeLessThanOrEqual(50)

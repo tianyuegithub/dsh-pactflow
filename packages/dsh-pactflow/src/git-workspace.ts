@@ -26,6 +26,22 @@ const COMMIT = /^[0-9a-f]{40,64}$/
 const K8S_NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/
 
 /**
+ * Host-side child-process output ceilings.
+ *
+ * `git rev-list` over a whole history emits 41 bytes a line, and a registered
+ * validation command is an entire test suite's stdout. The previous 1 MiB cap
+ * turned both into failures whose reported cause had nothing to do with the
+ * real one. `local-workspace.ts` already used 64 MiB for the same git output.
+ */
+const PACTFLOW_GIT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+const PACTFLOW_VALIDATION_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+/** Node reports an execFile stdout overflow with this code, not with ENOBUFS. */
+function isOutputOverflow(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+}
+
+/**
  * Prefix every PactFlow Git Secret carries.
  *
  * Whatever this name refers to is mounted into a Worker Pod whose prompt the
@@ -264,7 +280,18 @@ export class PactFlowGitWorkspace {
     const dirty = await inspect(spec.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])
     if (dirty.length > 0) throw new Error('PactFlow Worker left uncommitted changes in its worktree')
     const commit = await inspect(spec.worktreePath, ['rev-parse', '--verify', 'HEAD^{commit}'])
-    if (commit === spec.baseCommit) throw new Error('PactFlow Worker produced no commit')
+    // "Did the Worker actually do anything" cannot be answered by comparing HEAD to
+    // the baseline: every declared code input is merged with `--no-ff` into the task
+    // branch before the Worker starts, so for a dependent task HEAD always differs
+    // and the comparison could never fire. Count instead what is reachable from HEAD
+    // but from neither the baseline nor any input: that is exactly the folded merges
+    // plus whatever the Worker committed, so anything at or below the merge count is
+    // a Worker that delivered nothing.
+    const inputCommits = (spec.codeInputs ?? []).map(input => input.commit)
+    const introduced = Number.parseInt(await inspect(spec.worktreePath,
+      ['rev-list', '--count', commit, '--not', spec.baseCommit, ...inputCommits]), 10)
+    if (!Number.isSafeInteger(introduced)) throw new Error('PactFlow could not determine what the Worker committed')
+    if (introduced <= inputCommits.length) throw new Error('PactFlow Worker produced no commit')
     try {
       await inspect(spec.worktreePath, ['merge-base', '--is-ancestor', spec.baseCommit, commit])
     } catch {
@@ -986,13 +1013,20 @@ export class PactFlowGitWorkspace {
       execFile(validation.command, validation.args, {
         cwd,
         encoding: 'utf8',
-        maxBuffer: 1024 * 1024,
+        // A test suite's stdout passes a mebibyte routinely; at the old cap a
+        // passing `mvn test` / `pnpm test` was reported as a failing one and the
+        // delivery was blocked on it.
+        maxBuffer: PACTFLOW_VALIDATION_MAX_OUTPUT_BYTES,
         timeout: validation.timeoutMs,
         ...(signal === undefined ? {} : { signal }),
         shell: false,
         env: { ...environment, CI: '1', GIT_TERMINAL_PROMPT: '0' },
       }, (error) => {
         if (error !== null) {
+          if (isOutputOverflow(error)) {
+            reject(new Error(`PactFlow validation command output exceeded ${String(PACTFLOW_VALIDATION_MAX_OUTPUT_BYTES)} bytes (${validation.command}); the command did not fail`))
+            return
+          }
           const exitCode = typeof error.code === 'number' ? error.code : 'unavailable'
           reject(new Error(`PactFlow validation command failed (${validation.command}, exit ${String(exitCode)})`))
           return
@@ -1003,15 +1037,29 @@ export class PactFlowGitWorkspace {
   }
 
 
-  private git(cwd: string, args: readonly string[], environment?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string> {
+  private git(
+    cwd: string,
+    args: readonly string[],
+    environment?: NodeJS.ProcessEnv,
+    signal?: AbortSignal,
+    maxBuffer = PACTFLOW_GIT_MAX_OUTPUT_BYTES,
+  ): Promise<string> {
     return new Promise((resolveOutput, reject) => {
       execFile('git', ['-C', cwd, ...args], {
         encoding: 'utf8',
-        maxBuffer: 1024 * 1024,
+        maxBuffer,
         ...(signal === undefined ? {} : { signal }),
         env: environment ?? { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       }, (error, stdout) => {
         if (error !== null) {
+          // An overflow and a failed command call for entirely different responses,
+          // so they must not arrive under the same sentence. `rev-list` over a long
+          // history used to overflow and surface as "task set verification failed",
+          // which no retry could ever get past.
+          if (isOutputOverflow(error)) {
+            reject(new Error(`PactFlow Git command output exceeded ${String(maxBuffer)} bytes: ${args[0] ?? 'unknown'}`))
+            return
+          }
           reject(new Error(`PactFlow Git command failed: ${args[0] ?? 'unknown'}`))
           return
         }
