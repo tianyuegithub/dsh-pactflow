@@ -34,7 +34,7 @@ async function setup() {
 }
 
 /** Settle one successful Git run for the need, optionally touching validation-sensitive files. */
-function settleGitRun(harness: Awaited<ReturnType<typeof setup>>, sensitive: readonly string[]) {
+function settleGitRun(harness: Awaited<ReturnType<typeof setup>>, sensitive: readonly string[], scanFailed = false) {
   const { session, node } = harness
   const now = Date.now()
   const commit = 'a'.repeat(40)
@@ -54,7 +54,8 @@ function settleGitRun(harness: Awaited<ReturnType<typeof setup>>, sensitive: rea
     run: { id: 'run-1', nodeId: node.id, nodeRevision: claimedRevision, attempt: 1, provider: 'git',
       claimId: 'c1', state: 'succeeded', leaseDeadline: now + 60_000, leaseDurationMs: 60_000, updatedAt: now, git,
       gitResult: { branch: git.branch, commit, remoteRef: `refs/remotes/origin/${git.branch}`, syncedAt: now,
-        validations: [], ...(sensitive.length === 0 ? {} : { validationSensitiveChanges: sensitive }) } },
+        validations: [], ...(sensitive.length === 0 ? {} : { validationSensitiveChanges: sensitive }),
+        ...(scanFailed ? { validationSensitiveScanFailed: true } : {}) } },
     node: { id: node.id, needId: node.needId, title: node.title, state: 'succeeded', revision: claimedRevision + 1, dependencies: node.dependencies, updatedAt: now },
   })
 }
@@ -108,6 +109,28 @@ describe('PactFlow review-visible validation integrity', () => {
       expect(executed.isError).toBe(false)
       // Absence must be stated, not omitted — "not shown" and "none" must not blur.
       expect(reason).toMatch(/验证敏感文件改动：无/)
+    } finally { await harness.ctx.fiber.dispose() }
+  })
+
+  it('never reports a failed scan as "none"', async () => {
+    // The scan failing and the wiring being untouched are different facts. Folding
+    // the first into the second hands the reviewer our failure as their assurance.
+    const harness = await setup()
+    try {
+      settleGitRun(harness, [], true)
+      let reason = ''
+      harness.ctx.on('approval/request', request => {
+        reason = request.reason ?? ''
+        return Promise.resolve<ApprovalOutcome>('allowed-once')
+      })
+      const executed = await harness.ctx.tools.execute({
+        callId: ToolCallId('review-call'), name: 'pactflow_record_review',
+        arguments: { need_id: 'need', expected_revision: 1, kind: 'requirement', decision: 'approved', note: 'reviewed the delivered change' },
+        agent: harness.agent, signal: new AbortController().signal,
+      })
+      expect(executed.isError).toBe(false)
+      expect(reason).toContain('核查失败')
+      expect(reason).not.toMatch(/验证敏感文件改动：无/)
     } finally { await harness.ctx.fiber.dispose() }
   })
 })

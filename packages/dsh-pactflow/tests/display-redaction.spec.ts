@@ -34,6 +34,36 @@ describe('PactFlow credential-safe display', () => {
       .toBe('alice:***@git.example:owner/repo.git')
   })
 
+  it('redacts every line of a multi-line message', () => {
+    // git and execFile failures are almost always multi-line, and the message
+    // routinely carries the remote it failed on. An earlier version returned any
+    // string containing a newline unchanged, so exactly the most common shape of
+    // credential-bearing text reached the Session Event in the clear.
+    const message = [
+      'Command failed: git clone https://user:secret-token@git.example/owner/repo.git',
+      "fatal: Authentication failed for 'https://user:secret-token@git.example/owner/repo.git/'",
+      '',
+    ].join('\n')
+    const redacted = redactUrlCredentials(message)
+    expect(redacted).not.toContain('secret-token')
+    expect(redacted).toContain('git.example/owner/repo.git')
+    // Line structure survives: the reader still sees both lines.
+    expect(redacted.split('\n')).toHaveLength(3)
+  })
+
+  it('redacts an scp-style remote that occupies a whole line', () => {
+    const message = 'clone failed:\nalice:secret-token@git.example:owner/repo.git\n'
+    const redacted = redactUrlCredentials(message)
+    expect(redacted).not.toContain('secret-token')
+    expect(redacted).toContain('alice:***@git.example:owner/repo.git')
+  })
+
+  it('keeps a CRLF message intact while redacting it', () => {
+    const redacted = redactUrlCredentials('a\r\nhttps://user:tok@git.example/r.git\r\n')
+    expect(redacted).not.toContain('tok@')
+    expect(redacted).toBe('a\r\nhttps://***@git.example/r.git\r\n')
+  })
+
   it('leaves credential-free remotes unchanged', () => {
     for (const value of [
       'https://git.example/owner/repo.git',

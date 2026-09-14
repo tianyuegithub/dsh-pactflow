@@ -216,6 +216,7 @@ const gitResultSchema = pactFlowSchema<PactFlowGitResult>(z.object({
   // Declared so the integrity signal survives the event fold; an undeclared
   // field would be stripped on parse and never readable from the projection.
   validationSensitiveChanges: z.array(z.string().min(1)).optional(),
+  validationSensitiveScanFailed: z.boolean().optional(),
 }))
 
 const k3sRunSpecSchema = pactFlowSchema<PactFlowK3sRunSpec>(z.object({

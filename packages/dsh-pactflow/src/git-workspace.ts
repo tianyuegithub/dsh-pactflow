@@ -24,6 +24,24 @@ import type {
 const GIT_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/
 const COMMIT = /^[0-9a-f]{40,64}$/
 const K8S_NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/
+
+/**
+ * Prefix every PactFlow Git Secret carries.
+ *
+ * Whatever this name refers to is mounted into a Worker Pod whose prompt the
+ * orchestrating model wrote, so naming a Secret is naming something to read.
+ * The listing endpoint filters to this prefix, but a UI filter is a convention;
+ * this is the boundary, enforced at every entry point that accepts the name.
+ */
+export const PACTFLOW_GIT_SECRET_PREFIX = 'pactflow-git-'
+
+/** Reject a Git Secret name that is malformed or outside the PactFlow prefix. */
+export function assertPactFlowGitSecretName(name: string): void {
+  if (!K8S_NAME.test(name)) throw new Error('PactFlow K3s Git Secret name is invalid')
+  if (!name.startsWith(PACTFLOW_GIT_SECRET_PREFIX)) {
+    throw new Error(`PactFlow K3s Git Secret must be named "${PACTFLOW_GIT_SECRET_PREFIX}…"; "${name}" is outside the Git Secret namespace`)
+  }
+}
 const VALIDATION_ENV_KEYS = [
   'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'CI', 'GIT_TERMINAL_PROMPT',
 ] as const
@@ -91,9 +109,7 @@ export class PactFlowGitWorkspace {
     await this.git(root, ['rev-parse', '--verify', `refs/remotes/${remote}/${defaultBranch}^{commit}`])
     const auth = this.auth(remoteUrl, request)
     const k3sGitSecretName = request.k3sGitSecretName?.trim()
-    if (k3sGitSecretName !== undefined && !K8S_NAME.test(k3sGitSecretName)) {
-      throw new Error('PactFlow K3s Git Secret name is invalid')
-    }
+    if (k3sGitSecretName !== undefined) assertPactFlowGitSecretName(k3sGitSecretName)
     const gitea = this.gitea(request)
     const commands = this.validationCommands(authorizedCommands)
     return {
@@ -217,13 +233,27 @@ export class PactFlowGitWorkspace {
     const after = await this.validateCommit(spec)
     if (after.commit !== before.commit) throw new Error('PactFlow validation changed the Worker commit')
     // Surface (do not block on) task commits that rewrite the verification wiring.
+    //
+    // The range is the whole task, `baseCommit..commit`. It used to be
+    // `commit~1..commit`, which saw only the tip: a Worker that committed three
+    // times could put its CI rewrite in the first commit and stay invisible.
     let sensitive: readonly string[] = []
+    let scanFailed = false
     try {
       const inspect = spec.checkoutKind === 'isolated-clone' ? isolatedGit : this.git.bind(this)
-      const diff = await inspect(spec.worktreePath, ['diff', '--no-ext-diff', '--no-textconv', '--name-only', `${before.commit}~1..${before.commit}`])
+      const diff = await inspect(spec.worktreePath, ['diff', '--no-ext-diff', '--no-textconv', '--name-only', `${spec.baseCommit}..${before.commit}`])
       sensitive = validationSensitiveChanges(diff)
-    } catch { sensitive = [] }
-    return { ...after, validations, ...(sensitive.length === 0 ? {} : { validationSensitiveChanges: sensitive }) }
+    } catch {
+      // Reporting `[]` here would reach the approval prompt as the positive
+      // statement "验证敏感文件改动：无" — telling the reviewer the wiring was
+      // untouched when we in fact do not know. Say so instead.
+      scanFailed = true
+    }
+    return {
+      ...after, validations,
+      ...(sensitive.length === 0 ? {} : { validationSensitiveChanges: sensitive }),
+      ...(scanFailed ? { validationSensitiveScanFailed: true } : {}),
+    }
   }
 
   private async validateCommit(spec: PactFlowGitRunSpec): Promise<Omit<PactFlowGitCommitEvidence, 'validations'>> {

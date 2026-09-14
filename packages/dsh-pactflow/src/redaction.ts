@@ -11,7 +11,16 @@ const URL_USERINFO = /(https?:\/\/)([^/\s@]+)@/gi
 const SCP_REMOTE = /^([A-Za-z0-9._-]+):([^@\s/]+)@([^:\s]+):(\S+)$/
 
 export function redactUrlCredentials(value: string): string {
-  if (/[\r\n]/.test(value)) return value
+  // Multi-line input used to be returned unchanged, which meant the most common
+  // shape of credential-bearing text — a git or execFile failure message, whose
+  // stderr is nearly always several lines and routinely quotes the remote it
+  // failed on — reached the Session Event in the clear, while the very same
+  // message on one line was redacted. Redact each line and rejoin, keeping the
+  // original separators so the reader still sees the message as it was written.
+  if (/[\r\n]/.test(value)) {
+    return value.split(/(\r\n|\n|\r)/).map(part =>
+      part === '\r\n' || part === '\n' || part === '\r' ? part : redactUrlCredentials(part)).join('')
+  }
   // NOTE: use String.replace/match (not RegExp.exec) — an .exec( token in source
   // is misread by a static scanner as process execution.
   const withHttpRedacted = value.replace(URL_USERINFO, (_whole, scheme: string) => `${scheme}${PLACEHOLDER}@`)

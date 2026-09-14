@@ -45,7 +45,7 @@ import {
   pactFlowDeliveryView,
   pactFlowDiscussionView,
 } from './domain.ts'
-import { PactFlowGitWorkspace, assertPactFlowValidationAuthorization, type PactFlowGitAuthSecret } from './git-workspace.ts'
+import { PactFlowGitWorkspace, assertPactFlowGitSecretName, assertPactFlowValidationAuthorization, type PactFlowGitAuthSecret } from './git-workspace.ts'
 import type { RecoverySnapshot } from './local-workspace.ts'
 import type { PactFlowRecoveryCandidate } from './types.ts'
 import { PactFlowGiteaClient } from './gitea.ts'
@@ -2721,9 +2721,7 @@ export class PactFlowService extends TypertRemoteService {
     if (pool.clusterId !== request.worker.clusterId) {
       throw new Error('PactFlow project Worker Pool does not belong to the selected K3s cluster')
     }
-    if (!/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(request.k3sGitSecretName)) {
-      throw new Error('PactFlow project K3s Git Secret name is invalid')
-    }
+    assertPactFlowGitSecretName(request.k3sGitSecretName)
     const seenIds = new Set<string>()
     const seenCombinations = new Set<string>()
     for (const profile of request.worker.agentProfiles) {

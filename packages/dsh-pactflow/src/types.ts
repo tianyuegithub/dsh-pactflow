@@ -624,8 +624,13 @@ export interface PactFlowGitResult {
   readonly remoteRef: string
   readonly syncedAt: number
   readonly validations: readonly PactFlowValidationEvidence[]
-  /** Verification-wiring files this task commit changed (surfaced, not blocking). */
+  /** Verification-wiring files this task's commits changed (surfaced, not blocking). */
   readonly validationSensitiveChanges?: readonly string[]
+  /**
+   * The scan could not be computed. Distinct from an empty list: the reviewer is
+   * told "could not be determined", never the positive claim "nothing changed".
+   */
+  readonly validationSensitiveScanFailed?: boolean
 }
 
 export interface PactFlowNeed {

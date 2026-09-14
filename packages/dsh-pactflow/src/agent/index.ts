@@ -271,13 +271,19 @@ export function apply(ctx: Context): void {
       const snapshot = await ctx.pactflow.snapshot(sessionId)
       const needNodes = new Set(Object.values(snapshot.dag.byId)
         .filter(node => node.needId === args.need_id).map(node => node.id))
-      const sensitive = [...new Set(Object.values(snapshot.runs.byId)
-        .filter(run => needNodes.has(run.nodeId))
+      const deliveries = Object.values(snapshot.runs.byId).filter(run => needNodes.has(run.nodeId))
+      const sensitive = [...new Set(deliveries
         .flatMap(run => [...run.gitResult?.validationSensitiveChanges ?? []]))].sort()
+      // A delivery whose scan could not be computed must never be folded into
+      // "none": the reviewer would read our failure as their assurance.
+      const unknown = deliveries.some(run => run.gitResult?.validationSensitiveScanFailed === true)
       const SENSITIVE_CAP = 6
-      const sensitiveLine = sensitive.length === 0
-        ? '验证敏感文件改动：无'
-        : `验证敏感文件改动：${sensitive.slice(0, SENSITIVE_CAP).join('、')}${sensitive.length > SENSITIVE_CAP ? `（共 ${String(sensitive.length)} 项）` : ''}`
+      const listed = sensitive.length === 0
+        ? ''
+        : `${sensitive.slice(0, SENSITIVE_CAP).join('、')}${sensitive.length > SENSITIVE_CAP ? `（共 ${String(sensitive.length)} 项）` : ''}`
+      const sensitiveLine = unknown
+        ? `验证敏感文件改动：核查失败，无法确定${listed === '' ? '' : `（已确认：${listed}）`}，请人工核对任务分支`
+        : `验证敏感文件改动：${listed === '' ? '无' : listed}`
       const outcome = await approval.request({
         agent,
         toolName: 'pactflow_record_review',

@@ -21,6 +21,7 @@ import {
   type V1ObjectMeta,
 } from '@kubernetes/client-node'
 import { harnessAchievedLevel, harnessProbeMaxLevel, type PactFlowHarnessCapabilityLevel } from './harness-capabilities.ts'
+import { PACTFLOW_GIT_SECRET_PREFIX } from './git-workspace.ts'
 import type {
   PactFlowApiMode,
   PactFlowApiProbeResult,
@@ -324,7 +325,7 @@ export class PactFlowK3sWorker {
     return (response.items ?? [])
       .filter(secret => secret.type === 'Opaque')
       .map(secret => secret.metadata?.name)
-      .filter((name): name is string => typeof name === 'string' && name.startsWith('pactflow-git-'))
+      .filter((name): name is string => typeof name === 'string' && name.startsWith(PACTFLOW_GIT_SECRET_PREFIX))
       .sort((left, right) => left.localeCompare(right))
   }
 
@@ -436,8 +437,11 @@ export class PactFlowK3sWorker {
     artifactCredentials?: { readonly accessKeyId: string; readonly secretAccessKey: string },
   ): Promise<PactFlowK3sResult> {
     const secrets = runtimeSecrets ?? this.pendingRuntimeSecrets.get(spec.jobName)
-    if (spec.specDigest !== undefined && spec.expectedBranch !== undefined
-      && pactFlowK3sSpecDigest(spec, git, prompt) !== spec.specDigest) {
+    // `expectedBranch` has nothing to do with digest integrity. Requiring it here
+    // meant every spec planned without a Git binding carried its digest into the
+    // Job's labels and annotations unreconciled — and that digest is a first-class
+    // term of the terminal identity comparison.
+    if (spec.specDigest !== undefined && pactFlowK3sSpecDigest(spec, git, prompt) !== spec.specDigest) {
       throw new Error(`PactFlow K3s Run "${spec.jobName}" Spec digest does not match its immutable inputs`)
     }
     if (secrets === undefined || pactFlowSecretHash(secrets.runNonce) !== spec.runNonceHash
@@ -592,6 +596,22 @@ export class PactFlowK3sWorker {
         }
         await this.withRequestDeadline(options => this.core.replaceNamespacedSecret({
           name: spec.inputSecretName!, namespace: spec.namespace, body: createdInputSecret,
+        }, options))
+      }
+      const artifactSecretName = spec.artifactStore?.secretName
+      if (createdArtifactSecret !== undefined && artifactSecretName !== undefined) {
+        // This Secret carries long-lived object-store keys in the clear. Without
+        // an owner the Job's deletion cannot cascade to it, and one was left in
+        // the namespace after every task bound to object storage.
+        createdArtifactSecret.metadata = {
+          ...createdArtifactSecret.metadata,
+          ownerReferences: [{
+            apiVersion: 'batch/v1', kind: 'Job', name: spec.jobName, uid: jobUid,
+            controller: true, blockOwnerDeletion: true,
+          }],
+        }
+        await this.withRequestDeadline(options => this.core.replaceNamespacedSecret({
+          name: artifactSecretName, namespace: spec.namespace, body: createdArtifactSecret,
         }, options))
       }
     } catch {
@@ -1201,7 +1221,13 @@ export class PactFlowK3sWorker {
     if (configUid !== undefined) deletions.push(() => this.withRequestDeadline(options => this.core.deleteNamespacedConfigMap({
       name: spec.configMapName, namespace: spec.namespace, body: { preconditions: { uid: configUid } },
     }, options)))
-    for (const name of [spec.inputSecretName, ...(spec.ephemeralModelSecret === true ? [spec.modelSecretName] : [])]) {
+    // The artifact Secret belongs to this run exactly like the input Secret does;
+    // leaving it out meant object-store credentials outlived every run that used them.
+    for (const name of [
+      spec.inputSecretName,
+      ...(spec.ephemeralModelSecret === true ? [spec.modelSecretName] : []),
+      ...(spec.artifactStore === undefined ? [] : [spec.artifactStore.secretName]),
+    ]) {
       if (name === undefined) continue
       const uid = await this.ownedCleanupUid(spec,
         () => this.withRequestDeadline(options => this.core.readNamespacedSecret({ name, namespace: spec.namespace }, options)))

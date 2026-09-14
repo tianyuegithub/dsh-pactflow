@@ -58,7 +58,7 @@ describe('PactFlow post-queue admission', () => {
       const session = ctx.sessions.create(SessionId('queued-project'), { meta: { agentPreset: 'pactflow', cwd: '/isolated' } })
       const project = ctx.pactflow.initialize(session.id, { name: 'Queued' })
       const binding = { remote: 'origin', remoteUrl: '/isolated/remote', defaultBranch: 'main', revision: 1,
-        boundAt: 1, validationCommands: [], k3sGitSecretName: 'git-secret' }
+        boundAt: 1, validationCommands: [], k3sGitSecretName: 'pactflow-git-secret' }
       session.append('pactflow/project-configured', { v: 1, project: { ...project, revision: 2, git: binding } })
       const need = ctx.pactflow.createNeed(session.id, { id: 'need', title: 'Need', description: '' })
       const node = ctx.pactflow.createNode(session.id, { id: 'node', needId: need.id, title: 'Node', dependencies: [] })
