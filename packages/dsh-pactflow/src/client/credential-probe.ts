@@ -36,6 +36,13 @@ export function replaceInfrastructureCredentialRefs(
         ...model, apiKeyCredentialRef: replace(model.apiKeyCredentialRef)!,
       })),
     }),
+    ...(settings.artifactStores === undefined ? {} : {
+      artifactStores: settings.artifactStores.map(store => ({
+        ...store,
+        accessKeyCredentialRef: replace(store.accessKeyCredentialRef)!,
+        secretKeyCredentialRef: replace(store.secretKeyCredentialRef)!,
+      })),
+    }),
   }
 }
 
