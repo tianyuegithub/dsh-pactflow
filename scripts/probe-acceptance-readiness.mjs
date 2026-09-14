@@ -98,6 +98,24 @@ const PREREQUISITES = [
     fix: 'network access to the Harbor holding the pinned base image',
   },
   {
+    id: 'worker-image',
+    what: 'pinned worker image available locally (pull OR loaded from an export)',
+    check: async () => {
+      // Harbor being unreachable is not the same as the image being unavailable:
+      // `pnpm run dist` exports both pinned images as a docker.tar.gz, and a
+      // loaded image needs no registry at all. Checked separately so "Harbor is
+      // down" never gets generalised into "the image cannot be had".
+      const dockerfile = join(root, 'packages/dsh-pactflow/worker/dsh/Dockerfile')
+      const { readFile } = await import('node:fs/promises')
+      const text = await readFile(dockerfile, 'utf8')
+      const image = /ARG BASE_IMAGE=(\S+)/.exec(text)?.[1]
+      if (image === undefined) return false
+      // Already in the local daemon (pulled earlier, or `docker load`ed)?
+      return run('docker', ['image', 'inspect', image], 20_000)
+    },
+    fix: 'either restore Harbor reachability, or `docker load < pactflow-worker-images-<adapter>.docker.tar.gz` from a `pnpm run dist` export',
+  },
+  {
     id: 'model-key',
     what: 'DEEPSEEK_API_KEY',
     check: async () => envSet('DEEPSEEK_API_KEY'),
@@ -123,10 +141,10 @@ const LANES = [
   { lane: 'verify:profile:dev', needs: ['node22', 'dsh-source'], unblocks: 'agent-skill-composition 5.1（已跑通）' },
   { lane: 'test:real-worker', needs: ['node22', 'model-key'], unblocks: 'agent-skill-composition 3.1' },
   { lane: 'test:autopilot', needs: ['node22', 'model-key', 'gitea-token'], unblocks: 'agent-skill-composition 3.2' },
-  { lane: 'test:worker-interactions', needs: ['node22', 'model-key', 'docker', 'harbor'], unblocks: 'agent-skill-composition 3.3' },
-  { lane: 'build:worker-image', needs: ['docker', 'harbor'], unblocks: 'dsh-harness-telemetry 5.2' },
-  { lane: 'dsh-harness-telemetry spike 0.1/0.2', needs: ['docker', 'harbor', 'model-key'], unblocks: '0.3 → 2.1 / 2.3 → 6.2' },
-  { lane: 'test:real-k3s', needs: ['node22', 'kubectl', 'cluster', 'harbor'], unblocks: 'artifact-ref-handoff 5.1 / 7.1；dsh-harness-telemetry 7.1 / 7.2' },
+  { lane: 'test:worker-interactions', needs: ['node22', 'model-key', 'docker'], anyOf: ['harbor', 'worker-image'], unblocks: 'agent-skill-composition 3.3' },
+  { lane: 'build:worker-image', needs: ['docker'], anyOf: ['harbor', 'worker-image'], unblocks: 'dsh-harness-telemetry 5.2' },
+  { lane: 'dsh-harness-telemetry spike 0.1/0.2', needs: ['docker', 'model-key'], anyOf: ['harbor', 'worker-image'], unblocks: '0.3 → 2.1 / 2.3 → 6.2' },
+  { lane: 'test:real-k3s', needs: ['node22', 'kubectl', 'cluster'], anyOf: ['harbor', 'worker-image'], unblocks: 'artifact-ref-handoff 5.1 / 7.1；dsh-harness-telemetry 7.1 / 7.2' },
 ]
 
 const results = new Map()
@@ -140,8 +158,13 @@ for (const prerequisite of PREREQUISITES) {
 
 process.stdout.write('\n')
 let ready = 0
-for (const { lane, needs, unblocks } of LANES) {
+for (const { lane, needs, anyOf, unblocks } of LANES) {
   const missing = needs.filter(id => results.get(id) !== true)
+  // `anyOf` is satisfied by ANY one of its members — the image can arrive by pull
+  // or by load, and requiring both would manufacture a blocker.
+  if (anyOf !== undefined && !anyOf.some(id => results.get(id) === true)) {
+    missing.push(`${anyOf.join(' 或 ')}（任一即可）`)
+  }
   if (missing.length === 0) {
     ready += 1
     process.stdout.write(`READY  ${lane}\n         ${unblocks}\n`)
