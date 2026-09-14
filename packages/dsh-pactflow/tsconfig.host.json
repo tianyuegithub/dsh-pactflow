@@ -6,6 +6,7 @@
     "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
   },
   "files": [
+    "src/review-gate.ts",
     "src/discussion-view.ts",
     "src/index.ts",
     "src/artifact-store.ts",

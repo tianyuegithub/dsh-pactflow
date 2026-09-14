@@ -56,7 +56,10 @@ function samePersistedValue(left: unknown, right: unknown): boolean {
 
 function cleanupIdentity(record: PactFlowCleanupRecord): Record<string, unknown> {
   // `retainUntil`/`sizeBytes` are mutable retention annotations, not part of resource identity.
-  return Object.fromEntries(Object.entries(record).filter(([key]) => !['state', 'attempt', 'error', 'nextRetryAt', 'retainUntil', 'sizeBytes'].includes(key)))
+  // `reviewGate` is the same kind of thing: an observation of an external review
+  // that advances on every recheck. The resource this record owns — the closing
+  // branch and its commit — is what must stay immutable, and that is unaffected.
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !['state', 'attempt', 'error', 'nextRetryAt', 'retainUntil', 'sizeBytes', 'reviewGate'].includes(key)))
 }
 
 /** Exact vocabulary written by dsh-pactflow 0.1.0. Never derive this historical tuple. */
@@ -358,6 +361,32 @@ const cleanupSchema = pactFlowSchema<PactFlowCleanupRecord>(z.object({
   retainUntil: z.number().int().nonnegative().optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   closingInputDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  // gitea-review-gate: the wait state rides this record. Declared so the fold
+  // keeps it instead of stripping it (a field zod does not declare is dropped —
+  // the exact defect close-with-binding-auth had to fix for gitResultSchema).
+  reviewGate: z.object({
+    needId: z.string().min(1),
+    pullRequestNumber: z.number().int().positive(),
+    pullRequestUrl: z.string().min(1),
+    headCommit: z.string().min(1),
+    baseBranch: z.string().min(1),
+    needRevision: z.number().int().positive(),
+    closingInputDigest: z.string().min(1),
+    requiredApprovals: z.number().int().nonnegative(),
+    requiredChecks: z.array(z.string().min(1)),
+    openedAt: z.number().int().nonnegative(),
+    recheckCount: z.number().int().nonnegative(),
+    maxRechecks: z.number().int().positive(),
+    lastCheckedAt: z.number().int().nonnegative().optional(),
+    lastGap: z.object({
+      missingApprovals: z.number().int().nonnegative(),
+      checks: z.array(z.object({
+        context: z.string().min(1),
+        state: z.enum(['pending', 'running', 'success', 'failure', 'unknown']),
+      })),
+    }).optional(),
+    externallyMerged: z.boolean().optional(),
+  }).optional(),
   attempt: z.number().int().positive(), error: z.string().optional(), nextRetryAt: z.number().int().nonnegative().optional(),
 }).refine(value => value.runId !== undefined || value.needId !== undefined, 'cleanup record must reference a Run or Need'))
 

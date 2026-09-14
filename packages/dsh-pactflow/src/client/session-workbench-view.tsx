@@ -25,6 +25,16 @@ export interface WorkbenchEvidenceViewProps {
   /** need-comment-threads: durable discussion on this Need. */
   readonly onAddComment?: (body: string) => Promise<void>
   readonly onVoidComment?: (commentId: string) => Promise<void>
+  /** gitea-review-gate: the closing wait state for this Need, when there is one. */
+  readonly reviewGate?: {
+    readonly pullRequestNumber: number
+    readonly pullRequestUrl: string
+    readonly missingApprovals: number
+    readonly checks: readonly { readonly context: string; readonly state: string }[]
+    readonly autoRecheckExhausted: boolean
+    readonly externallyMerged?: boolean | undefined
+  } | undefined
+  readonly onRecheckReviewGate?: () => Promise<void>
   /** Paged history, including voided entries the live tail leaves out. */
   readonly onLoadComments?: (signal?: AbortSignal) => Promise<{
     readonly total: number
@@ -399,6 +409,67 @@ function Discussion({
   </Section>
 }
 
+const CHECK_STATE_LABEL: Readonly<Record<string, string>> = {
+  pending: '未开始',
+  running: '进行中',
+  success: '成功',
+  failure: '失败',
+  unknown: '状态不明',
+}
+
+function ReviewGate({
+  gate,
+  onRecheck,
+}: {
+  readonly gate: NonNullable<WorkbenchEvidenceViewProps['reviewGate']>
+  readonly onRecheck?: WorkbenchEvidenceViewProps['onRecheckReviewGate']
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Say what is being waited on and what the reader can do about it. "Not ready"
+  // tells someone nothing they can act on.
+  return <Section title="等待外部评审">
+    {gate.externallyMerged === true
+      ? <p style={mutedStyle}>
+        PR #{gate.pullRequestNumber} 已在平台外被合并。宿主没有核验过这次合并，因此尚未产生交付终态；
+        需要再次请求收口，由宿主核验合并提交、祖先链与任务集合后才记录交付。
+      </p>
+      : <p style={mutedStyle}>
+        收口已创建 PR 并在等待仓库要求的批准与检查。需求仍停在收口阶段，宿主保留收口责任——
+        不需要你到网页上手工合并。
+      </p>}
+    <ul style={listStyle}>
+      <li style={rowStyle}>
+        <div style={rowCopyStyle}>
+          <strong>PR #{gate.pullRequestNumber}</strong>
+          <a href={gate.pullRequestUrl} target="_blank" rel="noreferrer" style={linkStyle}>{gate.pullRequestUrl}</a>
+        </div>
+      </li>
+      {gate.missingApprovals > 0 ? <li style={rowStyle}>
+        <div style={rowCopyStyle}><span style={detailStyle}>批准</span><span>尚缺 {gate.missingApprovals} 个</span></div>
+      </li> : null}
+      {gate.checks.map(check => <li key={check.context} style={rowStyle}>
+        <div style={rowCopyStyle}>
+          <span style={detailStyle}>检查 {check.context}</span>
+          <span>{CHECK_STATE_LABEL[check.state] ?? check.state}</span>
+        </div>
+      </li>)}
+    </ul>
+    {gate.autoRecheckExhausted
+      ? <p style={mutedStyle}>自动复查次数已用完（授权和等待态都还在），可以手动复查。</p>
+      : null}
+    {onRecheck === undefined ? null : <Button size="sm" variant="outline" disabled={busy}
+      onClick={() => {
+        setBusy(true); setError(null)
+        void onRecheck().catch((cause: unknown) => {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        }).finally(() => { setBusy(false) })
+      }}>{busy ? '复查中…' : '复查'}</Button>}
+    {error === null ? null : <p role="alert" style={mutedStyle}>{error}</p>}
+  </Section>
+}
+
 function DeliveryView({
   reviews,
   documents,
@@ -481,7 +552,8 @@ export function WorkbenchEvidenceView({
   needId,
   tab,
   onResume,
-  resumingNodeId, onLoadArtifactLog, onAddComment, onVoidComment, onLoadComments }: WorkbenchEvidenceViewProps) {
+  resumingNodeId, onLoadArtifactLog, onAddComment, onVoidComment, onLoadComments,
+  reviewGate, onRecheckReviewGate }: WorkbenchEvidenceViewProps) {
   const need = snapshot.needs.byId[needId]
   if (need === undefined) {
     return <div style={rootStyle}><Section title="需求内容"><p style={mutedStyle}>所选需求已不在当前会话快照中，请重新选择需求。</p></Section></div>
@@ -501,6 +573,7 @@ export function WorkbenchEvidenceView({
           onAddComment={onAddComment} onVoidComment={onVoidComment} onLoadComments={onLoadComments} /></>
       : tab === 'runs'
         ? <RunsView nodes={nodes} runs={runs} onLoadArtifactLog={onLoadArtifactLog} />
-        : <DeliveryView reviews={reviews} documents={documents} runs={runs} releases={releases} />}
+        : <>{reviewGate === undefined ? null : <ReviewGate gate={reviewGate} onRecheck={onRecheckReviewGate} />}
+          <DeliveryView reviews={reviews} documents={documents} runs={runs} releases={releases} /></>}
   </div>
 }

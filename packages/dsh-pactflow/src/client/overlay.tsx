@@ -77,6 +77,7 @@ export interface OverlayInjected {
   /** A11: explicit human resume for a paused node. */
   resumeNode(sessionId: string, nodeId: string, expectedRevision: number, signal: AbortSignal): Promise<unknown>
   artifactLog(sessionId: string, runId: string, signal?: AbortSignal): Promise<{ readonly uri: string; readonly summary: string; readonly bytes: number; readonly content: string }>
+  recheckReviewGate(sessionId: string, request: { readonly needId: string; readonly expectedRevision: number }, signal?: AbortSignal): Promise<unknown>
   addComment(sessionId: string, request: { readonly needId: string; readonly body: string }, signal?: AbortSignal): Promise<unknown>
   voidComment(sessionId: string, request: { readonly commentId: string }, signal?: AbortSignal): Promise<unknown>
   listComments(sessionId: string, request: { readonly needId: string; readonly limit?: number }, signal?: AbortSignal): Promise<{
@@ -112,7 +113,7 @@ export function PactFlowHeaderAction({ sessionId, useSessions, t }: HeaderAction
 }
 
 /** Root-scoped native overlay; the current session id arrives through the header action. */
-export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
+export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover, resumeNode, artifactLog, recheckReviewGate, addComment, voidComment, listComments, answerWorkerInteraction, autopilotPreview, startAutopilot, controlAutopilot, useSessions, t }: OverlayProps) {
   const state = useSyncExternalStore(overlay.subscribe, overlay.getSnapshot)
   const sessionCwd = useSessions(sessions => state.sessionId === null ? undefined : sessions.byId[state.sessionId]?.cwd)
   const projections = useSessions(sessions => state.open && state.sessionId !== null
@@ -393,6 +394,24 @@ export function PactFlowOverlay({ load, loadRuntime, verifyGitea, exportHandover
             onAddComment={async body => { await addComment(String(state.sessionId), { needId: selectedNeed.id, body }) }}
             onVoidComment={async commentId => { await voidComment(String(state.sessionId), { commentId }) }}
             onLoadComments={signal => listComments(String(state.sessionId), { needId: selectedNeed.id, limit: 200 }, signal)}
+            reviewGate={(() => {
+              // The wait state rides the closing cleanup record, so it arrives
+              // with the ordinary projection rather than a separate query.
+              const record = snapshot.delivery.cleanups[`cleanup-${selectedNeed.id}-closing`]?.reviewGate
+              return record === undefined ? undefined : {
+                pullRequestNumber: record.pullRequestNumber,
+                pullRequestUrl: record.pullRequestUrl,
+                missingApprovals: record.lastGap?.missingApprovals ?? record.requiredApprovals,
+                checks: record.lastGap?.checks ?? record.requiredChecks.map(context => ({ context, state: 'pending' })),
+                autoRecheckExhausted: record.recheckCount >= record.maxRechecks,
+                ...(record.externallyMerged === undefined ? {} : { externallyMerged: record.externallyMerged }),
+              }
+            })()}
+            onRecheckReviewGate={async () => {
+              await recheckReviewGate(String(state.sessionId), {
+                needId: selectedNeed.id, expectedRevision: selectedNeed.revision,
+              })
+            }}
             resumingNodeId={busy?.startsWith('resume:') ? busy.slice(7) : null}
             onResume={(nodeId, revision) => runAction(`resume:${nodeId}`, signal => resumeNode(String(state.sessionId), nodeId, revision, signal))} />
           {tab === 'progress' && currentPool && <p className="pf-workbench-muted">当前项目使用执行池 {currentPool.displayName}：运行 {currentPool.running} / 池并发上限 {currentPool.maxConcurrency}，排队 {currentPool.waiting}。项目限制仍独立生效。</p>}

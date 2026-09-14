@@ -910,6 +910,12 @@ export interface PactFlowCleanupRecord {
   readonly attempt: number
   readonly error?: string
   readonly nextRetryAt?: number
+  /**
+   * gitea-review-gate: durable wait state for a protected branch that requires
+   * external review. It rides the closing cleanup record rather than a new event
+   * type, so old readers strip an unknown key and old sessions stay writable.
+   */
+  readonly reviewGate?: PactFlowReviewGateRecord | undefined
 }
 
 export interface InitializePactFlowProjectRequest {
@@ -1059,6 +1065,83 @@ export interface ClosePactFlowNeedResult {
   readonly integrationCommit: string
   readonly cleanupFailures: readonly string[]
 }
+
+export type PactFlowGiteaCheckState = 'pending' | 'running' | 'success' | 'failure' | 'unknown'
+
+/** One required status check as the review gate currently sees it. */
+export interface PactFlowGiteaCheck {
+  readonly context: string
+  readonly state: PactFlowGiteaCheckState
+}
+
+export interface PactFlowReviewGateGap {
+  readonly missingApprovals: number
+  readonly checks: readonly PactFlowGiteaCheck[]
+}
+
+/**
+ * Durable wait state for a protected branch that requires external review.
+ *
+ * It lives here rather than beside the gate logic so the shared type surface has
+ * no edge into the Gitea client: the client project would otherwise drag the
+ * whole host-side request stack into the browser bundle.
+ */
+export interface PactFlowReviewGateRecord {
+  readonly needId: string
+  readonly pullRequestNumber: number
+  readonly pullRequestUrl: string
+  /** The commit this gate was opened against; drift from it is a refusal. */
+  readonly headCommit: string
+  readonly baseBranch: string
+  /**
+   * The Need revision the gate was opened against. The authoritative drift check
+   * is the closing input digest, recomputed from the Need and its task set when
+   * closing is re-entered; that computation needs the whole closing context, so
+   * a recheck uses this cheaper signal — the digest covers the revision, so a
+   * moved revision always means a moved digest.
+   */
+  readonly needRevision: number
+  readonly closingInputDigest: string
+  readonly requiredApprovals: number
+  readonly requiredChecks: readonly string[]
+  readonly openedAt: number
+  readonly recheckCount: number
+  readonly maxRechecks: number
+  readonly lastCheckedAt?: number | undefined
+  /** Last observed gap, so a check regressing from success is detectable. */
+  readonly lastGap?: PactFlowReviewGateGap | undefined
+  /** Someone merged this PR outside the platform; needs explicit handling. */
+  readonly externallyMerged?: boolean | undefined
+}
+
+/**
+ * Closing stopped at a protected branch that requires external review. The Need
+ * stays in `closing` and the Host keeps the responsibility — this is not a
+ * failure terminal state and not an instruction to merge by hand.
+ */
+export interface PactFlowClosingWaitingResult {
+  readonly state: 'waiting-review'
+  readonly needId: string
+  readonly pullRequestNumber: number
+  readonly pullRequestUrl: string
+  readonly integrationBranch: string
+  readonly integrationCommit: string
+  /** What is still missing, in words a person can act on. */
+  readonly detail: string
+  readonly missingApprovals: number
+  readonly checks: readonly { readonly context: string; readonly state: string }[]
+  readonly autoRecheckExhausted: boolean
+}
+
+export type PactFlowCloseOutcome = ClosePactFlowNeedResult | PactFlowClosingWaitingResult
+
+/** Result of one explicit review-gate recheck. */
+export type PactFlowReviewGateRecheckResult =
+  | { readonly state: 'merged'; readonly closing: ClosePactFlowNeedResult }
+  | PactFlowClosingWaitingResult
+  | { readonly state: 'externally-merged'; readonly needId: string; readonly pullRequestNumber: number; readonly detail: string }
+  | { readonly state: 'refused'; readonly needId: string; readonly pullRequestNumber: number; readonly reason: string; readonly detail: string }
+  | { readonly state: 'not-waiting'; readonly needId: string; readonly detail: string }
 
 export interface PactFlowHarnessProbeRequest {
   readonly templateId: string

@@ -37,11 +37,55 @@ interface PullRequestResponse {
   readonly base?: { readonly ref?: unknown }
 }
 
+import type { PactFlowGiteaCheck, PactFlowGiteaCheckState } from './types.ts'
+export type { PactFlowGiteaCheck, PactFlowGiteaCheckState }
+
 export interface PactFlowGiteaPullRequest {
   readonly number: number
   readonly htmlUrl: string
   readonly mergeCommit?: string
   readonly merged: boolean
+}
+
+
+/**
+ * Read-only snapshot of a PR's review gate.
+ *
+ * Everything here is observed, never influenced: the Host reads approvals and
+ * check results and it never submits a review, never edits branch protection and
+ * never force-merges. A check the repository requires but that has not reported
+ * at all is `pending`, not absent — silence is not success.
+ */
+export interface PactFlowGiteaGateState {
+  readonly number: number
+  readonly headCommit: string
+  readonly baseBranch: string
+  readonly merged: boolean
+  readonly mergeCommit?: string
+  readonly approvals: number
+  readonly checks: readonly PactFlowGiteaCheck[]
+}
+
+interface ReviewResponse {
+  readonly state?: unknown
+  readonly stale?: unknown
+  readonly dismissed?: unknown
+  readonly user?: { readonly id?: unknown; readonly login?: unknown }
+}
+
+interface CommitStatusResponse {
+  readonly context?: unknown
+  readonly status?: unknown
+  readonly created_at?: unknown
+}
+
+const CHECK_STATE: Readonly<Record<string, PactFlowGiteaCheckState>> = {
+  pending: 'pending',
+  running: 'running',
+  success: 'success',
+  failure: 'failure',
+  error: 'failure',
+  warning: 'failure',
 }
 
 class GiteaRequestError extends Error {
@@ -289,6 +333,82 @@ export class PactFlowGiteaClient {
     return match === undefined ? undefined : this.pullRequest(match)
   }
 
+  /**
+   * Read how far one PR is from satisfying the branch protection gate.
+   *
+   * Approvals count one per reviewer, taking only that reviewer's latest review
+   * and ignoring stale or dismissed ones — otherwise a reviewer who approved and
+   * then requested changes would still count toward the requirement.
+   *
+   * `requiredChecks` comes from branch protection. A required context with no
+   * reported status is returned as `pending`: a check that never ran must never
+   * read as a check that passed.
+   */
+  async pullRequestGateState(
+    binding: PactFlowGiteaBinding,
+    token: string,
+    number: number,
+    requiredChecks: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<PactFlowGiteaGateState> {
+    const cancellation = signal === undefined ? {} : { signal }
+    const pull = await this.request<PullRequestResponse>(binding, token, `/pulls/${String(number)}`, cancellation)
+    const head = pull.head?.sha
+    const base = pull.base?.ref
+    if (typeof head !== 'string' || head.length === 0 || typeof base !== 'string' || base.length === 0) {
+      throw new Error('PactFlow Gitea pull request is missing its head or base identity')
+    }
+
+    const reviews = await this.request<readonly ReviewResponse[]>(
+      binding, token, `/pulls/${String(number)}/reviews?limit=100`, cancellation,
+    )
+    if (!Array.isArray(reviews)) throw new Error('PactFlow Gitea review response is not an array')
+    const latestByReviewer = new Map<string, string>()
+    for (const review of reviews) {
+      if (review.stale === true || review.dismissed === true) continue
+      const reviewer = typeof review.user?.id === 'number' ? String(review.user.id)
+        : typeof review.user?.login === 'string' ? review.user.login : undefined
+      const state = typeof review.state === 'string' ? review.state.toUpperCase() : undefined
+      if (reviewer === undefined || state === undefined) continue
+      // Comment-only reviews neither approve nor block; they must not displace a
+      // reviewer's standing decision.
+      if (state === 'COMMENT' || state === 'PENDING') continue
+      latestByReviewer.set(reviewer, state)
+    }
+    const approvals = [...latestByReviewer.values()].filter(state => state === 'APPROVED').length
+
+    const checks: PactFlowGiteaCheck[] = []
+    if (requiredChecks.length > 0) {
+      const statuses = await this.request<readonly CommitStatusResponse[]>(
+        binding, token, `/statuses/${encodeURIComponent(head)}?limit=100`, { allowNotFound: true, ...cancellation },
+      ) ?? []
+      const latest = new Map<string, PactFlowGiteaCheckState>()
+      for (const status of Array.isArray(statuses) ? statuses : []) {
+        if (typeof status.context !== 'string') continue
+        // Gitea returns newest first; keep the first seen per context.
+        if (latest.has(status.context)) continue
+        const raw = typeof status.status === 'string' ? status.status.toLowerCase() : ''
+        latest.set(status.context, CHECK_STATE[raw] ?? 'unknown')
+      }
+      for (const context of requiredChecks) {
+        checks.push({ context, state: latest.get(context) ?? 'pending' })
+      }
+    }
+
+    const merged = pull.merged === true
+    return {
+      number,
+      headCommit: head,
+      baseBranch: base,
+      merged,
+      approvals,
+      checks,
+      ...typeof pull.merge_commit_sha === 'string' && pull.merge_commit_sha.length > 0
+        ? { mergeCommit: pull.merge_commit_sha }
+        : {},
+    }
+  }
+
   async mergePullRequest(
     binding: PactFlowGiteaBinding,
     token: string,
@@ -296,6 +416,8 @@ export class PactFlowGiteaClient {
     headCommit: string,
     signal?: AbortSignal,
     beforeMerge?: () => Promise<void>,
+    /** True when the default branch requires approvals or status checks. */
+    reviewGated?: boolean,
   ): Promise<PactFlowGiteaPullRequest> {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       signal?.throwIfAborted()
@@ -324,6 +446,16 @@ export class PactFlowGiteaClient {
         } catch (error) {
           if (!(error instanceof GiteaRequestError) || error.status !== 405
             || !/not in mergeable state|not ready to be merged/i.test(error.detail)) throw error
+          // On a protected branch this rejection means the review gate is not
+          // satisfied — an outcome no amount of retrying changes. Spinning here
+          // would turn a bounded race-window retry into a loop that keeps
+          // knocking on branch protection, so fail closed and let the caller's
+          // review-gate wait state handle it.
+          if (reviewGated === true) {
+            throw new Error(
+              'PactFlow Gitea refused the merge while branch protection is unsatisfied; the review gate decides when to merge',
+            )
+          }
         }
       }
       if (attempt < 39) await new Promise(resolveDelay => setTimeout(resolveDelay, 250))

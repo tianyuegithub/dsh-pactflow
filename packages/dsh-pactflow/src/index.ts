@@ -50,6 +50,12 @@ import type { RecoverySnapshot } from './local-workspace.ts'
 import type { PactFlowRecoveryCandidate } from './types.ts'
 import { PactFlowGiteaClient } from './gitea.ts'
 import {
+  PACTFLOW_REVIEW_GATE_MAX_RECHECKS,
+  evaluateReviewGate,
+  recordReviewGateObservation,
+  type PactFlowReviewGateRecord,
+} from './review-gate.ts'
+import {
   PACTFLOW_HARNESS_API_MODE,
   PactFlowK3sWorker,
   type PactFlowK3sConfig,
@@ -144,7 +150,10 @@ import type {
   PactFlowAdoptWorkspaceGitRequest,
   PactFlowMigrateWorkspaceProjectRequest,
   ClosePactFlowNeedRequest,
-  ClosePactFlowNeedResult,
+
+  PactFlowCloseOutcome,
+  PactFlowClosingWaitingResult,
+  PactFlowReviewGateRecheckResult,
   RetryPactFlowCleanupRequest,
   PactFlowGitAuth,
   ClaimPactFlowNodeRequest,
@@ -512,6 +521,13 @@ export class PactFlowService extends TypertRemoteService {
       update: (session, record, changes) => this.updateAutopilot(session, record, changes),
       block: (session, record, reason, cancel) => this.blockAutopilotInSession(session, record, reason, cancel),
       boundedError: error => this.boundedOutcome(error),
+      reviewGate: (session, needId) => this.reviewGateRecord(session, needId),
+      recheckReviewGate: async (session, needId) => {
+        // The driver only observes. Merging stays inside closing, so the
+        // waiting path and the unprotected path share one implementation.
+        const need = this.need(session, needId)
+        await this.recheckReviewGate(session.id, { needId, expectedRevision: need.revision })
+      },
     })
     ctx.effect(() => {
       const timer = setInterval(() => { void this.autopilotDriver.tick().catch(error => ctx.logger.warn('Autopilot tick failed: %s', this.boundedOutcome(error))) }, 1000)
@@ -909,7 +925,7 @@ export class PactFlowService extends TypertRemoteService {
     sessionId: string,
     request: ClosePactFlowNeedRequest,
     signal?: AbortSignal,
-  ): Promise<ClosePactFlowNeedResult> {
+  ): Promise<PactFlowCloseOutcome> {
     const session = this.livePactFlowSession(sessionId)
     const autopilot = this.activeAutopilot(session, request.needId)
     const checkpoint = async (): Promise<void> => {
@@ -984,9 +1000,13 @@ export class PactFlowService extends TypertRemoteService {
     if (!status.branchProtected || status.archived) {
       throw new Error('PactFlow closing requires an active protected Gitea default branch')
     }
-    if (status.requiredApprovals > 0 || status.statusChecks.length > 0) {
-      throw new Error('PactFlow closing cannot auto-merge while Gitea approvals or status checks are required')
-    }
+    // A protected branch that requires approvals or checks used to end closing
+    // here. Giving up handed the merge to a person outside the platform, and a
+    // hand-merge produces a delivery terminal state the Host never verified —
+    // no ancestry check, no exact task-set check against this baseline, no
+    // cleanup responsibility persisted first. Closing now holds the
+    // responsibility and waits; the gate is evaluated once the PR exists.
+    const reviewRequired = status.requiredApprovals > 0 || status.statusChecks.length > 0
     // Closing authenticates with the CURRENT project binding: every closing Git
     // operation (integration push, merge verification, task-ref verification)
     // targets binding.remote, so a run's historical auth declaration must never
@@ -1066,10 +1086,17 @@ export class PactFlowService extends TypertRemoteService {
       },
       signal,
     )
+    if (reviewRequired && !pullRequest.merged) {
+      const waiting = await this.holdForReviewGate(session, {
+        need, giteaBinding, giteaToken: giteaToken.value, status, pullRequest,
+        integration, closingInputDigest, signal,
+      })
+      if (waiting !== null) return waiting
+    }
     const merged = pullRequest.merged
       ? pullRequest
       : await this.gitea.mergePullRequest(
-        giteaBinding, giteaToken.value, pullRequest.number, integration.commit, signal, checkpoint,
+        giteaBinding, giteaToken.value, pullRequest.number, integration.commit, signal, checkpoint, reviewRequired,
       )
     if (!merged.merged || merged.mergeCommit === undefined) {
       throw new Error('PactFlow Gitea PR did not report a merged commit')
@@ -3934,6 +3961,175 @@ export class PactFlowService extends TypertRemoteService {
       .sort((left, right) => right.recordedAt - left.recordedAt || right.id.localeCompare(left.id))
     const latest = reviews[0]
     return latest?.decision === 'approved' ? latest.subjectDigest : undefined
+  }
+
+  /**
+   * Evaluate the protected-branch review gate for a PR that already exists.
+   *
+   * Returns `null` when the gate is satisfied — the caller then merges through
+   * the ordinary path, so the ancestry, exact merge SHA and task-set checks stay
+   * the single implementation. Returns a waiting result when review is still
+   * outstanding; throws only for the fail-closed conditions, which need a person.
+   */
+  private async holdForReviewGate(
+    session: Session,
+    input: {
+      readonly need: PactFlowNeed
+      readonly giteaBinding: PactFlowGiteaBinding
+      readonly giteaToken: string
+      readonly status: PactFlowGiteaStatus
+      readonly pullRequest: { readonly number: number; readonly htmlUrl: string }
+      readonly integration: { readonly branch: string; readonly commit: string }
+      readonly closingInputDigest: string
+      readonly signal?: AbortSignal | undefined
+    },
+  ): Promise<PactFlowClosingWaitingResult | null> {
+    const observed = await this.gitea.pullRequestGateState(
+      input.giteaBinding, input.giteaToken, input.pullRequest.number, input.status.statusChecks, input.signal,
+    )
+    // An externally merged PR is handled by the ordinary path below: it verifies
+    // the merge commit, the ancestry and the task set before recording anything.
+    if (observed.merged) return null
+
+    const prior = this.reviewGateRecord(session, input.need.id)
+    const record: PactFlowReviewGateRecord = prior ?? {
+      needId: input.need.id,
+      pullRequestNumber: input.pullRequest.number,
+      pullRequestUrl: input.pullRequest.htmlUrl,
+      headCommit: input.integration.commit,
+      baseBranch: observed.baseBranch,
+      needRevision: input.need.revision,
+      closingInputDigest: input.closingInputDigest,
+      requiredApprovals: input.status.requiredApprovals,
+      requiredChecks: input.status.statusChecks,
+      openedAt: Date.now(),
+      recheckCount: 0,
+      maxRechecks: PACTFLOW_REVIEW_GATE_MAX_RECHECKS,
+    }
+    const verdict = evaluateReviewGate({ record, observed, currentNeedRevision: input.need.revision })
+    this.persistReviewGate(session, recordReviewGateObservation(record, verdict, Date.now()))
+
+    if (verdict.kind === 'ready') return null
+    if (verdict.kind === 'externally-merged') return null
+    if (verdict.kind === 'refused') throw new Error(`PactFlow closing refused: ${verdict.detail}`)
+    return {
+      state: 'waiting-review',
+      needId: input.need.id,
+      pullRequestNumber: record.pullRequestNumber,
+      pullRequestUrl: record.pullRequestUrl,
+      integrationBranch: input.integration.branch,
+      integrationCommit: input.integration.commit,
+      detail: verdict.detail,
+      missingApprovals: verdict.gap.missingApprovals,
+      checks: verdict.gap.checks.map(check => ({ context: check.context, state: check.state })),
+      autoRecheckExhausted: verdict.autoRecheckExhausted,
+    }
+  }
+
+  /**
+   * Recheck one waiting review gate.
+   *
+   * Once the gate is satisfied this re-enters `closeGitNeed`, which is
+   * idempotent (it reuses the recorded closing branch, the existing PR and any
+   * recorded release). That is deliberate: there is exactly ONE merge-and-verify
+   * implementation, so the waiting path cannot drift away from the checks the
+   * unprotected path has accumulated.
+   */
+  @Remote('recheckReviewGate')
+  async recheckReviewGate(
+    sessionId: string,
+    request: { readonly needId: string; readonly expectedRevision: number },
+    signal?: AbortSignal,
+  ): Promise<PactFlowReviewGateRecheckResult> {
+    const session = this.livePactFlowSession(sessionId)
+    const need = this.need(session, request.needId)
+    const record = this.reviewGateRecord(session, need.id)
+    if (record === undefined) {
+      return { state: 'not-waiting', needId: need.id, detail: '该需求当前没有等待外部评审的收口' }
+    }
+    const project = this.requireProject(session)
+    const binding = project.git ?? this.workspaceGitBinding(await this.workspaceProjectForSession(session))
+    if (binding?.gitea === undefined) throw new Error('PactFlow project has no Gitea binding')
+    const giteaBinding = this.effectiveGiteaBinding(binding.gitea)
+    const credentials = this.ctx.get('credentials') as CredentialProvider | undefined
+    if (credentials === undefined) throw new Error('PactFlow Gitea requires the Credentials service')
+    const token = await credentials.resolve(credentialRef(giteaBinding.tokenCredentialRef))
+    if (token === undefined) throw new Error('PactFlow Gitea token credential reference is not configured')
+
+    const observed = await this.gitea.pullRequestGateState(
+      giteaBinding, token.value, record.pullRequestNumber, record.requiredChecks, signal,
+    )
+    const verdict = evaluateReviewGate({ record, observed, currentNeedRevision: need.revision })
+    this.persistReviewGate(session, recordReviewGateObservation(record, verdict, Date.now()))
+
+    if (verdict.kind === 'externally-merged') {
+      // A background recheck must never turn an outside merge into a delivery
+      // terminal state: nothing verified the merge commit, the ancestry or the
+      // task set. Report it and let a person request closing explicitly.
+      return {
+        state: 'externally-merged', needId: need.id,
+        pullRequestNumber: record.pullRequestNumber, detail: verdict.detail,
+      }
+    }
+    if (verdict.kind === 'refused') {
+      return {
+        state: 'refused', needId: need.id, pullRequestNumber: record.pullRequestNumber,
+        reason: verdict.reason, detail: verdict.detail,
+      }
+    }
+    if (verdict.kind === 'waiting') {
+      return {
+        state: 'waiting-review', needId: need.id,
+        pullRequestNumber: record.pullRequestNumber, pullRequestUrl: record.pullRequestUrl,
+        integrationBranch: '', integrationCommit: record.headCommit,
+        detail: verdict.detail,
+        missingApprovals: verdict.gap.missingApprovals,
+        checks: verdict.gap.checks.map(check => ({ context: check.context, state: check.state })),
+        autoRecheckExhausted: verdict.autoRecheckExhausted,
+      }
+    }
+    const closed = await this.closeGitNeed(sessionId, {
+      needId: need.id, expectedRevision: request.expectedRevision,
+    }, signal)
+    if ('state' in closed) {
+      return closed
+    }
+    return { state: 'merged', closing: closed }
+  }
+
+  /**
+   * Cancel a waiting review gate.
+   *
+   * The wait state and any unattended recheck go away; the PR does NOT. It is an
+   * object other people can see and may be acting on, so closing it would be the
+   * platform reaching outside its own boundary — its number stays in the record
+   * so nothing is lost.
+   */
+  @Remote('cancelReviewGate')
+  cancelReviewGate(sessionId: string, request: { readonly needId: string }): {
+    readonly cancelled: boolean
+    readonly pullRequestNumber?: number
+  } {
+    const session = this.livePactFlowSession(sessionId)
+    const need = this.need(session, request.needId)
+    const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${need.id}-closing`]
+    const gate = existing?.reviewGate
+    if (existing === undefined || gate === undefined) return { cancelled: false }
+    const { reviewGate: _removed, ...withoutGate } = existing
+    this.appendCleanupRecord(session, withoutGate)
+    return { cancelled: true, pullRequestNumber: gate.pullRequestNumber }
+  }
+
+  /** Read the durable wait state; it rides the closing cleanup record. */
+  private reviewGateRecord(session: Session, needId: string): PactFlowReviewGateRecord | undefined {
+    const cleanup = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${needId}-closing`]
+    return cleanup?.reviewGate
+  }
+
+  private persistReviewGate(session: Session, record: PactFlowReviewGateRecord): void {
+    const existing = this.ctx.sessionProjections.stateOf(session, 'pactflowDelivery')?.cleanups[`cleanup-${record.needId}-closing`]
+    if (existing === undefined) return
+    this.appendCleanupRecord(session, { ...existing, reviewGate: record })
   }
 
   /**

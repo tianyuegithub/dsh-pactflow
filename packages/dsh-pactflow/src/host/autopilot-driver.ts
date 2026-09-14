@@ -1,8 +1,9 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { PactFlowAutopilotRecord, PactFlowSnapshot } from '../types.ts'
+import type { PactFlowAutopilotRecord, PactFlowReviewGateRecord, PactFlowSnapshot } from '../types.ts'
 import { autopilotProgress, autopilotWorkerCounts } from '../autopilot.ts'
+import { describeReviewGateGap, reviewGateRecheckDue } from '../review-gate.ts'
 
 export interface AutopilotDriverHost {
   sessions(): readonly Session[]
@@ -13,6 +14,13 @@ export interface AutopilotDriverHost {
   update(session: Session, record: PactFlowAutopilotRecord, changes: Partial<PactFlowAutopilotRecord>): PactFlowAutopilotRecord | undefined
   block(session: Session, record: PactFlowAutopilotRecord, reason: string, cancel?: boolean): void
   boundedError(error: unknown): string
+  /**
+   * gitea-review-gate: the Need's durable wait state when closing is held at a
+   * protected branch that requires external review, or undefined when it is not.
+   */
+  reviewGate(session: Session, needId: string): PactFlowReviewGateRecord | undefined
+  /** Observe that gate once. Never merges by itself; closing does that. */
+  recheckReviewGate(session: Session, needId: string): Promise<void>
 }
 
 /** One host-owned driver; browser lifetime never owns continuation. */
@@ -51,6 +59,35 @@ export class PactFlowAutopilotDriver {
     }
     if (Date.now() >= record.expiresAt) {
       this.host.block(session, record, '挂机运行时长已达到授权上限', true); return
+    }
+    const gate = this.host.reviewGate(session, record.needId)
+    if (gate !== undefined) {
+      // Waiting on people and CI outside the platform is neither the model's
+      // turn nor a stall. Left alone, the unchanged progress digest would grow
+      // stalledTurns until autopilot blocked on "no verifiable progress", and
+      // every tick would wake the model to look at a Need only a reviewer can
+      // advance — burning the model-step budget on a question it cannot answer.
+      if (gate.externallyMerged === true) {
+        this.host.block(session, record,
+          `PR #${String(gate.pullRequestNumber)} 已在平台外被合并，宿主未核验该合并，需人显式处置`)
+        return
+      }
+      const exhausted = gate.recheckCount >= gate.maxRechecks
+      // The driver ticks every second; CI does not. Honour the recheck interval
+      // so an unattended wait does not hammer the Gitea API.
+      if (reviewGateRecheckDue(gate, Date.now())) await this.host.recheckReviewGate(session, record.needId)
+      if (this.stopped) return
+      // Re-read: the recheck may have satisfied the gate and merged, in which
+      // case the next tick completes through the ordinary deployed path.
+      const settled = this.host.reviewGate(session, record.needId)
+      if (settled !== undefined) {
+        this.host.update(session, record, {
+          reason: exhausted
+            ? `等待外部评审（PR #${String(gate.pullRequestNumber)}）：自动复查已耗尽，可手动复查`
+            : `等待外部评审（PR #${String(gate.pullRequestNumber)}）：${describeReviewGateGap(settled.lastGap ?? { missingApprovals: settled.requiredApprovals, checks: [] })}`,
+        })
+        return
+      }
     }
     if (agent === undefined || agent.status !== 'idle') return
     const counts = autopilotWorkerCounts(snapshot, record)
