@@ -29,6 +29,7 @@ import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { KubeConfig } from '@kubernetes/client-node'
 import {
+  PACTFLOW_EVENT_PRODUCER_VERSION as EVENT_PRODUCER_VERSION,
   PACTFLOW_EVENT_TYPES,
   PACTFLOW_EVENT_TYPES_V0_1,
   PACTFLOW_EVENT_TYPES_V0_2,
@@ -225,7 +226,6 @@ interface PactFlowWorkspaceRegistry {
 }
 
 const VERSION = '0.2.1'
-const EVENT_PRODUCER_VERSION = '0.6.0'
 const PRESET_ROOT = fileURLToPath(new URL('../presets', import.meta.url))
 // This fixed namespace is valid without a runtime helper export.
 const PACTFLOW_SETTINGS_NS = 'pactflow' as SettingsNamespace

@@ -114,6 +114,15 @@ export const PACTFLOW_EVENT_TYPES_V0_5 = [...PACTFLOW_EVENT_TYPES_V0_4, 'pactflo
 export const PACTFLOW_EVENT_TYPES_V0_6 = PACTFLOW_EVENT_TYPES_V0_5
 export const PACTFLOW_EVENT_TYPES = PACTFLOW_EVENT_TYPES_V0_6
 
+/**
+ * The external producer version this build declares when it writes. It travels
+ * with the shipped worker image manifest (`worker/dsh/release-manifest.json`
+ * `hostEventProducerVersion`) as a compatibility record, so it lives here rather
+ * than inside the decorated service class: unit tests never import `index.ts` as
+ * a module, and a number nothing can read is a number nothing can guard.
+ */
+export const PACTFLOW_EVENT_PRODUCER_VERSION = '0.6.0'
+
 const gitAuthSchema = pactFlowSchema<PactFlowGitAuth>(z.object({
   kind: z.literal('https-token'), username: z.string().min(1), credentialRef: z.string().min(1),
 }))
