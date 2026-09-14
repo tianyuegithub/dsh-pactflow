@@ -2,10 +2,10 @@
 
 ## 0. 传输层评估（阻塞，任务 2 之前必须完成）
 
-- [ ] 0.1 评估 DSH 原生 `@deepseek-ai/dsh-attachment` 的客户端→宿主传输层：能否承载任意字节、能否被插件接入而不强制图片语义、`maxBytes` 策略是否可配。产出证据（实测最大字节、接入点、失败语义）记入实施状态。**可行 → 选定；不可行 → 记录否决依据后评估 0.2**
-- [ ] 0.2 若 0.1 否决：评估分片经 Remote——每片 ≤ 通道硬限、宿主按 hash 重组校验。产出往返次数与重组失败语义。**可行 → 选定；不可行 → 记录否决依据后评估 0.3**
-- [ ] 0.3 若 0.2 否决：宿主新增上传端点方案单独评审，取得用户裁决后才可选定
-- [ ] 0.4 按选定传输层确定附件通道阈值（MUST ≤ 硬限），记入实施状态
+- [x] 0.1 评估结论（对 fork 核实）：`@deepseek-ai/dsh-attachment` 的**存储与语义不可复用**——`AttachmentStore` seam 全是图片语义（`validateImage`/`saveImage`/`readImage`、`ImageMediaType` 仅四种光栅格式、解码归一化、`ImageVariantId` 变体），且存 DSH_HOME 并绑对话历史。但评估揭示了更关键的一点：**客户端到宿主根本不存在独立的"传输层"——字节直接作为 Typert Remote 的参数传递**。证据：`@deepseek-ai/dsh-commands` 的 `@Remote execute(agent, line, images: readonly EncodedImageAttachment[], signal)`，而 `EncodedImageAttachment.data` 是 `Uint8Array`；`packages/typert/protocol` 未声明任何字节上限。
+- [x] 0.2 据此**选定候选 1 的实质形态**：附件字节以 `Uint8Array` 作为 Remote 参数直送宿主，宿主侧经脱敏门后 put 进对象存储。**不引入分片协议**（0.2 原方案），**不新增 HTTP 端点**（0.3 原方案）——二者均无需评估即被更优解取代，否决依据即本条。
+- [ ] 0.3 ~~宿主新增上传端点~~ 不再需要（见 0.2）
+- [ ] 0.4 按选定传输层确定附件通道阈值：**未定**。Remote 参数的实际字节天花板（传输缓冲与内存）需对真实宿主实测，本机无已安装宿主。阈值在实测前不预设——`artifact-ref-handoff` 的既有通道阈值（result-document 3 KiB / bridge 32 KiB）不适用于此路径
 
 ## 1. 事件词汇（可与任务 0 并行）
 
