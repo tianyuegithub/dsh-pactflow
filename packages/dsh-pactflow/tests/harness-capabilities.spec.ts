@@ -5,8 +5,8 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import PactFlowService from '../lib/index.js'
 import {
   PACTFLOW_HARNESS_CAPABILITY_LEVELS,
-  PACTFLOW_HOST_ATTESTABLE_LEVELS,
-  PACTFLOW_PROBE_STAGE_LEVEL,
+  hostAttestableLevels,
+  probeStageLevels,
   harnessCapabilityProfile,
   harnessAchievedLevel,
   harnessProbeMaxLevel,
@@ -31,23 +31,23 @@ describe('PactFlow harness capability levels', () => {
   })
 
   it('reports only connection when the probe merely reached the model', () => {
-    expect(harnessAchievedLevel({ stages: [] })).toBe('connection')
-    expect(harnessAchievedLevel({ stages: [{ name: 'api-response', state: 'succeeded' }] })).toBe('protocol')
+    expect(harnessAchievedLevel('claude', { stages: [] })).toBe('connection')
+    expect(harnessAchievedLevel('claude', { stages: [{ name: 'api-response', state: 'succeeded' }] })).toBe('protocol')
   })
 
   it('reports verification reached only when a CLI response and cleanup both succeeded', () => {
-    expect(harnessAchievedLevel({ stages: [
+    expect(harnessAchievedLevel('claude', { stages: [
       { name: 'model-response', state: 'succeeded' },
       { name: 'cli-response', state: 'succeeded' },
     ] })).toBe('artifact')
-    expect(harnessAchievedLevel({ stages: [
+    expect(harnessAchievedLevel('claude', { stages: [
       { name: 'cli-response', state: 'succeeded' },
       { name: 'cleanup', state: 'succeeded' },
     ] })).toBe('cancellation')
   })
 
   it('does not claim cancellation when cleanup failed', () => {
-    expect(harnessAchievedLevel({ stages: [
+    expect(harnessAchievedLevel('claude', { stages: [
       { name: 'cli-response', state: 'succeeded' },
       { name: 'cleanup', state: 'failed' },
     ] })).toBe('artifact')
@@ -56,36 +56,41 @@ describe('PactFlow harness capability levels', () => {
   it('derives the highest reached level from all successful stages regardless of order', () => {
     // Stage order must not lower the reached level: cleanup can be observed before
     // the CLI stage yet still lift the claim.
-    expect(harnessAchievedLevel({ stages: [
+    expect(harnessAchievedLevel('claude', { stages: [
       { name: 'cleanup', state: 'succeeded' },
       { name: 'cli-response', state: 'succeeded' },
     ] })).toBe('cancellation')
     // A failed stage never contributes.
-    expect(harnessAchievedLevel({ stages: [
+    expect(harnessAchievedLevel('claude', { stages: [
       { name: 'cli-response', state: 'succeeded' },
       { name: 'cleanup', state: 'failed' },
     ] })).toBe('artifact')
   })
 
-  it('never claims tool-invocation or verification, which no probe stage evidences', () => {
-    // These rungs need dedicated probe stages (Harness-runner tool-call evidence
-    // and a verification stage) that this repository does not yet emit, so the
-    // derivation must never return them.
-    expect(PACTFLOW_HOST_ATTESTABLE_LEVELS).not.toContain('tool-invocation')
-    expect(PACTFLOW_HOST_ATTESTABLE_LEVELS).not.toContain('verification')
-    expect(Object.values(PACTFLOW_PROBE_STAGE_LEVEL)).not.toContain('tool-invocation')
-    expect(Object.values(PACTFLOW_PROBE_STAGE_LEVEL)).not.toContain('verification')
-    expect(harnessProbeMaxLevel()).toBe('cancellation')
-    // Every mapped stage resolves to an attestable level at or below the ceiling.
-    const ceiling = PACTFLOW_HARNESS_CAPABILITY_LEVELS.indexOf(harnessProbeMaxLevel())
-    for (const level of Object.values(PACTFLOW_PROBE_STAGE_LEVEL)) {
-      expect(PACTFLOW_HOST_ATTESTABLE_LEVELS).toContain(level)
-      expect(PACTFLOW_HARNESS_CAPABILITY_LEVELS.indexOf(level)).toBeLessThanOrEqual(ceiling)
-    }
-  })
+  it.each(['claude', 'codex', 'opencode', 'dsh'] as const)(
+    '%s never claims tool-invocation or verification, which no probe stage evidences', harness => {
+      // These rungs need evidence the runner must emit (a reported tool call, and a
+      // stepwise verification report bound to a registered profile) that no runner
+      // currently produces, so the derivation must never return them.
+      //
+      // Judged per Harness: `dsh`'s adapter is written here and shipped by digest,
+      // so it is the one that could eventually attest them — and when it does, this
+      // loop is what forces that grant to be stated for `dsh` alone.
+      expect(hostAttestableLevels(harness)).not.toContain('tool-invocation')
+      expect(hostAttestableLevels(harness)).not.toContain('verification')
+      expect(Object.values(probeStageLevels(harness))).not.toContain('tool-invocation')
+      expect(Object.values(probeStageLevels(harness))).not.toContain('verification')
+      expect(harnessProbeMaxLevel(harness)).toBe('cancellation')
+      // Every mapped stage resolves to an attestable level at or below the ceiling.
+      const ceiling = PACTFLOW_HARNESS_CAPABILITY_LEVELS.indexOf(harnessProbeMaxLevel(harness))
+      for (const level of Object.values(probeStageLevels(harness))) {
+        expect(hostAttestableLevels(harness)).toContain(level)
+        expect(PACTFLOW_HARNESS_CAPABILITY_LEVELS.indexOf(level)).toBeLessThanOrEqual(ceiling)
+      }
+    })
 
   it('ignores unknown stage names rather than inferring a level from them', () => {
-    expect(harnessAchievedLevel({ stages: [
+    expect(harnessAchievedLevel('claude', { stages: [
       { name: 'tool-invocation', state: 'succeeded' },
       { name: 'verification', state: 'succeeded' },
       { name: 'some-future-stage', state: 'succeeded' },
@@ -121,8 +126,8 @@ describe('PactFlow declared harness capability query', () => {
       expect(byId.claude?.structuredOutput).toBe('native')
       expect(byId.codex?.structuredOutput).toBe('text')
       // The declared ceiling is the highest *attestable* level, never an aspiration.
-      expect(byId.claude?.maxLevel).toBe(harnessProbeMaxLevel())
-      expect(byId.codex?.maxLevel).toBe(harnessProbeMaxLevel())
+      expect(byId.claude?.maxLevel).toBe(harnessProbeMaxLevel('claude'))
+      expect(byId.codex?.maxLevel).toBe(harnessProbeMaxLevel('claude'))
       expect(byId.codex?.apiMode).toBe('openai-responses')
     } finally {
       await ctx.fiber.dispose()

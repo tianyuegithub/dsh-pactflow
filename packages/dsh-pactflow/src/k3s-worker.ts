@@ -53,9 +53,11 @@ const PACTFLOW_K3S_REQUEST_TIMEOUT_MS = 30_000
  * source of truth. The module pair is mutually importing, but the shared helper is
  * only called at run time (never during module evaluation), so the cycle is inert.
  */
-function probeAchievedLevel(stages: readonly { readonly name: string; readonly state: 'succeeded' | 'failed' }[]):
-  PactFlowHarnessCapabilityLevel {
-  return harnessAchievedLevel({ stages })
+function probeAchievedLevel(
+  harness: PactFlowHarness,
+  stages: readonly { readonly name: string; readonly state: 'succeeded' | 'failed' }[],
+): PactFlowHarnessCapabilityLevel {
+  return harnessAchievedLevel(harness, { stages })
 }/** Floor for the Job wall-clock budget so a tiny value cannot kill a task at once. */
 const PACTFLOW_K3S_MIN_WALL_CLOCK_SECONDS = 60
 /** Default Job wall-clock budget, independent of the ownership lease. */
@@ -820,8 +822,8 @@ export class PactFlowK3sWorker {
       // A10: state the highest capability level the probe actually reached, so a
       // mere connectivity success is never presented as a delivered artifact. The
       // ceiling is the highest *attestable* level, not the harness's aspiration.
-      achievedLevel: probeAchievedLevel(stages),
-      maxLevel: harnessProbeMaxLevel(),
+      achievedLevel: probeAchievedLevel(template.harness, stages),
+      maxLevel: harnessProbeMaxLevel(template.harness),
     }
   }
 
@@ -913,8 +915,8 @@ export class PactFlowK3sWorker {
       success, durationMs: Date.now() - startedAt, output: this.bounded(output, 16_384), stages,
       // A10: an image probe that ran its CLI reached `artifact`; its cleanup stage
       // can lift it to `cancellation`. The ceiling is the highest attestable level.
-      achievedLevel: probeAchievedLevel(stages),
-      maxLevel: harnessProbeMaxLevel(),
+      achievedLevel: probeAchievedLevel(template.harness, stages),
+      maxLevel: harnessProbeMaxLevel(template.harness),
     }
   }
 
@@ -1058,8 +1060,8 @@ export class PactFlowK3sWorker {
       success, durationMs: Date.now() - startedAt, output: this.bounded(this.redactProbeOutput(output, modelApiKey), 16_384), stages,
       // A10: a direct API probe only ever reaches `protocol`; its cleanup stage can
       // lift it to `cancellation`. It can never claim `artifact` (no CLI ran).
-      achievedLevel: probeAchievedLevel(stages),
-      maxLevel: harnessProbeMaxLevel(),
+      achievedLevel: probeAchievedLevel(template.harness, stages),
+      maxLevel: harnessProbeMaxLevel(template.harness),
     }
   }
 

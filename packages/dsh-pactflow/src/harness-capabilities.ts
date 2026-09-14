@@ -13,27 +13,60 @@ export const PACTFLOW_HARNESS_CAPABILITY_LEVELS = [
 export type PactFlowHarnessCapabilityLevel = typeof PACTFLOW_HARNESS_CAPABILITY_LEVELS[number]
 
 /**
- * Levels a Host probe can attest from its own observations. `tool-invocation`
- * needs the Harness runner to report that it invoked a tool, and `verification`
- * needs a dedicated verification stage; both are evidence outside what this
- * repository's probes currently emit, so no Host stage maps to them and they are
- * never claimed. Listing the attestable rungs explicitly keeps the ladder honest:
- * a level with no evidence is never silently presented as reached.
+ * Levels a Host probe can attest, and the stage whose success proves each —
+ * **declared per Harness**.
+ *
+ * `tool-invocation` needs the Harness runner to report that it invoked a tool,
+ * and `verification` needs the runner to execute a stepwise, order-sensitive task
+ * bound to a registered validation profile and report on it. Neither is evidence
+ * any runner currently emits, so today every Harness declares the same set and no
+ * stage maps to those two rungs: a level with no evidence is never presented as
+ * reached.
+ *
+ * The declaration is per Harness rather than global because those two rungs are
+ * not equally out of reach. The `dsh` executor's adapter is written in this
+ * repository and shipped by image digest, so it is the one that could report
+ * them; `codex` and the others run third-party runners this repository does not
+ * write. A global set would make granting `dsh` a level grant it to all of them
+ * in the same edit — and by then there is no failing state left to write a guard
+ * against. The shape is therefore split first, while it can still be tested.
  */
-export const PACTFLOW_HOST_ATTESTABLE_LEVELS: readonly PactFlowHarnessCapabilityLevel[] = [
-  'connection', 'protocol', 'artifact', 'cancellation',
-]
+interface HarnessAttestation {
+  readonly levels: readonly PactFlowHarnessCapabilityLevel[]
+  /**
+   * Which observed stage success proves which level. `connection` is the floor (a
+   * probe that created its Job at least reached the endpoint) and is not listed.
+   */
+  readonly stageLevel: Readonly<Record<string, PactFlowHarnessCapabilityLevel>>
+}
 
-/**
- * Which observed stage success proves which level. Every attestable level above the
- * floor has exactly one evidence stage; `connection` is the floor (a probe that
- * created its Job at least reached the endpoint) and is not listed here.
- */
-export const PACTFLOW_PROBE_STAGE_LEVEL: Readonly<Record<string, PactFlowHarnessCapabilityLevel>> = {
-  'model-response': 'protocol',
-  'api-response': 'protocol',
-  'cli-response': 'artifact',
-  cleanup: 'cancellation',
+const HOST_ATTESTATION: HarnessAttestation = {
+  levels: ['connection', 'protocol', 'artifact', 'cancellation'],
+  stageLevel: {
+    'model-response': 'protocol',
+    'api-response': 'protocol',
+    'cli-response': 'artifact',
+    cleanup: 'cancellation',
+  },
+}
+
+const PACTFLOW_HARNESS_ATTESTATION: Readonly<Record<PactFlowHarness, HarnessAttestation>> = {
+  claude: HOST_ATTESTATION,
+  codex: HOST_ATTESTATION,
+  opencode: HOST_ATTESTATION,
+  // Identical today. `dsh` gains `tool-invocation` and `verification` only once its
+  // executor actually reports them (change `dsh-harness-telemetry`), and only here.
+  dsh: HOST_ATTESTATION,
+}
+
+/** Levels this Harness's probes can attest from their own observations. */
+export function hostAttestableLevels(harness: PactFlowHarness): readonly PactFlowHarnessCapabilityLevel[] {
+  return PACTFLOW_HARNESS_ATTESTATION[harness].levels
+}
+
+/** Stage-success → level map for this Harness. A name absent here is ignored. */
+export function probeStageLevels(harness: PactFlowHarness): Readonly<Record<string, PactFlowHarnessCapabilityLevel>> {
+  return PACTFLOW_HARNESS_ATTESTATION[harness].stageLevel
 }
 
 export interface PactFlowHarnessCapabilityProfile {
@@ -53,7 +86,7 @@ export function harnessCapabilityProfile(harness: PactFlowHarness): PactFlowHarn
     // All four harnesses are run as a bounded CLI in a Job and report a termination
     // document; Claude additionally supports structured tool-call responses.
     structuredOutput: harness === 'claude' ? 'native' : 'text',
-    maxLevel: 'cancellation',
+    maxLevel: harnessProbeMaxLevel(harness),
   }
 }
 
@@ -63,8 +96,9 @@ type Stage = { readonly name: string; readonly state: 'succeeded' | 'failed' }
  * Highest level the probe may claim, i.e. the most committed attestable rung. A
  * probe must never report a level above this even if a future harness claims it.
  */
-export function harnessProbeMaxLevel(): PactFlowHarnessCapabilityLevel {
-  return PACTFLOW_HOST_ATTESTABLE_LEVELS[PACTFLOW_HOST_ATTESTABLE_LEVELS.length - 1]!
+export function harnessProbeMaxLevel(harness: PactFlowHarness): PactFlowHarnessCapabilityLevel {
+  const levels = hostAttestableLevels(harness)
+  return levels[levels.length - 1]!
 }
 
 /**
@@ -74,11 +108,17 @@ export function harnessProbeMaxLevel(): PactFlowHarnessCapabilityLevel {
  * The result is always an attestable level, so an unobservable rung
  * (`tool-invocation`, `verification`) can never be claimed.
  */
-export function harnessAchievedLevel(result: { readonly stages: readonly Stage[] }): PactFlowHarnessCapabilityLevel {
+export function harnessAchievedLevel(
+  harness: PactFlowHarness,
+  result: { readonly stages: readonly Stage[] },
+): PactFlowHarnessCapabilityLevel {
+  // This Harness's own map, never a shared one: a stage another Harness can prove
+  // must not be derivable here just because it shares a name.
+  const stageLevel = probeStageLevels(harness)
   let reached: PactFlowHarnessCapabilityLevel = 'connection'
   for (const stage of result.stages) {
     if (stage.state !== 'succeeded') continue
-    const level = PACTFLOW_PROBE_STAGE_LEVEL[stage.name]
+    const level = stageLevel[stage.name]
     if (level === undefined) continue
     if (PACTFLOW_HARNESS_CAPABILITY_LEVELS.indexOf(level) > PACTFLOW_HARNESS_CAPABILITY_LEVELS.indexOf(reached)) {
       reached = level

@@ -9,9 +9,9 @@
 
 ## 1. 可证集合按 Harness 分裂（宿主侧，先做）
 
-- [ ] 1.1 `src/harness-capabilities.ts`：`PACTFLOW_HOST_ATTESTABLE_LEVELS` 与 `PACTFLOW_PROBE_STAGE_LEVEL` 由全局常量改为**按 Harness 一份**；推导按 Harness 判定。先失败后通过。验证：单测
-- [ ] 1.2 **不推断守卫**：`dsh` 可证 `tool-invocation` 不使 `codex` 的推导包含该级别。验证：单测（对抗性）
-- [ ] 1.3 既有「未映射阶段名 MUST 被忽略」守卫扩展为按 Harness 分别判定，强度不降低。验证：单测
+- [x] 1.1 `src/harness-capabilities.ts`：两个全局常量改为按 Harness 一份的 `HarnessAttestation`，经 `hostAttestableLevels(harness)` / `probeStageLevels(harness)` 读取；`harnessAchievedLevel` 与 `harnessProbeMaxLevel` 都改为按 Harness 判定，`k3s-worker` 三个探针调用点传入 `template.harness`。**今天四个 Harness 的取值完全相同**——本任务交付的是形状与守卫，不是差异；`dsh` 的两级要等它的执行器真的上报（任务 2）。验证：`harness-capability-split.spec.ts`
+- [x] 1.2 **不推断守卫**：对抗用例直接构造「给 `dsh` 授予 `tool-invocation` 后观测 `codex`」这一场景，断言凡自身可证集合不含该级别的 Harness 一律推导为 `connection`。这条守卫必须**先于**任何一个 Harness 获得新级别而存在——之后就再没有可写测试的失败态了。验证：同上
+- [x] 1.3 既有「未映射阶段名 MUST 被忽略」守卫改写为 `it.each` 逐 Harness 判定，并把「永不虚报 tool-invocation / verification」一并改为逐 Harness——强度不降低，且 `dsh` 将来获得该级别时，这个循环正是强制它「只为 dsh 声明」的那道摩擦。验证：`harness-capabilities.spec.ts`（逐 Harness 版）
 
 ## 2. dsh 执行器适配插件上报
 
