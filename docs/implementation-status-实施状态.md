@@ -2,6 +2,28 @@
 
 > 本文件按批次**追加历史**（最新在顶部）。文中各段落的验证数字（如「65 文件 / 528 测试」）是**该批次当时的基线**，不是当前基线。已提交基线参见 `docs/CURRENT_STATUS-当前状态.md`；当前尚未提交的批次及其验证结果，以本文件顶部最新记录为准。
 
+## 2026-09-15 离线源码包融合回本地（f8fddaf → 3c7ae3a，55 提交快进）
+
+离线环境（CodeArts Doer，2026-09-09 至 09-15 晨）产出的 source bundle 已按 git 快进合并回本仓：
+`dsh-pactflow-source-20260915-1058.tar.gz` 内含完整 `.git`，其 main（`3c7ae3a`）严格领先本地 main
+（`f8fddaf`）55 提交、merge-base 即 `f8fddaf`，零冲突快进。内容：need-attachments 2/18→18/18 全链、
+五个全仓 review 修复批次、node-rerun-authorization / gitea-review-gate-closure / fail-open-closure /
+spec-corpus-corrections / manifest-producer-version-guard / need-comment-threads 归档、
+agent-skill-composition（六随包 skill + persona 收缩）、dsh-harness-telemetry 立项与 1–4/6 节推进、
+probe:readiness 探测脚本。
+
+**本地验证：`pnpm run check` 132 文件 / 1072 通过 / 15 跳过；`openspec validate --all --strict` 55/55。**
+
+**fork worktree 映射已在本地对齐并证实方向有载**：本机 `deepseek-harness-pactflow-p0` 原停在
+`codex/external-session-event-producers`（无声明升级通道），首跑 check 时
+`producer-upgrade.spec.ts`「0.6.0 旧会话升级写入」稳定转红（`conflicting declaration`）——
+该 spec 的前提是 linked fork 已含 upgrade channel。按第 440 行离线环境重建记录对齐：
+`pactflow-p0` ← `codex/external-producer-declaration-upgrade`（`06d3202146`）、
+`pactflow-upstream-pr` ← `codex/external-session-event-producers-clean`（`git switch`，无历史改动；
+upstream-pr 侧 directory-picker 未提交改动不跨分支差异、原样保留），两 fork `build:lib` 后 4/4 转绿。
+离线记录中「映射方向不影响产物」的工作假设就此收敛为：**构建产物确实无差，但 `packages/core/session`
+的升级通道行为有差，producer-upgrade 守卫正确区分了二者**。
+
 ## 2026-09-15 need-attachments 从 2/18 做到 18/18（附件能力完成）
 
 0.4 的阈值实测解除阻断后，第 2 节不再受任务 0 阻塞，整个 change 因此再无外部依赖——
